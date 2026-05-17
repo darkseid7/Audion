@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
@@ -63,6 +64,8 @@ pub struct SqueezePlayer {
     pub server_ip: Ipv4Addr,
     /// Whether this is a Cometd (HTTP) player vs binary SlimProto.
     pub is_cometd: bool,
+    /// Wall-clock instant when playback started (for CometD elapsed tracking).
+    pub play_started_at: Option<Instant>,
 }
 
 impl SqueezePlayer {
@@ -89,6 +92,7 @@ impl SqueezePlayer {
             suppress_track_finished: false,
             server_ip,
             is_cometd: false,
+            play_started_at: None,
         }
     }
 
@@ -110,6 +114,30 @@ impl SqueezePlayer {
             suppress_track_finished: false,
             server_ip: Ipv4Addr::LOCALHOST,
             is_cometd: true,
+            play_started_at: None,
+        }
+    }
+
+    /// Attach a TCP writer to this player (e.g., when a TCP connection arrives
+    /// for a player that was already registered via CometD).
+    pub fn set_writer(&mut self, writer: OwnedWriteHalf, server_ip: Ipv4Addr) {
+        self.writer = Some(writer);
+        self.server_ip = server_ip;
+    }
+
+    /// Get current elapsed time in milliseconds.
+    /// For CometD players, computes from wall-clock time since playback started.
+    /// For TCP players, returns the value from STAT timer events.
+    pub fn get_elapsed_ms(&self) -> u32 {
+        if self.is_cometd {
+            if let Some(started) = self.play_started_at {
+                if self.state == PlayerState::Playing {
+                    return self.elapsed_ms + started.elapsed().as_millis() as u32;
+                }
+            }
+            self.elapsed_ms
+        } else {
+            self.elapsed_ms
         }
     }
 
@@ -303,7 +331,7 @@ impl SqueezePlayer {
             state: self.state,
             capabilities: self.capabilities.clone(),
             current_track: self.queue.current().cloned(),
-            elapsed_ms: self.elapsed_ms,
+            elapsed_ms: self.get_elapsed_ms(),
             volume: self.volume,
             repeat: self.queue.repeat,
             shuffle: self.queue.shuffle,

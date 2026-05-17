@@ -2,6 +2,7 @@
 // handles the binary protocol, and orchestrates playback.
 
 use crate::squeeze::codec::{self, ClientMessage, MacAddress};
+use crate::squeeze::cometd::CometdState;
 use crate::squeeze::player::{PlayerMap, PlayerState, SqueezePlayer, StatAction};
 use crate::squeeze::streaming::StreamingState;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -33,6 +34,7 @@ pub fn start_slimproto_server_with_listener(
     listener: TcpListener,
     players: PlayerMap,
     streaming: StreamingState,
+    cometd: CometdState,
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -56,9 +58,10 @@ pub fn start_slimproto_server_with_listener(
             let players = players.clone();
             let streaming = streaming.clone();
             let shutdown = shutdown.clone();
+            let cometd = cometd.clone();
 
             tokio::spawn(async move {
-                handle_connection(stream, addr, players, streaming, shutdown).await;
+                handle_connection(stream, addr, players, streaming, cometd, shutdown).await;
             });
         }
 
@@ -71,6 +74,7 @@ async fn handle_connection(
     addr: SocketAddr,
     players: PlayerMap,
     streaming: StreamingState,
+    cometd: CometdState,
     shutdown: Arc<AtomicBool>,
 ) {
     let (mut reader, writer) = stream.into_split();
@@ -141,14 +145,21 @@ async fn handle_connection(
 
         match msg {
             ClientMessage::Stat(stat) => {
-                let action = {
+                let (action, state_changed) = {
                     let mut map = players.lock().await;
                     if let Some(player) = map.get_mut(&mac) {
-                        player.handle_stat(&stat)
+                        let old_state = player.state;
+                        let action = player.handle_stat(&stat);
+                        (action, player.state != old_state)
                     } else {
-                        StatAction::None
+                        (StatAction::None, false)
                     }
                 };
+
+                // Notify CometD subscribers if playback state changed
+                if state_changed {
+                    cometd.notify_player_status(&mac.to_string()).await;
+                }
 
                 match action {
                     StatAction::Prefetch => {
@@ -244,16 +255,23 @@ async fn read_and_parse_helo(
     match msg {
         ClientMessage::Helo(helo) => {
             let mac = helo.mac;
-            let player = SqueezePlayer::new(
-                mac,
-                format!("Squeeze Player {}", mac),
-                helo.capabilities,
-                writer,
-                server_ip,
-            );
-
             let mut map = players.lock().await;
-            map.insert(mac, player);
+
+            if let Some(existing) = map.get_mut(&mac) {
+                // Player already registered (e.g., via CometD). Merge TCP writer.
+                existing.set_writer(writer, server_ip);
+                existing.capabilities = helo.capabilities;
+                tracing::info!("Squeeze TCP: merged TCP writer into existing player {}", mac);
+            } else {
+                let player = SqueezePlayer::new(
+                    mac,
+                    format!("Squeeze Player {}", mac),
+                    helo.capabilities,
+                    writer,
+                    server_ip,
+                );
+                map.insert(mac, player);
+            }
 
             Some(mac)
         }

@@ -205,4 +205,9 @@ impl PlayQueue {
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
+
+    /// Find a track by its ID and return a clone.
+    pub fn find_track_by_id(&self, id: i64) -> Option<QueueTrack> {
+        self.tracks.iter().find(|t| t.id == id).cloned()
+    }
 }

@@ -6,7 +6,7 @@
 
 use crate::squeeze::codec::MacAddress;
 use crate::squeeze::cometd::{self, CometdState};
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
@@ -183,6 +183,86 @@ async fn server_status_handler() -> impl IntoResponse {
     }))
 }
 
+/// LMS-compatible cover art handler: GET /music/{id}/cover.jpg
+/// Extracts embedded album art from the audio file of the track with the given ID.
+async fn cover_art_handler(
+    State(state): State<HttpState>,
+    AxumPath(track_id): AxumPath<String>,
+) -> impl IntoResponse {
+    // Parse track ID (strip any extension like ".jpg")
+    let id_str = track_id.split('.').next().unwrap_or(&track_id);
+    let track_id: i64 = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::warn!("Squeeze HTTP: invalid cover art track ID: {}", track_id);
+            return Err((StatusCode::BAD_REQUEST, "Invalid track ID"));
+        }
+    };
+
+    // Search through all players' queues to find the track path
+    let track_path = {
+        let players = state.cometd.players.lock().await;
+        let mut found_path = None;
+        for player in players.values() {
+            if let Some(track) = player.queue.find_track_by_id(track_id) {
+                found_path = Some(track.path.clone());
+                break;
+            }
+        }
+        found_path
+    };
+
+    let Some(path) = track_path else {
+        tracing::debug!("Squeeze HTTP: no track found for cover art ID {}", track_id);
+        return Err((StatusCode::NOT_FOUND, "Track not found"));
+    };
+
+    // Extract embedded cover art using lofty
+    let art_data = tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, String)> {
+        use lofty::prelude::*;
+        use lofty::probe::Probe;
+
+        let tagged_file = Probe::open(&path)
+            .ok()?
+            .read()
+            .ok()?;
+
+        // Try all tags for pictures
+        for tag in tagged_file.tags() {
+            if let Some(pic) = tag.pictures().first() {
+                let mime = match pic.mime_type() {
+                    Some(lofty::picture::MimeType::Png) => "image/png".to_string(),
+                    Some(lofty::picture::MimeType::Jpeg) => "image/jpeg".to_string(),
+                    Some(lofty::picture::MimeType::Bmp) => "image/bmp".to_string(),
+                    Some(lofty::picture::MimeType::Gif) => "image/gif".to_string(),
+                    _ => "image/jpeg".to_string(),
+                };
+                return Some((pic.data().to_vec(), mime));
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match art_data {
+        Some((data, mime)) => {
+            Ok((
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "public, max-age=86400".to_string()),
+                ],
+                data,
+            ))
+        }
+        None => {
+            tracing::debug!("Squeeze HTTP: no embedded art for track {}", track_id);
+            Err((StatusCode::NOT_FOUND, "No cover art found"))
+        }
+    }
+}
+
 /// Catch-all handler — log any unhandled requests for debugging.
 async fn fallback_handler(uri: axum::http::Uri, method: axum::http::Method, body: axum::body::Bytes) -> impl IntoResponse {
     let body_str = String::from_utf8_lossy(&body);
@@ -214,6 +294,8 @@ pub async fn start_streaming_server_with_listener(
 
     let app = Router::new()
         .route("/stream", axum::routing::get(stream_handler))
+        .route("/music/{id}/cover.jpg", axum::routing::get(cover_art_handler))
+        .route("/music/{id}/cover", axum::routing::get(cover_art_handler))
         .route("/cometd", axum::routing::post(cometd_route_handler))
         .route("/cometd/connect", axum::routing::post(cometd_route_handler))
         .route("/cometd/subscribe", axum::routing::post(cometd_route_handler))

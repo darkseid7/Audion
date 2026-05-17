@@ -1,0 +1,562 @@
+﻿cargo : warning: unused import: `crate::squeeze::streaming::StreamingState`
+En línea: 1 Carácter: 46
++ ... cargo\bin"; cargo check --manifest-path src-tauri/Cargo.toml 2>&1 | O ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...StreamingState` 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ --> src\commands\squeeze.rs:7:5
+  |
+7 | use crate::squeeze::streaming::StreamingState;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::squeeze::queue::QueueTrack`
+  --> src\squeeze\cometd.rs:12:5
+   |
+12 | use crate::squeeze::queue::QueueTrack;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `axum::http::StatusCode`
+  --> src\squeeze\cometd.rs:14:5
+   |
+14 | use axum::http::StatusCode;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `axum::response::IntoResponse`
+  --> src\squeeze\cometd.rs:15:5
+   |
+15 | use axum::response::IntoResponse;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `axum::Json`
+  --> src\squeeze\cometd.rs:16:5
+   |
+16 | use axum::Json;
+   |     ^^^^^^^^^^
+
+warning: unused imports: `Ipv4Addr` and `SocketAddr`
+ --> src\squeeze\discovery.rs:6:16
+  |
+6 | use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+  |                ^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `WindowEvent`
+  --> src\lib.rs:26:41
+   |
+26 | use tauri::{Emitter, Listener, Manager, WindowEvent};
+   |                                         ^^^^^^^^^^^
+
+warning: unused variable: `total_items`
+  --> src\commands\covers.rs:90:5
+   |
+90 |     total_items: usize,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_total_items`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: value assigned to `download_dir` is never read
+    --> src\commands\library.rs:1296:28
+     |
+1296 |     let mut download_dir = None;
+     |                            ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by 
+default
+
+warning: unused variable: `server_url`
+   --> src\sync\mod.rs:199:9
+    |
+199 |     let server_url = &sync_state.server_url;
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_server_url`
+
+warning: unused variable: `art_data`
+   --> src\db\queries.rs:253:5
+    |
+253 |     art_data: Option<&[u8]>,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: 
+`_art_data`
+
+warning: unused variable: `map_time`
+   --> src\db\queries.rs:445:9
+    |
+445 |     let map_time = map_start.elapsed();
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_map_time`
+
+warning: variable does not need to be mutable
+  --> src\scanner\metadata.rs:65:20
+   |
+65 |                 Ok(mut probe) => {
+   |                    ----^^^^^
+   |                    |
+   |                    help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `probe`
+  --> src\scanner\metadata.rs:65:20
+   |
+65 |                 Ok(mut probe) => {
+   |                    ^^^^^^^^^ help: if this is intentional, prefix it with 
+an underscore: `_probe`
+
+warning: field `0` is never read
+  --> src\commands\library.rs:36:18
+   |
+36 |     FolderImport(i64), // carries playlist_id
+   |     ------------ ^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `ScanSource` has derived impls for the traits `Clone` and `Debug`, 
+but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+   |
+36 -     FolderImport(i64), // carries playlist_id
+36 +     FolderImport(()), // carries playlist_id
+   |
+
+warning: function `import_audio_bytes` is never used
+   --> src\commands\library.rs:135:14
+    |
+135 | pub async fn import_audio_bytes(
+    |              ^^^^^^^^^^^^^^^^^^
+
+warning: field `duration` is never read
+  --> src\commands\metadata.rs:27:9
+   |
+19 | pub struct DownloadAudioInput {
+   |            ------------------ field in this struct
+...
+27 |     pub duration: Option<i32>,
+   |         ^^^^^^^^
+
+warning: function `read_metadata_gracefully` is never used
+   --> src\commands\metadata.rs:556:8
+    |
+556 | pub fn read_metadata_gracefully(path: &Path) -> Option<lofty::tag::Tag> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_metadata_fields` is never used
+   --> src\commands\metadata.rs:598:8
+    |
+598 | pub fn extract_metadata_fields(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `rel_type` is never read
+  --> src\commands\musicbrainz.rs:49:5
+   |
+47 | struct MbRelation {
+   |        ---------- field in this struct
+48 |     #[serde(rename = "type")]
+49 |     rel_type: String,
+   |     ^^^^^^^^
+   |
+   = note: `MbRelation` has derived impls for the traits `Clone` and `Debug`, 
+but these are intentionally ignored during dead code analysis
+
+warning: field `id` is never read
+   --> src\commands\musicbrainz.rs:881:5
+    |
+880 | struct MbReleaseInGroup {
+    |        ---------------- field in this struct
+881 |     id: String,
+    |     ^^
+    |
+    = note: `MbReleaseInGroup` has a derived impl for the trait `Debug`, but 
+this is intentionally ignored during dead code analysis
+
+warning: field `track_count` is never read
+    --> src\commands\musicbrainz.rs:1099:5
+     |
+1094 | struct MbReleaseInGroupDetail {
+     |        ---------------------- field in this struct
+...
+1099 |     track_count: Option<u32>,
+     |     ^^^^^^^^^^^
+     |
+     = note: `MbReleaseInGroupDetail` has a derived impl for the trait 
+`Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `get_all_tracks` is never used
+   --> src\db\queries.rs:406:8
+    |
+406 | pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `get_album_art_path` is never used
+   --> src\db\queries.rs:614:8
+    |
+614 | pub fn get_album_art_path(conn: &Connection, album_id: i64) -> 
+Result<Option<String>> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `get_all_albums` is never used
+   --> src\db\queries.rs:624:8
+    |
+624 | pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `get_all_albums_lightweight` is never used
+   --> src\db\queries.rs:653:8
+    |
+653 | pub fn get_all_albums_lightweight(conn: &Connection) -> 
+Result<Vec<Album>> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remove_music_folder` is never used
+    --> src\db\queries.rs:1046:8
+     |
+1046 | pub fn remove_music_folder(conn: &Connection, path: &str) -> Result<()> 
+{
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `increment_sync_retry` is never used
+    --> src\db\queries.rs:1507:8
+     |
+1507 | pub fn increment_sync_retry(conn: &Connection, ids: &[i64]) -> 
+Result<()> {
+     |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_playlist_server_id` is never used
+    --> src\db\queries.rs:1573:8
+     |
+1573 | pub fn get_playlist_server_id(conn: &Connection, local_id: i64) -> 
+Result<Option<String>> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_track_content_hash` is never used
+    --> src\db\queries.rs:1611:8
+     |
+1611 | pub fn get_track_content_hash(conn: &Connection, track_id: i64) -> 
+Result<Option<String>> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_track_sync_info` is never used
+    --> src\db\queries.rs:1621:8
+     |
+1621 | pub fn get_track_sync_info(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_local_id_from_server` is never used
+    --> src\db\queries.rs:1701:8
+     |
+1701 | pub fn get_local_id_from_server(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `total_scanned` is never read
+ --> src\scanner\walker.rs:9:9
+  |
+7 | pub struct ScanResult {
+  |            ---------- field in this struct
+8 |     pub audio_files: Vec<String>,
+9 |     pub total_scanned: usize,
+  |         ^^^^^^^^^^^^^
+
+warning: function `init_allowed_dirs` is never used
+  --> src\security.rs:12:8
+   |
+12 | pub fn init_allowed_dirs(dirs: Vec<PathBuf>) {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `add_allowed_dir` is never used
+  --> src\security.rs:17:8
+   |
+17 | pub fn add_allowed_dir(dir: PathBuf) {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `validate_paths` is never used
+   --> src\security.rs:111:8
+    |
+111 | pub fn validate_paths(paths: &[&Path]) -> Result<(), String> {
+    |        ^^^^^^^^^^^^^^
+
+warning: variants `Start` and `Skip` are never constructed
+  --> src\squeeze\codec.rs:24:5
+   |
+23 | pub enum StrmCommand {
+   |          ----------- variants in this enum
+24 |     Start,      // 's'
+   |     ^^^^^
+...
+30 |     Skip,       // 'a'
+   |     ^^^^
+   |
+   = note: `StrmCommand` has derived impls for the traits `Clone` and `Debug`, 
+but these are intentionally ignored during dead code analysis
+
+warning: fields `device_id` and `revision` are never read
+   --> src\squeeze\codec.rs:213:9
+    |
+212 | pub struct HeloMessage {
+    |            ----------- fields in this struct
+213 |     pub device_id: u8,
+    |         ^^^^^^^^^
+214 |     pub revision: u8,
+    |         ^^^^^^^^
+    |
+    = note: `HeloMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+   --> src\squeeze\codec.rs:271:9
+    |
+269 | pub struct StatMessage {
+    |            ----------- fields in this struct
+270 |     pub event: StatEvent,
+271 |     pub buffer_size: u32,
+    |         ^^^^^^^^^^^
+272 |     pub buffer_fullness: u32,
+    |         ^^^^^^^^^^^^^^^
+273 |     pub bytes_received: u64,
+    |         ^^^^^^^^^^^^^^
+274 |     pub signal_strength: u16,
+    |         ^^^^^^^^^^^^^^^
+275 |     pub jiffies: u32,
+276 |     pub output_buffer_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^
+277 |     pub output_buffer_fullness: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+278 |     pub elapsed_seconds: u32,
+    |         ^^^^^^^^^^^^^^^
+279 |     pub elapsed_milliseconds: u32,
+280 |     pub timestamp: u32,
+    |         ^^^^^^^^^
+    |
+    = note: `StatMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `0` is never read
+   --> src\squeeze\codec.rs:288:9
+    |
+288 |     Bye(u8),
+    |     --- ^^
+    |     |
+    |     field in this variant
+    |
+    = note: `ClientMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+    |
+288 -     Bye(u8),
+288 +     Bye(()),
+    |
+
+warning: field `0` is never read
+   --> src\squeeze\codec.rs:289:10
+    |
+289 |     Dsco(u8),
+    |     ---- ^^
+    |     |
+    |     field in this variant
+    |
+    = note: `ClientMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+    |
+289 -     Dsco(u8),
+289 +     Dsco(()),
+    |
+
+warning: field `0` is never read
+   --> src\squeeze\codec.rs:290:10
+    |
+290 |     Resp(Vec<u8>),
+    |     ---- ^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `ClientMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+    |
+290 -     Resp(Vec<u8>),
+290 +     Resp(()),
+    |
+
+warning: field `0` is never read
+   --> src\squeeze\codec.rs:291:10
+    |
+291 |     Meta(Vec<u8>),
+    |     ---- ^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `ClientMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+    |
+291 -     Meta(Vec<u8>),
+291 +     Meta(()),
+    |
+
+warning: field `1` is never read
+   --> src\squeeze\codec.rs:293:21
+    |
+293 |     Unknown(String, Vec<u8>),
+    |     -------         ^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `ClientMessage` has derived impls for the traits `Clone` and 
+`Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning 
+while preserving the field numbering, or remove the field
+    |
+293 -     Unknown(String, Vec<u8>),
+293 +     Unknown(String, ()),
+    |
+
+warning: fields `version` and `supported_connection_types` are never read
+  --> src\squeeze\cometd.rs:31:9
+   |
+26 | pub struct BayeuxRequest {
+   |            ------------- fields in this struct
+...
+31 |     pub version: Option<String>,
+   |         ^^^^^^^
+...
+40 |     pub supported_connection_types: Option<Vec<String>>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `BayeuxRequest` has a derived impl for the trait `Debug`, but this 
+is intentionally ignored during dead code analysis
+
+warning: fields `uuid` and `name` are never read
+   --> src\squeeze\cometd.rs:108:9
+    |
+105 | pub struct CometdClient {
+    |            ------------ fields in this struct
+...
+108 |     pub uuid: String,
+    |         ^^^^
+109 |     pub name: String,
+    |         ^^^^
+    |
+    = note: `CometdClient` has a derived impl for the trait `Debug`, but this 
+is intentionally ignored during dead code analysis
+
+warning: methods `push_to_player` and `connected_macs` are never used
+   --> src\squeeze\cometd.rs:873:18
+    |
+871 | impl CometdState {
+    | ---------------- methods in this implementation
+872 |     /// Push a message to a player identified by MAC. Wakes the 
+long-poll connection.
+873 |     pub async fn push_to_player(&self, mac_str: &str, message: 
+serde_json::Value) {
+    |                  ^^^^^^^^^^^^^^
+...
+890 |     pub async fn connected_macs(&self) -> Vec<String> {
+    |                  ^^^^^^^^^^^^^^
+
+warning: variant `Disconnected` is never constructed
+  --> src\squeeze\player.rs:20:5
+   |
+19 | pub enum PlayerState {
+   |          ----------- variant in this enum
+20 |     Disconnected,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `PlayerState` has derived impls for the traits `Clone` and `Debug`, 
+but these are intentionally ignored during dead code analysis
+
+warning: method `is_empty` is never used
+   --> src\squeeze\queue.rs:205:12
+    |
+ 37 | impl PlayQueue {
+    | -------------- method in this implementation
+...
+205 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: field `generation` is never read
+  --> src\squeeze\streaming.rs:24:9
+   |
+22 | pub struct StreamEntry {
+   |            ----------- field in this struct
+23 |     pub path: PathBuf,
+24 |     pub generation: u64,
+   |         ^^^^^^^^^^
+   |
+   = note: `StreamEntry` has derived impls for the traits `Clone` and `Debug`, 
+but these are intentionally ignored during dead code analysis
+
+warning: field `gen` is never read
+  --> src\squeeze\streaming.rs:70:5
+   |
+67 | struct StreamQuery {
+   |        ----------- field in this struct
+...
+70 |     gen: u64,
+   |     ^^^
+   |
+   = note: `StreamQuery` has a derived impl for the trait `Debug`, but this is 
+intentionally ignored during dead code analysis
+
+warning: field `errors` is never read
+  --> src\sync\mod.rs:72:5
+   |
+66 | struct SyncPushResponse {
+   |        ---------------- field in this struct
+...
+72 |     errors: Option<Vec<serde_json::Value>>,
+   |     ^^^^^^
+   |
+   = note: `SyncPushResponse` has a derived impl for the trait `Debug`, but 
+this is intentionally ignored during dead code analysis
+
+warning: fields `usage` and `limits` are never read
+  --> src\sync\mod.rs:94:5
+   |
+86 | struct SyncFullResponse {
+   |        ---------------- fields in this struct
+...
+94 |     usage: Option<serde_json::Value>,
+   |     ^^^^^
+95 |     limits: Option<serde_json::Value>,
+   |     ^^^^^^
+   |
+   = note: `SyncFullResponse` has a derived impl for the trait `Debug`, but 
+this is intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+   --> src\sync\mod.rs:107:12
+    |
+106 | impl SyncState {
+    | -------------- associated function in this implementation
+107 |     pub fn new() -> Self {
+    |            ^^^
+
+warning: direct cast of function item into an integer
+   --> src\windows_thumbar.rs:309:87
+    |
+309 |         let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, 
+thumbar_wndproc as _) };
+    |                                                                          
+             ^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+309 |         let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, 
+thumbar_wndproc as *const () as _) };
+    |                                                                          
+             ++++++++++++
+
+warning: `audion` (lib) generated 55 warnings (run `cargo fix --lib -p audion` 
+to apply 14 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.74s

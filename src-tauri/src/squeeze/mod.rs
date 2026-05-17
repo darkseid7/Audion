@@ -89,6 +89,7 @@ impl SqueezeServer {
             tcp_listener,
             self.players.clone(),
             self.streaming.clone(),
+            self.cometd.clone(),
             self.shutdown_flag.clone(),
         );
         self.handles.push(tcp_handle);

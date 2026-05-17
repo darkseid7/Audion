@@ -674,11 +674,32 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
     let cur_index = player.queue.current_position().unwrap_or(0);
     let cur_track = player.queue.current();
     let duration = cur_track.map(|t| t.duration).unwrap_or(0.0);
-    let elapsed = player.elapsed_ms as f64 / 1000.0;
+    let elapsed = player.get_elapsed_ms() as f64 / 1000.0;
 
-    // Build playlist_loop with current track info
+    // Build item_loop with current track info (JiveItem format for Squeezer)
+    let mut item_loop = Vec::new();
     let mut playlist_loop = Vec::new();
     if let Some(track) = cur_track {
+        // JiveItem format: "text" for display, "icon-id" for artwork
+        let display_text = format!("{}\n{}", track.title, track.artist);
+        item_loop.push(serde_json::json!({
+            "playlist index": cur_index,
+            "id": track.id,
+            "text": display_text,
+            "icon-id": track.id.to_string(),
+            "track": track.title,
+            "artist": track.artist,
+            "album": track.album,
+            "duration": track.duration,
+            "trackType": "local",
+            "params": {
+                "track_id": track.id,
+            },
+            "style": "itemplay",
+            "artwork_track_id": track.id.to_string(),
+            "coverid": track.id.to_string(),
+        }));
+        // Also keep playlist_loop for explicit status requests
         playlist_loop.push(serde_json::json!({
             "playlist index": cur_index,
             "id": track.id,
@@ -687,6 +708,8 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
             "album": track.album,
             "duration": track.duration,
             "trackType": track.format,
+            "artwork_track_id": track.id.to_string(),
+            "coverid": track.id.to_string(),
         }));
     }
 
@@ -697,6 +720,9 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
             "artist": track.artist,
             "album": track.album,
             "duration": track.duration,
+            "artwork_track_id": track.id.to_string(),
+            "coverid": track.id.to_string(),
+            "artwork_url": format!("/music/{}/cover.jpg", track.id),
         })
     } else {
         serde_json::json!({})
@@ -717,6 +743,7 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
         "playlist shuffle": if player.queue.shuffle { 1 } else { 0 },
         "playlist_cur_index": cur_index,
         "playlist_tracks": player.queue.len(),
+        "item_loop": item_loop,
         "playlist_loop": playlist_loop,
         "seq_no": 0,
         "can_seek": if duration > 0.0 { 1 } else { 0 },

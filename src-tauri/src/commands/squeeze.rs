@@ -1,13 +1,14 @@
 // Tauri IPC commands for Squeeze Connect.
 
 use crate::squeeze::codec::MacAddress;
-use crate::squeeze::player::PlayerInfo;
+use crate::squeeze::player::{PlayerInfo, PlayerState};
 use crate::squeeze::queue::{QueueTrack, RepeatMode};
 use crate::squeeze::server::HTTP_PORT;
 use crate::squeeze::streaming::StreamingState;
 use crate::squeeze::SqueezeServer;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -118,6 +119,12 @@ pub async fn squeeze_play(
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.start_stream(HTTP_PORT, 0).await?;
+        // CometD players don't send TCP STAT messages, so set state directly
+        if player.is_cometd {
+            player.state = PlayerState::Playing;
+            player.elapsed_ms = 0;
+            player.play_started_at = Some(Instant::now());
+        }
     }
 
     // Notify CometD subscribers
@@ -133,6 +140,12 @@ pub async fn squeeze_pause(mac: String, state: State<'_, SqueezeState>) -> Resul
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        if player.is_cometd {
+            // Freeze elapsed time before pausing
+            player.elapsed_ms = player.get_elapsed_ms();
+            player.play_started_at = None;
+            player.state = PlayerState::Paused;
+        }
         player.pause().await?;
     }
     server.cometd.notify_player_status(&mac).await;
@@ -146,6 +159,11 @@ pub async fn squeeze_resume(mac: String, state: State<'_, SqueezeState>) -> Resu
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        if player.is_cometd {
+            // Resume wall-clock tracking from frozen elapsed
+            player.play_started_at = Some(Instant::now());
+            player.state = PlayerState::Playing;
+        }
         player.resume().await?;
     }
     server.cometd.notify_player_status(&mac).await;
@@ -159,6 +177,10 @@ pub async fn squeeze_stop(mac: String, state: State<'_, SqueezeState>) -> Result
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        if player.is_cometd {
+            player.elapsed_ms = 0;
+            player.play_started_at = None;
+        }
         player.stop().await?;
     }
     server.cometd.notify_player_status(&mac).await;
@@ -229,6 +251,11 @@ pub async fn squeeze_next(mac: String, state: State<'_, SqueezeState>) -> Result
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.seek_offset_ms = 0;
         player.start_stream(HTTP_PORT, 0).await?;
+        if player.is_cometd {
+            player.state = PlayerState::Playing;
+            player.elapsed_ms = 0;
+            player.play_started_at = Some(Instant::now());
+        }
     }
 
     // Notify CometD subscribers
@@ -282,6 +309,11 @@ pub async fn squeeze_previous(mac: String, state: State<'_, SqueezeState>) -> Re
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.seek_offset_ms = 0;
         player.start_stream(HTTP_PORT, 0).await?;
+        if player.is_cometd {
+            player.state = PlayerState::Playing;
+            player.elapsed_ms = 0;
+            player.play_started_at = Some(Instant::now());
+        }
     }
 
     // Notify CometD subscribers
@@ -340,6 +372,11 @@ pub async fn squeeze_seek(
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.start_stream(HTTP_PORT, 0).await?;
+        if player.is_cometd {
+            player.state = PlayerState::Playing;
+            player.elapsed_ms = (position_seconds * 1000.0) as u32;
+            player.play_started_at = Some(Instant::now());
+        }
     }
 
     server.cometd.notify_player_status(&mac).await;
