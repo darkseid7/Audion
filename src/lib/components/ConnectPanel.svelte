@@ -19,10 +19,147 @@
     getTrackByIdSync,
   } from "$lib/stores/library";
   import { getTrackCoverSrc } from "$lib/api/tauri";
+  import {
+    squeezeStartServer,
+    squeezeStopServer,
+    squeezeIsRunning,
+    squeezeGetPlayers,
+    squeezePause,
+    squeezeResume,
+    squeezeStop,
+    squeezeNext,
+    squeezePrevious,
+    squeezeSetVolume,
+    squeezePlay,
+    type SqueezePlayerInfo,
+    type SqueezeQueueTrack,
+  } from "$lib/api/tauri";
   import { get } from "svelte/store";
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount, onDestroy } from "svelte";
 
   const dispatch = createEventDispatcher();
+
+  // ── Squeeze state ──────────────────────────────────────────────────────────
+  let squeezeRunning = false;
+  let squeezePlayers: SqueezePlayerInfo[] = [];
+  let squeezePolling: ReturnType<typeof setInterval> | null = null;
+  let squeezeStarting = false;
+  let activeSqueezePlayer: string | null = null;
+
+  onMount(async () => {
+    try {
+      squeezeRunning = await squeezeIsRunning();
+      if (squeezeRunning) startSqueezePolling();
+    } catch {}
+  });
+
+  onDestroy(() => {
+    if (squeezePolling) clearInterval(squeezePolling);
+  });
+
+  function startSqueezePolling() {
+    if (squeezePolling) return;
+    pollSqueezePlayers();
+    squeezePolling = setInterval(pollSqueezePlayers, 1000);
+  }
+
+  function stopSqueezePolling() {
+    if (squeezePolling) {
+      clearInterval(squeezePolling);
+      squeezePolling = null;
+    }
+  }
+
+  async function pollSqueezePlayers() {
+    try {
+      squeezePlayers = await squeezeGetPlayers();
+    } catch {}
+  }
+
+  async function toggleSqueezeServer() {
+    squeezeStarting = true;
+    try {
+      if (squeezeRunning) {
+        await squeezeStopServer();
+        squeezeRunning = false;
+        squeezePlayers = [];
+        stopSqueezePolling();
+        if (activeSqueezePlayer) {
+          activeSqueezePlayer = null;
+          activeBackend.set("none");
+        }
+      } else {
+        await squeezeStartServer();
+        squeezeRunning = true;
+        startSqueezePolling();
+      }
+    } catch (e) {
+      console.error("Squeeze toggle error:", e);
+    }
+    squeezeStarting = false;
+  }
+
+  function selectSqueezePlayer(player: SqueezePlayerInfo) {
+    if (activeSqueezePlayer === player.mac) {
+      activeSqueezePlayer = null;
+      activeBackend.set("none");
+    } else {
+      activeSqueezePlayer = player.mac;
+      activeBackend.set("squeeze" as any);
+      activeRemoteDevice.set(null);
+    }
+  }
+
+  async function handleSqueezeCommand(mac: string, cmd: string) {
+    try {
+      switch (cmd) {
+        case "pause": await squeezePause(mac); break;
+        case "resume": await squeezeResume(mac); break;
+        case "stop": await squeezeStop(mac); break;
+        case "next": await squeezeNext(mac); break;
+        case "previous": await squeezePrevious(mac); break;
+      }
+    } catch (e) {
+      console.error("Squeeze command error:", e);
+    }
+  }
+
+  async function handleSqueezeVolume(mac: string, e: Event) {
+    const target = e.target as HTMLInputElement;
+    const vol = parseInt(target.value);
+    try {
+      await squeezeSetVolume(mac, vol);
+    } catch {}
+  }
+
+  // Send current Audion queue to the Squeeze player
+  async function playOnSqueezePlayer(mac: string) {
+    const $library = get(libraryTracks);
+    const $current = get(currentTrack);
+    if (!$current) return;
+
+    // Build tracks from library
+    const tracks: SqueezeQueueTrack[] = $library
+      .filter((t: any) => t.path)
+      .map((t: any) => ({
+        id: t.id,
+        title: t.title || "Unknown",
+        artist: t.artist || "Unknown",
+        album: t.album || "Unknown",
+        path: t.path,
+        duration: t.duration || 0,
+        format: t.format || "mp3",
+      }));
+
+    const startIndex = tracks.findIndex((t) => t.id === $current.id);
+    if (startIndex === -1) return;
+
+    try {
+      await squeezePlay(mac, tracks, startIndex);
+    } catch (e) {
+      console.error("Squeeze play error:", e);
+    }
+  }
 
   // Deduplication and sorting (active device first)
   $: devices = $wsStore.devices
@@ -151,9 +288,116 @@
       </div>
     </div>
 
+    <!-- Squeeze Connect Section -->
     <div class="device-section">
       <div class="section-header">
-        <span>Available to connect</span>
+        <span>Squeeze Connect</span>
+        <div class="line"></div>
+        <button
+          class="squeeze-toggle"
+          class:active={squeezeRunning}
+          on:click={toggleSqueezeServer}
+          disabled={squeezeStarting}
+        >
+          {squeezeStarting ? '...' : squeezeRunning ? 'Stop' : 'Start'}
+        </button>
+      </div>
+
+      {#if squeezeRunning}
+        <div class="device-grid">
+          {#if squeezePlayers.length === 0}
+            <div class="empty-state compact" in:fade>
+              <p>Waiting for Squeeze players...</p>
+              <span>Ensure your device (e.g. Eversolo) is on the same network.</span>
+            </div>
+          {:else}
+            {#each squeezePlayers as player (player.mac)}
+              <div
+                class="device-card"
+                class:active={activeSqueezePlayer === player.mac}
+                in:fly={{ y: 20, duration: 300 }}
+              >
+                <div class="card-main">
+                  <div class="platform-icon squeeze-icon">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                      <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+                    </svg>
+                  </div>
+                  <div class="card-details">
+                    <span class="device-name">{player.name}</span>
+                    {#if player.current_track}
+                      <div class="track-info">
+                        <span class="dot" class:playing={player.state === 'Playing'}></span>
+                        <span class="track-text">{player.current_track.title} — {player.current_track.artist}</span>
+                      </div>
+                    {:else}
+                      <span class="idle-text">{player.state === 'Stopped' ? 'Ready' : player.state}</span>
+                    {/if}
+                  </div>
+
+                  {#if player.current_track}
+                    <div class="mini-controls">
+                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'previous')}>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+                      </button>
+                      <button class="icon-btn highlight" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, player.state === 'Playing' ? 'pause' : 'resume')}>
+                        {#if player.state === 'Playing'}
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                        {:else}
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        {/if}
+                      </button>
+                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'next')}>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+
+                <!-- Volume slider -->
+                <div class="squeeze-volume">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" opacity="0.5">
+                    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+                  </svg>
+                  <input
+                    type="range"
+                    min="0" max="100"
+                    value={player.volume}
+                    on:input={(e) => handleSqueezeVolume(player.mac, e)}
+                    class="volume-slider"
+                  />
+                </div>
+
+                <div class="card-actions">
+                  <button
+                    class="btn secondary"
+                    class:active={activeSqueezePlayer === player.mac}
+                    on:click={() => selectSqueezePlayer(player)}
+                  >
+                    {activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
+                  </button>
+                  <button
+                    class="btn primary"
+                    on:click={() => playOnSqueezePlayer(player.mac)}
+                  >
+                    Play Here
+                  </button>
+                </div>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {:else}
+        <div class="empty-state compact" in:fade>
+          <p>Server not running</p>
+          <span>Start the Squeeze server to discover players on your network.</span>
+        </div>
+      {/if}
+    </div>
+
+    <div class="device-section">
+      <div class="section-header">
+        <span>Cloud Devices</span>
         <div class="line"></div>
       </div>
 
@@ -783,6 +1027,72 @@
     margin: 0 0 4px 0;
     color: #888;
     font-weight: 700;
+  }
+
+  /* Squeeze-specific styles */
+  .squeeze-toggle {
+    padding: 4px 12px;
+    border-radius: 8px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: #888;
+    transition: 0.2s;
+  }
+  .squeeze-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+  }
+  .squeeze-toggle.active {
+    background: color-mix(in srgb, var(--accent-primary), transparent 85%);
+    border-color: color-mix(in srgb, var(--accent-primary), transparent 60%);
+    color: var(--accent-primary);
+  }
+  .squeeze-toggle:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
+
+  .squeeze-icon {
+    background: color-mix(in srgb, var(--accent-primary), transparent 90%) !important;
+    color: var(--accent-primary) !important;
+  }
+
+  .squeeze-volume {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 4px;
+    margin-bottom: 12px;
+  }
+
+  .volume-slider {
+    flex: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    outline: none;
+  }
+  .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    cursor: pointer;
+  }
+
+  .empty-state.compact {
+    padding: 20px;
+  }
+  .empty-state.compact p {
+    font-size: 0.85rem;
   }
 
   @media (max-width: 480px) {

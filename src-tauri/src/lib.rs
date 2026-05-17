@@ -9,6 +9,7 @@ mod discord;
 mod windows_thumbar;
 mod scanner;
 mod security;
+mod squeeze;
 mod sync;
 mod utils;
 
@@ -329,6 +330,7 @@ pub fn run() {
 
             app.manage(database);
             app.manage(commands::listenbrainz::ListenBrainzState::new());
+            app.manage(commands::squeeze::SqueezeState::new());
 
             // Initialize Discord RPC state (desktop only)
             #[cfg(desktop)]
@@ -658,6 +660,23 @@ pub fn run() {
                     commands::window::set_close_to_tray,
                     commands::window::get_minimize_to_tray,
                     commands::window::set_minimize_to_tray,
+                    // Squeeze Connect commands
+                    commands::squeeze::squeeze_start_server,
+                    commands::squeeze::squeeze_stop_server,
+                    commands::squeeze::squeeze_is_running,
+                    commands::squeeze::squeeze_get_players,
+                    commands::squeeze::squeeze_get_player_state,
+                    commands::squeeze::squeeze_play,
+                    commands::squeeze::squeeze_pause,
+                    commands::squeeze::squeeze_resume,
+                    commands::squeeze::squeeze_stop,
+                    commands::squeeze::squeeze_set_volume,
+                    commands::squeeze::squeeze_next,
+                    commands::squeeze::squeeze_previous,
+                    commands::squeeze::squeeze_seek,
+                    commands::squeeze::squeeze_set_repeat,
+                    commands::squeeze::squeeze_set_shuffle,
+                    commands::squeeze::squeeze_get_queue,
                 ]
             }
             #[cfg(mobile)]

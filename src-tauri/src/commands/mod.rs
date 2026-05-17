@@ -11,6 +11,7 @@ pub mod musicbrainz;
 pub mod network;
 pub mod playlist;
 pub mod plugin;
+pub mod squeeze;
 pub mod sync;
 
 pub use activity::*;

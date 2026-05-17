@@ -84,6 +84,15 @@ rayon = "1.10"
  # Thread-safe channels
 crossbeam = "0.8"
 
+# Squeeze Connect (SlimProto server + HTTP streaming)
+axum = "0.8"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+mac_address = "1.1"
+rand = "0.9"
+
 # Move files to trash instead of permanent deletion (security, desktop only)
 # trash is in [target.'cfg(desktop)'.dependencies]
 
