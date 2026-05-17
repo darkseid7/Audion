@@ -5,6 +5,7 @@
         loadLibrary,
         getAlbumCoverFromTracks,
         loadMoreAlbums,
+        tracks,
     } from "$lib/stores/library";
     import { contextMenu } from "$lib/stores/ui";
     import { deleteAlbum, getTracksByAlbum } from "$lib/api/tauri";
@@ -40,6 +41,185 @@
     $: playingAlbumId = $currentAlbumId;
     $: playing = $isPlaying;
     $: pausedAlbumId = !playing ? playingAlbumId : null;
+
+    type AlbumAudioInfo = {
+        format: string | null;
+        bitrate: number | null;
+        sampleRate: number | null;
+        bitDepth: number | null;
+    };
+
+    function normalizeFormat(format: string | null | undefined): string | null {
+        if (!format) return null;
+        const upper = format.toUpperCase();
+        if (upper.includes("MPEG") || upper.includes("MP3")) return "MP3";
+        if (upper.includes("HI_RES") || upper.includes("HIRES")) return "HI-RES";
+        if (upper.includes("LOSSLESS")) return "LOSSLESS";
+        return upper;
+    }
+
+    function parseSampleRateFromMetadata(metadataJson: string | null | undefined): number | null {
+        if (!metadataJson) return null;
+
+        try {
+            const parsed = JSON.parse(metadataJson) as Record<string, unknown>;
+
+            const directSampleRate = parsed.__sample_rate_hz;
+            if (typeof directSampleRate === "number") return directSampleRate;
+
+            const values = Object.values(parsed);
+
+            for (const value of values) {
+                if (!value) continue;
+
+                if (typeof value === "number") {
+                    if (value >= 4000 && value <= 768000) return value;
+                    continue;
+                }
+
+                const text = String(value);
+
+                const khzMatch = text.match(/(\d+(?:\.\d+)?)\s*k\s*hz/i);
+                if (khzMatch) {
+                    return Math.round(parseFloat(khzMatch[1]) * 1000);
+                }
+
+                const hzMatch = text.match(/\b(\d{4,6})\s*hz\b/i);
+                if (hzMatch) {
+                    return Number(hzMatch[1]);
+                }
+            }
+        } catch {
+            return null;
+        }
+
+        return null;
+    }
+
+    function parseBitDepthFromMetadata(metadataJson: string | null | undefined): number | null {
+        if (!metadataJson) return null;
+
+        try {
+            const parsed = JSON.parse(metadataJson) as Record<string, unknown>;
+
+            const directBitDepth = parsed.__bit_depth;
+            if (typeof directBitDepth === "number") return directBitDepth;
+
+            for (const value of Object.values(parsed)) {
+                if (!value) continue;
+                if (typeof value === "number") continue;
+
+                const text = String(value);
+                const bitMatch = text.match(/\b(16|24|32)\s*bit\b/i);
+                if (bitMatch) {
+                    return Number(bitMatch[1]);
+                }
+            }
+        } catch {
+            return null;
+        }
+
+        return null;
+    }
+
+    function formatSampleRate(sampleRate: number | null): string {
+        if (!sampleRate) return "--";
+        return `${(sampleRate / 1000).toFixed(sampleRate % 1000 === 0 ? 0 : 1)}kHz`;
+    }
+
+    function formatAlbumAudioLine(audioInfo: AlbumAudioInfo | undefined): string {
+        if (!audioInfo) return "--";
+
+        const parts: string[] = [];
+        if (audioInfo.format) parts.push(audioInfo.format);
+        if (audioInfo.sampleRate) parts.push(formatSampleRate(audioInfo.sampleRate));
+        if (audioInfo.bitDepth) {
+            parts.push(`${audioInfo.bitDepth}bit`);
+        } else if (audioInfo.bitrate) {
+            parts.push(`${audioInfo.bitrate}kbps`);
+        }
+
+        return parts.length ? parts.join(" ") : "--";
+    }
+
+    function buildAlbumAudioInfoMap(libraryTracks: typeof $tracks): Map<number, AlbumAudioInfo> {
+        const map = new Map<number, AlbumAudioInfo>();
+        const perAlbum = new Map<
+            number,
+            {
+                formatCounts: Map<string, number>;
+                bestBitrate: number | null;
+                bestSampleRate: number | null;
+                bestBitDepth: number | null;
+            }
+        >();
+
+        for (const track of libraryTracks) {
+            if (!track.album_id) continue;
+
+            if (!perAlbum.has(track.album_id)) {
+                perAlbum.set(track.album_id, {
+                    formatCounts: new Map<string, number>(),
+                    bestBitrate: null,
+                    bestSampleRate: null,
+                    bestBitDepth: null,
+                });
+            }
+
+            const albumStats = perAlbum.get(track.album_id)!;
+
+            const normalizedFormat = normalizeFormat(track.format);
+            if (normalizedFormat) {
+                albumStats.formatCounts.set(
+                    normalizedFormat,
+                    (albumStats.formatCounts.get(normalizedFormat) || 0) + 1,
+                );
+            }
+
+            if (typeof track.bitrate === "number") {
+                albumStats.bestBitrate = Math.max(albumStats.bestBitrate || 0, track.bitrate);
+            }
+
+            const parsedSampleRate = parseSampleRateFromMetadata(track.metadata_json);
+            if (typeof parsedSampleRate === "number") {
+                albumStats.bestSampleRate = Math.max(
+                    albumStats.bestSampleRate || 0,
+                    parsedSampleRate,
+                );
+            }
+
+            const parsedBitDepth = parseBitDepthFromMetadata(track.metadata_json);
+            if (typeof parsedBitDepth === "number") {
+                albumStats.bestBitDepth = Math.max(
+                    albumStats.bestBitDepth || 0,
+                    parsedBitDepth,
+                );
+            }
+        }
+
+        for (const [albumId, stats] of perAlbum.entries()) {
+            let primaryFormat: string | null = null;
+            let maxCount = -1;
+
+            for (const [format, count] of stats.formatCounts.entries()) {
+                if (count > maxCount) {
+                    primaryFormat = format;
+                    maxCount = count;
+                }
+            }
+
+            map.set(albumId, {
+                format: primaryFormat,
+                bitrate: stats.bestBitrate,
+                sampleRate: stats.bestSampleRate,
+                bitDepth: stats.bestBitDepth,
+            });
+        }
+
+        return map;
+    }
+
+    $: albumAudioInfoById = buildAlbumAudioInfoMap($tracks);
 
     // Sorting/Pinning logic
     $: sortedAlbums = [...albums].sort((a, b) => {
@@ -218,11 +398,14 @@
     onItemContextMenu={handleAlbumContextMenu}
     onLoadMore={handleLoadMore}
     emptyStateConfig={emptyState}
+    cardHeightDesktop={285}
+    cardHeightMobile={235}
     let:item={album}
 >
     {@const cover = getAlbumCoverFromTracks(album.id)}
     {@const isNowPlaying = playingAlbumId === album.id && playing}
     {@const isPaused = pausedAlbumId === album.id}
+    {@const audioInfo = albumAudioInfoById.get(album.id)}
 
     <MediaCard
         {isNowPlaying}
@@ -265,6 +448,24 @@
                 </div>
             {/if}
         </svelte:fragment>
+
+        <svelte:fragment slot="extra-info">
+            {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate}
+                <div class="audio-chips">
+                    {#if audioInfo?.format}
+                        <span class="audio-chip format">{audioInfo.format}</span>
+                    {/if}
+                    {#if audioInfo?.sampleRate}
+                        <span class="audio-chip">{formatSampleRate(audioInfo.sampleRate)}</span>
+                    {/if}
+                    {#if audioInfo?.bitDepth}
+                        <span class="audio-chip">{audioInfo.bitDepth}bit</span>
+                    {:else if audioInfo?.bitrate}
+                        <span class="audio-chip">{audioInfo.bitrate}kbps</span>
+                    {/if}
+                </div>
+            {/if}
+        </svelte:fragment>
     </MediaCard>
 </VirtualizedGrid>
 
@@ -281,5 +482,33 @@
             var(--bg-surface) 0%,
             var(--bg-highlight) 100%
         );
+    }
+
+    .audio-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 8px;
+    }
+
+    .audio-chip {
+        display: inline-flex;
+        align-items: center;
+        font-size: 0.65rem;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: 0.03em;
+        padding: 3px 7px;
+        border-radius: 999px;
+        background: var(--bg-highlight);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        white-space: nowrap;
+    }
+
+    .audio-chip.format {
+        background: color-mix(in oklab, var(--accent-primary) 15%, transparent);
+        color: var(--accent-primary);
+        border-color: color-mix(in oklab, var(--accent-primary) 40%, transparent);
     }
 </style>

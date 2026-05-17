@@ -47,6 +47,33 @@
   // MetadataModal state
   let metadataModalTrack: Track | null = null;
 
+  // Audio quality metadata parsing
+  function parseTrackMeta(track: Track): { sampleRate: number | null; bitDepth: number | null } {
+    if (!track.metadata_json) return { sampleRate: null, bitDepth: null };
+    try {
+      const m = JSON.parse(track.metadata_json);
+      return {
+        sampleRate: m['__sample_rate_hz'] ?? null,
+        bitDepth: m['__bit_depth'] ?? null,
+      };
+    } catch { return { sampleRate: null, bitDepth: null }; }
+  }
+  function fmtSr(hz: number): string {
+    return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+  }
+
+  function normalizeTrackFormat(format: string | null | undefined): string | null {
+    if (!format) return null;
+    const formatUpper = format.toUpperCase();
+    if (formatUpper.includes("HI_RES") || formatUpper.includes("HIRES")) {
+      return "HI-RES";
+    }
+    if (formatUpper.includes("LOSSLESS")) {
+      return "LOSSLESS";
+    }
+    return formatUpper.replace("MPEG", "MP3");
+  }
+
   export let scrollKey: string | null = null;
 
   export let tracks: Track[] = [];
@@ -59,7 +86,7 @@
   export let queueTracks: Track[] | null = null; // New prop for unified queue context
 
   // Virtual scrolling configuration
-  const TRACK_ROW_HEIGHT = 50; // pixels (matches desktop row height in CSS)
+  const TRACK_ROW_HEIGHT = 58; // pixels (matches desktop row height in CSS)
   const OVERSCAN = 5; // Extra rows to render above/below viewport
 
   let containerHeight = 600; // Will be calculated from container
@@ -1077,6 +1104,7 @@
           {#each visibleTracksWithMetadata as { track, albumArt, unavailable }, index (track.id)}
             {@const actualIndex = virtualScrollState.startIndex + index}
             {@const isSelected = $multiSelect.selectedTrackIds.has(track.id)}
+            {@const audioMeta = parseTrackMeta(track)}
             <div
               class="track-row"
               class:playing={playingTrackId === track.id}
@@ -1240,12 +1268,20 @@
                         {displayFormat}
                       </span>
                     {/if}
+                    {#if audioMeta.sampleRate}
+                      <span class="quality-tag">{fmtSr(audioMeta.sampleRate)}</span>
+                    {/if}
+                    {#if audioMeta.bitDepth}
+                      <span class="quality-tag">{audioMeta.bitDepth}bit</span>
+                    {/if}
                   </div>
-                  <button
-                    class="track-artist truncate"
-                    on:click={handleArtistClick}
-                    >{track.artist || "Unknown Artist"}</button
-                  >
+                  {#if playbackContext?.type !== "album"}
+                    <button
+                      class="track-artist truncate"
+                      on:click={handleArtistClick}
+                      >{track.artist || "Unknown Artist"}</button
+                    >
+                  {/if}
                 </div>
               {:else}
                 <div class="col-artist">
@@ -1278,9 +1314,36 @@
                     <span class="track-name truncate"
                       >{track.title || "Unknown Title"}</span
                     >
-                    <button class="track-artist truncate" on:click={handleArtistClick}
-                      >{track.artist || "Unknown Artist"}</button
-                    >
+                    {#if playbackContext?.type !== "album"}
+                      <button class="track-artist truncate" on:click={handleArtistClick}
+                        >{track.artist || "Unknown Artist"}</button
+                      >
+                    {/if}
+                    {#if track.format || audioMeta.sampleRate || audioMeta.bitDepth}
+                      <div class="track-quality-row">
+                        {#if track.format}
+                          {@const desktopFormat = normalizeTrackFormat(track.format)}
+                          {#if desktopFormat}
+                            <span
+                              class="quality-tag"
+                              class:high-quality={track.format.toUpperCase().includes("FLAC") ||
+                                track.format.toUpperCase().includes("WAV") ||
+                                track.format.toUpperCase().includes("HI_RES") ||
+                                track.format.toUpperCase().includes("HIRES") ||
+                                (track.bitrate && track.bitrate >= 320)}
+                            >
+                              {desktopFormat}
+                            </span>
+                          {/if}
+                        {/if}
+                        {#if audioMeta.sampleRate}
+                          <span class="quality-tag">{fmtSr(audioMeta.sampleRate)}</span>
+                        {/if}
+                        {#if audioMeta.bitDepth}
+                          <span class="quality-tag">{audioMeta.bitDepth}bit</span>
+                        {/if}
+                      </div>
+                    {/if}
                     {#if showAdvancedMetadata}
                       <span class="media-metadata truncate">
                         {track.format ? track.format.toUpperCase() : "Unknown format"}
@@ -1482,8 +1545,9 @@
     transition: background-color var(--transition-fast);
     width: 100%;
     text-align: left;
-    height: 50px; /* Fixed height for virtual scrolling */
+    height: 58px; /* Fixed height for virtual scrolling */
     box-sizing: border-box;
+    overflow: hidden;
   }
 
   .list-body.with-drag .track-row {
@@ -1682,6 +1746,7 @@
     gap: 1px;
     height: 100%;
     padding-top: 1.5px;
+    overflow: hidden;
   }
 
   .col-artist {
@@ -1689,6 +1754,7 @@
     align-items: center;
     min-width: 0;
     gap: 8px;
+    overflow: hidden;
   }
 
   .artist-thumb {
@@ -1724,6 +1790,7 @@
     justify-content: center;
     min-width: 0;
     gap: 1px;
+    overflow: hidden;
   }
 
   .title-row {
@@ -1757,6 +1824,15 @@
 
   .track-row:hover .quality-tag {
     opacity: 1;
+  }
+
+  .track-quality-row {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .quality-tag.high-quality {

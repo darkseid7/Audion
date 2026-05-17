@@ -48,11 +48,15 @@
         stopSleepTimer,
     } from "$lib/stores/sleepTimer";
     import ConnectPanel from "./ConnectPanel.svelte";
+    import WaveformSeekBar from "./WaveformSeekBar.svelte";
     import { wsStore } from "$lib/stores/websocket";
 
     $: isCurrentLiked = $currentTrack
         ? $likedTrackIds.has($currentTrack.id)
         : false;
+
+    $: isLocalTrack = !!$currentTrack &&
+        ($currentTrack.source_type === 'local' || (!$currentTrack.source_type && !!$currentTrack.path));
 
     // Detect live streams (radio, etc.) — no duration, streaming source
     $: isLive = $currentTrack
@@ -75,6 +79,31 @@
     let sleepTimerElement: HTMLDivElement;
 
     $: connectedDevices = $wsStore.devices.length;
+
+    // Audio quality info for current track
+    function parseTrackAudioInfo(track: any) {
+        if (!track) return null;
+        let meta: Record<string, any> = {};
+        if (track.metadata_json) {
+            try { meta = JSON.parse(track.metadata_json); } catch {}
+        }
+        const format = (() => {
+            const raw = (track.format || meta['format'] || '').toString().toUpperCase();
+            if (!raw) return null;
+            if (raw === 'MPEG' || raw === 'MP3') return 'MP3';
+            if (raw === 'HI_RES' || raw === 'HIRES') return 'HI-RES';
+            if (raw === 'LOSSLESS') return 'LOSSLESS';
+            return raw;
+        })();
+        const sampleRate: number | null = meta['__sample_rate_hz'] ?? null;
+        const bitDepth: number | null = meta['__bit_depth'] ?? null;
+        const bitrate: number | null = meta['__bitrate_kbps'] ?? null;
+        return { format, sampleRate, bitDepth, bitrate };
+    }
+    function fmtSampleRate(hz: number): string {
+        return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+    }
+    $: currentTrackAudioInfo = parseTrackAudioInfo($currentTrack);
 
     // Slot containers
     let slotStart: HTMLDivElement;
@@ -477,6 +506,21 @@
                             }
                         }}>{$currentTrack.artist || "Unknown Artist"}</span
                     >
+                    {#if currentTrackAudioInfo?.format || currentTrackAudioInfo?.sampleRate || currentTrackAudioInfo?.bitDepth || currentTrackAudioInfo?.bitrate}
+                        <div class="player-audio-chips">
+                            {#if currentTrackAudioInfo?.format}
+                                <span class="player-audio-chip format">{currentTrackAudioInfo.format}</span>
+                            {/if}
+                            {#if currentTrackAudioInfo?.sampleRate}
+                                <span class="player-audio-chip">{fmtSampleRate(currentTrackAudioInfo.sampleRate)}</span>
+                            {/if}
+                            {#if currentTrackAudioInfo?.bitDepth}
+                                <span class="player-audio-chip">{currentTrackAudioInfo.bitDepth}bit</span>
+                            {:else if currentTrackAudioInfo?.bitrate}
+                                <span class="player-audio-chip">{currentTrackAudioInfo.bitrate}kbps</span>
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
 
                 <!-- Like button (desktop) -->
@@ -620,28 +664,38 @@
                     >
                 {:else}
                     <span class="time">{formatDuration($currentTime)}</span>
-                    <div
-                        class="progress-bar"
-                        bind:this={seekBarElement}
-                        on:mousedown={handleSeekStart}
-                        role="slider"
-                        aria-label="Seek"
-                        aria-valuenow={Math.round($progress * 100)}
-                        aria-valuemin="0"
-                        aria-valuemax="100"
-                        tabindex="0"
-                    >
-                        <div class="progress-track">
+                    {#if isLocalTrack}
+                        <div class="waveform-container">
+                            <WaveformSeekBar
+                                track={$currentTrack}
+                                progress={$progress}
+                                onSeek={seek}
+                            />
+                        </div>
+                    {:else}
+                        <div
+                            class="progress-bar"
+                            bind:this={seekBarElement}
+                            on:mousedown={handleSeekStart}
+                            role="slider"
+                            aria-label="Seek"
+                            aria-valuenow={Math.round($progress * 100)}
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            tabindex="0"
+                        >
+                            <div class="progress-track">
+                                <div
+                                    class="progress-fill"
+                                    style="width: {$progress * 100}%"
+                                ></div>
+                            </div>
                             <div
-                                class="progress-fill"
-                                style="width: {$progress * 100}%"
+                                class="progress-thumb"
+                                style="left: {$progress * 100}%"
                             ></div>
                         </div>
-                        <div
-                            class="progress-thumb"
-                            style="left: {$progress * 100}%"
-                        ></div>
-                    </div>
+                    {/if}
                     <span class="time">{formatDuration($duration)}</span>
                 {/if}
             </div>
@@ -950,6 +1004,34 @@
         cursor: pointer;
     }
 
+    .player-audio-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+        margin-top: 4px;
+    }
+
+    .player-audio-chip {
+        display: inline-flex;
+        align-items: center;
+        font-size: 0.6rem;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: 0.03em;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: var(--bg-highlight);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        white-space: nowrap;
+    }
+
+    .player-audio-chip.format {
+        background: color-mix(in oklab, var(--accent-primary) 15%, transparent);
+        color: var(--accent-primary);
+        border-color: color-mix(in oklab, var(--accent-primary) 40%, transparent);
+    }
+
     .no-track {
         color: var(--text-subdued);
         font-size: 0.875rem;
@@ -1118,7 +1200,6 @@
         align-items: center;
         gap: var(--spacing-md);
         width: 100%;
-        max-width: 600px;
     }
 
     .time {
@@ -1135,6 +1216,11 @@
         align-items: center;
         cursor: pointer;
         position: relative;
+    }
+
+    .waveform-container {
+        flex: 1;
+        height: 44px;
     }
 
     .volume-bar {

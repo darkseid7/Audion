@@ -9,26 +9,31 @@
     } from "$lib/stores/search";
     import { isMobile, toggleMobileSidebar } from "$lib/stores/mobile";
     import { appSettings } from "$lib/stores/settings";
+    import { isTauri } from "$lib/api/tauri";
     import MenuBar from "./MenuBar.svelte";
     import Breadcrumbs from "./Breadcrumbs.svelte";
 
-    const appWindow = getCurrentWindow();
+    const appWindow = isTauri() ? getCurrentWindow() : null;
     let isMaximized = false;
 
     function minimize() {
+        if (!appWindow) return;
         appWindow.minimize();
     }
 
     function minimizeToTray() {
+        if (!appWindow) return;
         appWindow.hide();
     }
 
     async function toggleMaximize() {
+        if (!appWindow) return;
         await appWindow.toggleMaximize();
         isMaximized = await appWindow.isMaximized();
     }
 
     function close() {
+        if (!appWindow) return;
         if ($appSettings.closeToTray) {
             appWindow.hide();
         } else {
@@ -90,6 +95,10 @@
     }
 
     onMount(() => {
+        if (!appWindow) {
+            return;
+        }
+
         // Initial maximize state
         appWindow.isMaximized().then((m) => (isMaximized = m));
 

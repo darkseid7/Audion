@@ -682,7 +682,7 @@
     {:else if $currentView.type === "tracks"}
         <div class="view-container">
             <header class="view-header">
-                <h1>All Tracks</h1>
+                <h1>All Tracks xD</h1>
                 {#if $isScanning}
                     <div class="scan-status">Scanning... {$tracks.length} tracks found</div>
                 {/if}

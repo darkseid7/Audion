@@ -1,0 +1,262 @@
+<script lang="ts">
+    import { onMount, onDestroy } from 'svelte';
+    import { convertFileSrc } from '$lib/api/tauri';
+
+    export let track: any;
+    export let progress: number = 0;
+    export let onSeek: (pos: number) => void = () => {};
+
+    // High-resolution source data (fixed), downsampled at render time
+    const SOURCE_RESOLUTION = 8000;
+    // Desired bar width in CSS pixels (gap auto-calculated to fill width)
+    const TARGET_BAR_W = 1;
+
+    let canvas: HTMLCanvasElement;
+    let rawData: { rms: Float32Array; peak: Float32Array } | null = null;
+    let loading = false;
+    let isDragging = false;
+    let hoverPos: number | null = null;
+    let rafId: number | null = null;
+    let resizeObserver: ResizeObserver;
+    let abortController: AbortController | null = null;
+
+    // Session cache: path → raw high-res data
+    const cache = new Map<string, { rms: Float32Array; peak: Float32Array }>();
+
+    $: if (track?.path) loadWaveform(track.path);
+    $: { progress; hoverPos; scheduleRedraw(); }
+
+    async function loadWaveform(path: string) {
+        if (cache.has(path)) {
+            rawData = cache.get(path)!;
+            scheduleRedraw();
+            return;
+        }
+
+        if (abortController) abortController.abort();
+        abortController = new AbortController();
+        const signal = abortController.signal;
+
+        loading = true;
+        rawData = null;
+        scheduleRedraw();
+
+        try {
+            const url = convertFileSrc(path);
+            const response = await fetch(url, { signal });
+            const arrayBuffer = await response.arrayBuffer();
+            if (signal.aborted) return;
+
+            const audioCtx = new AudioContext();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            audioCtx.close();
+            if (signal.aborted) return;
+
+            const numChannels = audioBuffer.numberOfChannels;
+            const length = audioBuffer.length;
+            const channels: Float32Array[] = [];
+            for (let c = 0; c < numChannels; c++) channels.push(audioBuffer.getChannelData(c));
+
+            const blockSize = Math.floor(length / SOURCE_RESOLUTION);
+            const rms = new Float32Array(SOURCE_RESOLUTION);
+            const peak = new Float32Array(SOURCE_RESOLUTION);
+
+            for (let i = 0; i < SOURCE_RESOLUTION; i++) {
+                let sumSq = 0;
+                let peakAbs = 0;
+                const start = i * blockSize;
+                for (let j = 0; j < blockSize; j++) {
+                    let s = 0;
+                    for (let c = 0; c < numChannels; c++) s += channels[c][start + j];
+                    s /= numChannels;
+                    sumSq += s * s;
+                    const a = Math.abs(s);
+                    if (a > peakAbs) peakAbs = a;
+                }
+                rms[i] = Math.sqrt(sumSq / blockSize);
+                peak[i] = peakAbs;
+            }
+
+            // Normalize peak to [0,1] - raw, no compression
+            let maxP = 0;
+            for (let i = 0; i < SOURCE_RESOLUTION; i++) if (peak[i] > maxP) maxP = peak[i];
+            if (maxP > 0) for (let i = 0; i < SOURCE_RESOLUTION; i++) peak[i] /= maxP;
+
+            // RMS: normalize raw (no compression — preserve true dynamics)
+            let maxR = 0;
+            for (let i = 0; i < SOURCE_RESOLUTION; i++) if (rms[i] > maxR) maxR = rms[i];
+            if (maxR > 0) for (let i = 0; i < SOURCE_RESOLUTION; i++) rms[i] /= maxR;
+
+            // Noise gate: anything below 1% of max becomes 0 (true silence)
+            for (let i = 0; i < SOURCE_RESOLUTION; i++) {
+                if (rms[i] < 0.01) rms[i] = 0;
+                if (peak[i] < 0.01) peak[i] = 0;
+            }
+
+            rawData = { rms, peak };
+            cache.set(path, rawData);
+        } catch (e: any) {
+            if (e?.name !== 'AbortError') console.error('[WaveformSeekBar]', e);
+        } finally {
+            loading = false;
+            scheduleRedraw();
+        }
+    }
+
+    /** Downsample source data to N bars by averaging each block */
+    function downsample(src: Float32Array, bars: number): Float32Array {
+        const out = new Float32Array(bars);
+        const ratio = src.length / bars;
+        for (let i = 0; i < bars; i++) {
+            const from = Math.floor(i * ratio);
+            const to = Math.floor((i + 1) * ratio);
+            let sum = 0;
+            for (let j = from; j < to; j++) sum += src[j];
+            out[i] = sum / (to - from);
+        }
+        return out;
+    }
+
+    function scheduleRedraw() {
+        if (!canvas) return;
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => { rafId = null; renderCanvas(); });
+    }
+
+    function renderCanvas() {
+        if (!canvas) return;
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth;
+        const h = canvas.offsetHeight;
+        if (w === 0 || h === 0) return;
+
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        const ctx = canvas.getContext('2d')!;
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, w, h);
+
+        // Responsive: calculate bars to fill entire width edge-to-edge
+        // Snap to device pixels so bars never overlap
+        const dprInv = 1 / dpr;
+        const barW = Math.max(dprInv, Math.floor(TARGET_BAR_W * dpr) * dprInv); // 1 device pixel
+        const gapW = Math.max(dprInv, Math.floor(1 * dpr) * dprInv); // 1 device pixel gap
+        const step = barW + gapW;
+        const barCount = Math.max(20, Math.floor(w / step));
+
+        const displayProg = hoverPos ?? progress;
+        const cy = h / 2;
+        const maxHalf = cy - 1;
+
+        const accentColor = getComputedStyle(document.documentElement)
+            .getPropertyValue('--accent-primary').trim() || '#1db954';
+
+        if (!rawData) {
+            const skH = Math.max(1, h * 0.08);
+            for (let i = 0; i < barCount; i++) {
+                const x = i * step;
+                const barProg = (i + 0.5) / barCount;
+                ctx.fillStyle = barProg < displayProg ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
+                ctx.fillRect(x, cy - skH, barW, skH * 2);
+            }
+        } else {
+            const rms = downsample(rawData.rms, barCount);
+
+            for (let i = 0; i < barCount; i++) {
+                const x = i * step;
+                const barProg = (i + 0.5) / barCount;
+                const played = barProg < displayProg;
+                const val = rms[i];
+
+                if (val < 0.005) continue; // skip silence — no bar drawn
+
+                const rH = val * maxHalf;
+                ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.25)';
+                ctx.fillRect(x, cy - rH, barW, rH * 2);
+            }
+        }
+
+        // Playhead
+        if (displayProg > 0.002 && displayProg < 0.998) {
+            const px = displayProg * w;
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            ctx.fillRect(px - 0.75, 0, 1.5, h);
+        }
+    }
+
+    function posFromEvent(e: MouseEvent): number {
+        if (!canvas) return 0;
+        const rect = canvas.getBoundingClientRect();
+        return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    }
+
+    function handleMouseDown(e: MouseEvent) {
+        isDragging = true;
+        const pos = posFromEvent(e);
+        hoverPos = pos;
+        onSeek(pos);
+    }
+
+    function handleMouseMove(e: MouseEvent) {
+        hoverPos = posFromEvent(e);
+        if (isDragging) onSeek(hoverPos);
+        scheduleRedraw();
+    }
+
+    function handleMouseLeave() {
+        if (!isDragging) { hoverPos = null; scheduleRedraw(); }
+    }
+
+    function handleGlobalMouseMove(e: MouseEvent) {
+        if (!isDragging) return;
+        hoverPos = posFromEvent(e);
+        onSeek(hoverPos);
+        scheduleRedraw();
+    }
+
+    function handleGlobalMouseUp() {
+        if (isDragging) {
+            isDragging = false;
+            hoverPos = null;
+            scheduleRedraw();
+        }
+    }
+
+    onMount(() => {
+        resizeObserver = new ResizeObserver(() => scheduleRedraw());
+        resizeObserver.observe(canvas);
+        window.addEventListener('mousemove', handleGlobalMouseMove);
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+    });
+
+    onDestroy(() => {
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        if (abortController) abortController.abort();
+        resizeObserver?.disconnect();
+        window.removeEventListener('mousemove', handleGlobalMouseMove);
+        window.removeEventListener('mouseup', handleGlobalMouseUp);
+    });
+</script>
+
+<canvas
+    bind:this={canvas}
+    class="waveform-canvas"
+    on:mousedown={handleMouseDown}
+    on:mousemove={handleMouseMove}
+    on:mouseleave={handleMouseLeave}
+    role="slider"
+    aria-label="Seek"
+    aria-valuenow={Math.round(progress * 100)}
+    aria-valuemin="0"
+    aria-valuemax="100"
+    tabindex="0"
+></canvas>
+
+<style>
+    .waveform-canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: pointer;
+    }
+</style>

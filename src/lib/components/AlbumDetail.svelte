@@ -39,6 +39,76 @@
     let mbReleaseLoading = false;
 
     $: totalDuration = tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+    type AlbumAudioInfo = {
+        format: string | null;
+        sampleRate: number | null;
+        bitDepth: number | null;
+    };
+
+    function normalizeFormat(format: string | null | undefined): string | null {
+        if (!format) return null;
+        const formatUpper = format.toUpperCase();
+        if (formatUpper.includes("HI_RES") || formatUpper.includes("HIRES")) {
+            return "HI-RES";
+        }
+        if (formatUpper.includes("LOSSLESS")) {
+            return "LOSSLESS";
+        }
+        return formatUpper.replace("MPEG", "MP3");
+    }
+
+    function parseTrackAudioMeta(track: Track): {
+        sampleRate: number | null;
+        bitDepth: number | null;
+    } {
+        if (!track.metadata_json) {
+            return { sampleRate: null, bitDepth: null };
+        }
+        try {
+            const meta = JSON.parse(track.metadata_json);
+            return {
+                sampleRate: meta["__sample_rate_hz"] ?? null,
+                bitDepth: meta["__bit_depth"] ?? null,
+            };
+        } catch {
+            return { sampleRate: null, bitDepth: null };
+        }
+    }
+
+    function mostCommonValue<T>(values: Array<T | null | undefined>): T | null {
+        const counts = new Map<T, number>();
+        for (const value of values) {
+            if (value === null || value === undefined) continue;
+            counts.set(value, (counts.get(value) || 0) + 1);
+        }
+        let best: T | null = null;
+        let bestCount = 0;
+        for (const [value, count] of counts.entries()) {
+            if (count > bestCount) {
+                best = value;
+                bestCount = count;
+            }
+        }
+        return best;
+    }
+
+    function formatSampleRate(hz: number): string {
+        return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+    }
+
+    function buildAlbumAudioInfo(trackList: Track[]): AlbumAudioInfo {
+        const formats = trackList.map((track) => normalizeFormat(track.format));
+        const sampleRates = trackList.map((track) => parseTrackAudioMeta(track).sampleRate);
+        const bitDepths = trackList.map((track) => parseTrackAudioMeta(track).bitDepth);
+
+        return {
+            format: mostCommonValue(formats),
+            sampleRate: mostCommonValue(sampleRates),
+            bitDepth: mostCommonValue(bitDepths),
+        };
+    }
+
+    $: albumAudioInfo = buildAlbumAudioInfo(tracks);
 
     function groupTracksByDisc(tracks: Track[]) {
         const groups = new Map<number, Track[]>();
@@ -374,6 +444,20 @@
                     <span>{$_('album.songs', { values: { count: tracks.length } })}</span>
                     <span class="separator">•</span>
                     <span>{formatDuration(totalDuration)}</span>
+                    {#if albumAudioInfo.format || albumAudioInfo.sampleRate || albumAudioInfo.bitDepth}
+                        <span class="separator">•</span>
+                        <div class="album-audio-meta">
+                            {#if albumAudioInfo.format}
+                                <span class="album-audio-chip format-chip">{albumAudioInfo.format}</span>
+                            {/if}
+                            {#if albumAudioInfo.sampleRate}
+                                <span class="album-audio-chip">{formatSampleRate(albumAudioInfo.sampleRate)}</span>
+                            {/if}
+                            {#if albumAudioInfo.bitDepth}
+                                <span class="album-audio-chip">{albumAudioInfo.bitDepth}bit</span>
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
                 <div class="album-actions">
                     <button
@@ -649,6 +733,33 @@
         font-size: 0.875rem;
         color: var(--text-secondary);
         margin-bottom: var(--spacing-lg);
+    }
+
+    .album-audio-meta {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+    }
+
+    .album-audio-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        border: 1px solid var(--border-color);
+        background: var(--bg-highlight);
+        color: var(--text-secondary);
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1;
+        white-space: nowrap;
+    }
+
+    .album-audio-chip.format-chip {
+        color: var(--accent-primary);
+        border-color: color-mix(in srgb, var(--accent-primary), transparent 65%);
+        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
     }
 
     .album-artist {
