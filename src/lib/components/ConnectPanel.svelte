@@ -20,144 +20,176 @@
   } from "$lib/stores/library";
   import { getTrackCoverSrc } from "$lib/api/tauri";
   import {
-    squeezeStartServer,
-    squeezeStopServer,
-    squeezeIsRunning,
-    squeezeGetPlayers,
-    squeezePause,
-    squeezeResume,
-    squeezeStop,
-    squeezeNext,
-    squeezePrevious,
-    squeezeSetVolume,
-    squeezePlay,
-    type SqueezePlayerInfo,
-    type SqueezeQueueTrack,
+    lmsDiscoverServers,
+    lmsConnect,
+    lmsDisconnect,
+    lmsIsConnected,
+    lmsGetPlayers,
+    lmsGetPlayerStatus,
+    lmsPlay,
+    lmsPause,
+    lmsResume,
+    lmsStop,
+    lmsNext,
+    lmsPrevious,
+    lmsSetVolume,
+    lmsPlayTracks,
+    lmsSubscribeStatus,
+    lmsUnsubscribeStatus,
+    type LmsServer,
+    type LmsPlayer,
+    type LmsPlayerStatus,
   } from "$lib/api/tauri";
   import { get } from "svelte/store";
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
 
   const dispatch = createEventDispatcher();
 
-  // ── Squeeze state ──────────────────────────────────────────────────────────
-  let squeezeRunning = false;
-  let squeezePlayers: SqueezePlayerInfo[] = [];
-  let squeezePolling: ReturnType<typeof setInterval> | null = null;
-  let squeezeStarting = false;
-  let activeSqueezePlayer: string | null = null;
+  // ── LMS Client state ──────────────────────────────────────────────────────
+  let lmsConnected = false;
+  let lmsServers: LmsServer[] = [];
+  let lmsPlayers: LmsPlayer[] = [];
+  let lmsPolling: ReturnType<typeof setInterval> | null = null;
+  let discovering = false;
+  let activeLmsPlayer: string | null = null;
+  let playerStatus: LmsPlayerStatus | null = null;
+  let manualHost = "";
+  let manualPort = "9000";
+  let showManualEntry = false;
 
   onMount(async () => {
     try {
-      squeezeRunning = await squeezeIsRunning();
-      if (squeezeRunning) startSqueezePolling();
+      lmsConnected = await lmsIsConnected();
+      if (lmsConnected) {
+        startLmsPolling();
+      }
     } catch {}
   });
 
   onDestroy(() => {
-    if (squeezePolling) clearInterval(squeezePolling);
+    if (lmsPolling) clearInterval(lmsPolling);
   });
 
-  function startSqueezePolling() {
-    if (squeezePolling) return;
-    pollSqueezePlayers();
-    squeezePolling = setInterval(pollSqueezePlayers, 1000);
+  function startLmsPolling() {
+    if (lmsPolling) return;
+    pollLmsPlayers();
+    lmsPolling = setInterval(pollLmsPlayers, 2000);
   }
 
-  function stopSqueezePolling() {
-    if (squeezePolling) {
-      clearInterval(squeezePolling);
-      squeezePolling = null;
+  function stopLmsPolling() {
+    if (lmsPolling) {
+      clearInterval(lmsPolling);
+      lmsPolling = null;
     }
   }
 
-  async function pollSqueezePlayers() {
+  async function pollLmsPlayers() {
     try {
-      squeezePlayers = await squeezeGetPlayers();
+      lmsPlayers = await lmsGetPlayers();
+      if (activeLmsPlayer) {
+        playerStatus = await lmsGetPlayerStatus(activeLmsPlayer);
+      }
     } catch {}
   }
 
-  async function toggleSqueezeServer() {
-    squeezeStarting = true;
+  async function discoverServers() {
+    discovering = true;
     try {
-      if (squeezeRunning) {
-        await squeezeStopServer();
-        squeezeRunning = false;
-        squeezePlayers = [];
-        stopSqueezePolling();
-        if (activeSqueezePlayer) {
-          activeSqueezePlayer = null;
-          activeBackend.set("none");
-        }
-      } else {
-        await squeezeStartServer();
-        squeezeRunning = true;
-        startSqueezePolling();
-      }
+      lmsServers = await lmsDiscoverServers();
     } catch (e) {
-      console.error("Squeeze toggle error:", e);
+      console.error("LMS discovery error:", e);
     }
-    squeezeStarting = false;
+    discovering = false;
   }
 
-  function selectSqueezePlayer(player: SqueezePlayerInfo) {
-    if (activeSqueezePlayer === player.mac) {
-      activeSqueezePlayer = null;
+  async function connectToServer(server: LmsServer) {
+    try {
+      await lmsConnect(server.host, server.json_port);
+      lmsConnected = true;
+      startLmsPolling();
+    } catch (e) {
+      console.error("LMS connect error:", e);
+    }
+  }
+
+  async function connectManual() {
+    if (!manualHost) return;
+    try {
+      await lmsConnect(manualHost, parseInt(manualPort) || 9000);
+      lmsConnected = true;
+      startLmsPolling();
+    } catch (e) {
+      console.error("LMS connect error:", e);
+    }
+  }
+
+  async function disconnectLms() {
+    try {
+      await lmsUnsubscribeStatus();
+      await lmsDisconnect();
+    } catch {}
+    lmsConnected = false;
+    lmsPlayers = [];
+    activeLmsPlayer = null;
+    playerStatus = null;
+    stopLmsPolling();
+    activeBackend.set("none");
+  }
+
+  function selectLmsPlayer(player: LmsPlayer) {
+    if (activeLmsPlayer === player.player_id) {
+      activeLmsPlayer = null;
+      playerStatus = null;
       activeBackend.set("none");
     } else {
-      activeSqueezePlayer = player.mac;
-      activeBackend.set("squeeze" as any);
+      activeLmsPlayer = player.player_id;
+      activeBackend.set("lms" as any);
       activeRemoteDevice.set(null);
+      lmsSubscribeStatus(player.player_id).catch(() => {});
     }
   }
 
-  async function handleSqueezeCommand(mac: string, cmd: string) {
+  async function handleLmsCommand(playerId: string, cmd: string) {
     try {
       switch (cmd) {
-        case "pause": await squeezePause(mac); break;
-        case "resume": await squeezeResume(mac); break;
-        case "stop": await squeezeStop(mac); break;
-        case "next": await squeezeNext(mac); break;
-        case "previous": await squeezePrevious(mac); break;
+        case "play": await lmsResume(playerId); break;
+        case "pause": await lmsPause(playerId); break;
+        case "stop": await lmsStop(playerId); break;
+        case "next": await lmsNext(playerId); break;
+        case "previous": await lmsPrevious(playerId); break;
       }
     } catch (e) {
-      console.error("Squeeze command error:", e);
+      console.error("LMS command error:", e);
     }
   }
 
-  async function handleSqueezeVolume(mac: string, e: Event) {
+  async function handleLmsVolume(playerId: string, e: Event) {
     const target = e.target as HTMLInputElement;
     const vol = parseInt(target.value);
     try {
-      await squeezeSetVolume(mac, vol);
+      await lmsSetVolume(playerId, vol);
     } catch {}
   }
 
-  // Send current Audion queue to the Squeeze player
-  async function playOnSqueezePlayer(mac: string) {
+  async function playOnLmsPlayer(playerId: string) {
     const $library = get(libraryTracks);
     const $current = get(currentTrack);
     if (!$current) return;
 
-    // Build tracks from library
-    const tracks: SqueezeQueueTrack[] = $library
+    const trackIds = $library
       .filter((t: any) => t.path)
-      .map((t: any) => ({
-        id: t.id,
-        title: t.title || "Unknown",
-        artist: t.artist || "Unknown",
-        album: t.album || "Unknown",
-        path: t.path,
-        duration: t.duration || 0,
-        format: t.format || "mp3",
-      }));
+      .map((t: any) => t.id);
 
-    const startIndex = tracks.findIndex((t) => t.id === $current.id);
-    if (startIndex === -1) return;
+    const currentIndex = trackIds.indexOf($current.id);
+    if (currentIndex === -1) return;
+
+    // Send a window of up to 100 tracks starting from current
+    const queueWindow = trackIds.slice(currentIndex, currentIndex + 100);
 
     try {
-      await squeezePlay(mac, tracks, startIndex);
+      await lmsPlayTracks(playerId, queueWindow, 0);
     } catch (e) {
-      console.error("Squeeze play error:", e);
+      console.error("LMS play error:", e);
     }
   }
 
@@ -288,33 +320,38 @@
       </div>
     </div>
 
-    <!-- Squeeze Connect Section -->
+    <!-- LMS Client Section -->
     <div class="device-section">
       <div class="section-header">
-        <span>Squeeze Connect</span>
+        <span>LMS Players</span>
         <div class="line"></div>
-        <button
-          class="squeeze-toggle"
-          class:active={squeezeRunning}
-          on:click={toggleSqueezeServer}
-          disabled={squeezeStarting}
-        >
-          {squeezeStarting ? '...' : squeezeRunning ? 'Stop' : 'Start'}
-        </button>
+        {#if lmsConnected}
+          <button class="squeeze-toggle active" on:click={disconnectLms}>
+            Disconnect
+          </button>
+        {:else}
+          <button
+            class="squeeze-toggle"
+            on:click={discoverServers}
+            disabled={discovering}
+          >
+            {discovering ? '...' : 'Discover'}
+          </button>
+        {/if}
       </div>
 
-      {#if squeezeRunning}
+      {#if lmsConnected}
         <div class="device-grid">
-          {#if squeezePlayers.length === 0}
+          {#if lmsPlayers.length === 0}
             <div class="empty-state compact" in:fade>
-              <p>Waiting for Squeeze players...</p>
-              <span>Ensure your device (e.g. Eversolo) is on the same network.</span>
+              <p>No players found</p>
+              <span>Ensure your Squeeze players are connected to LMS.</span>
             </div>
           {:else}
-            {#each squeezePlayers as player (player.mac)}
+            {#each lmsPlayers as player (player.player_id)}
               <div
                 class="device-card"
-                class:active={activeSqueezePlayer === player.mac}
+                class:active={activeLmsPlayer === player.player_id}
                 in:fly={{ y: 20, duration: 300 }}
               >
                 <div class="card-main">
@@ -325,60 +362,62 @@
                   </div>
                   <div class="card-details">
                     <span class="device-name">{player.name}</span>
-                    {#if player.current_track}
+                    {#if activeLmsPlayer === player.player_id && playerStatus?.current_track}
                       <div class="track-info">
-                        <span class="dot" class:playing={player.state === 'Playing'}></span>
-                        <span class="track-text">{player.current_track.title} — {player.current_track.artist}</span>
+                        <span class="dot" class:playing={playerStatus.mode === 'playing'}></span>
+                        <span class="track-text">{playerStatus.current_track.title} — {playerStatus.current_track.artist}</span>
                       </div>
                     {:else}
-                      <span class="idle-text">{player.state === 'Stopped' ? 'Ready' : player.state}</span>
+                      <span class="idle-text">{player.is_playing ? 'Playing' : player.connected ? 'Ready' : 'Offline'}</span>
                     {/if}
                   </div>
 
-                  {#if player.current_track}
+                  {#if activeLmsPlayer === player.player_id && playerStatus}
                     <div class="mini-controls">
-                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'previous')}>
+                      <button class="icon-btn" on:click|stopPropagation={() => handleLmsCommand(player.player_id, 'previous')}>
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
                       </button>
-                      <button class="icon-btn highlight" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, player.state === 'Playing' ? 'pause' : 'resume')}>
-                        {#if player.state === 'Playing'}
+                      <button class="icon-btn highlight" on:click|stopPropagation={() => handleLmsCommand(player.player_id, playerStatus?.mode === 'playing' ? 'pause' : 'play')}>
+                        {#if playerStatus.mode === 'playing'}
                           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                         {:else}
                           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                         {/if}
                       </button>
-                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'next')}>
+                      <button class="icon-btn" on:click|stopPropagation={() => handleLmsCommand(player.player_id, 'next')}>
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                       </button>
                     </div>
                   {/if}
                 </div>
 
-                <!-- Volume slider -->
-                <div class="squeeze-volume">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" opacity="0.5">
-                    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
-                  </svg>
-                  <input
-                    type="range"
-                    min="0" max="100"
-                    value={player.volume}
-                    on:input={(e) => handleSqueezeVolume(player.mac, e)}
-                    class="volume-slider"
-                  />
-                </div>
+                {#if activeLmsPlayer === player.player_id && playerStatus}
+                  <!-- Volume slider -->
+                  <div class="squeeze-volume">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" opacity="0.5">
+                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+                    </svg>
+                    <input
+                      type="range"
+                      min="0" max="100"
+                      value={playerStatus.volume}
+                      on:input={(e) => handleLmsVolume(player.player_id, e)}
+                      class="volume-slider"
+                    />
+                  </div>
+                {/if}
 
                 <div class="card-actions">
                   <button
                     class="btn secondary"
-                    class:active={activeSqueezePlayer === player.mac}
-                    on:click={() => selectSqueezePlayer(player)}
+                    class:active={activeLmsPlayer === player.player_id}
+                    on:click={() => selectLmsPlayer(player)}
                   >
-                    {activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
+                    {activeLmsPlayer === player.player_id ? 'Disconnect' : 'Control'}
                   </button>
                   <button
                     class="btn primary"
-                    on:click={() => playOnSqueezePlayer(player.mac)}
+                    on:click={() => playOnLmsPlayer(player.player_id)}
                   >
                     Play Here
                   </button>
@@ -388,9 +427,48 @@
           {/if}
         </div>
       {:else}
-        <div class="empty-state compact" in:fade>
-          <p>Server not running</p>
-          <span>Start the Squeeze server to discover players on your network.</span>
+        <div class="device-grid">
+          {#if lmsServers.length > 0}
+            {#each lmsServers as server (server.uuid || server.host)}
+              <div class="device-card" in:fly={{ y: 20, duration: 300 }}>
+                <div class="card-main">
+                  <div class="platform-icon squeeze-icon">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                      <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4V6h16v12z"/>
+                    </svg>
+                  </div>
+                  <div class="card-details">
+                    <span class="device-name">{server.name}</span>
+                    <span class="idle-text">{server.host}:{server.json_port}</span>
+                  </div>
+                </div>
+                <div class="card-actions">
+                  <button class="btn primary" style="grid-column: span 2" on:click={() => connectToServer(server)}>
+                    Connect
+                  </button>
+                </div>
+              </div>
+            {/each}
+          {:else}
+            <div class="empty-state compact" in:fade>
+              <p>No LMS servers found</p>
+              <span>Click Discover or enter server address manually.</span>
+            </div>
+          {/if}
+
+          <!-- Manual entry -->
+          <div class="manual-entry">
+            <button class="text-btn" on:click={() => showManualEntry = !showManualEntry}>
+              {showManualEntry ? 'Hide' : 'Manual connection'}
+            </button>
+            {#if showManualEntry}
+              <div class="manual-form" transition:slide={{ duration: 200 }}>
+                <input type="text" bind:value={manualHost} placeholder="IP address (e.g. 192.168.1.100)" class="manual-input" />
+                <input type="text" bind:value={manualPort} placeholder="Port" class="manual-input port" />
+                <button class="btn primary" on:click={connectManual} disabled={!manualHost}>Connect</button>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -1093,6 +1171,35 @@
   }
   .empty-state.compact p {
     font-size: 0.85rem;
+  }
+
+  .manual-entry {
+    padding-top: 8px;
+    text-align: center;
+  }
+
+  .manual-form {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    align-items: center;
+  }
+
+  .manual-input {
+    flex: 1;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: white;
+    font-size: 0.85rem;
+    outline: none;
+  }
+  .manual-input:focus {
+    border-color: var(--accent-primary);
+  }
+  .manual-input.port {
+    max-width: 70px;
   }
 
   @media (max-width: 480px) {

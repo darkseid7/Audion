@@ -9,7 +9,7 @@ mod discord;
 mod windows_thumbar;
 mod scanner;
 mod security;
-mod squeeze;
+mod lms_client;
 mod sync;
 mod utils;
 
@@ -328,9 +328,9 @@ pub fn run() {
             })?;
             tracing::info!("Database initialized");
 
-            app.manage(database);
+            app.manage(database.clone());
             app.manage(commands::listenbrainz::ListenBrainzState::new());
-            app.manage(commands::squeeze::SqueezeState::new());
+            app.manage(commands::squeeze::LmsState::new(database.clone()));
 
             // Initialize Discord RPC state (desktop only)
             #[cfg(desktop)]
@@ -660,23 +660,26 @@ pub fn run() {
                     commands::window::set_close_to_tray,
                     commands::window::get_minimize_to_tray,
                     commands::window::set_minimize_to_tray,
-                    // Squeeze Connect commands
-                    commands::squeeze::squeeze_start_server,
-                    commands::squeeze::squeeze_stop_server,
-                    commands::squeeze::squeeze_is_running,
-                    commands::squeeze::squeeze_get_players,
-                    commands::squeeze::squeeze_get_player_state,
-                    commands::squeeze::squeeze_play,
-                    commands::squeeze::squeeze_pause,
-                    commands::squeeze::squeeze_resume,
-                    commands::squeeze::squeeze_stop,
-                    commands::squeeze::squeeze_set_volume,
-                    commands::squeeze::squeeze_next,
-                    commands::squeeze::squeeze_previous,
-                    commands::squeeze::squeeze_seek,
-                    commands::squeeze::squeeze_set_repeat,
-                    commands::squeeze::squeeze_set_shuffle,
-                    commands::squeeze::squeeze_get_queue,
+                    // LMS Client commands
+                    commands::squeeze::lms_discover_servers,
+                    commands::squeeze::lms_connect,
+                    commands::squeeze::lms_disconnect,
+                    commands::squeeze::lms_is_connected,
+                    commands::squeeze::lms_get_connected_server,
+                    commands::squeeze::lms_get_players,
+                    commands::squeeze::lms_get_player_status,
+                    commands::squeeze::lms_play,
+                    commands::squeeze::lms_pause,
+                    commands::squeeze::lms_resume,
+                    commands::squeeze::lms_stop,
+                    commands::squeeze::lms_next,
+                    commands::squeeze::lms_previous,
+                    commands::squeeze::lms_seek,
+                    commands::squeeze::lms_set_volume,
+                    commands::squeeze::lms_play_tracks,
+                    commands::squeeze::lms_add_tracks,
+                    commands::squeeze::lms_subscribe_status,
+                    commands::squeeze::lms_unsubscribe_status,
                 ]
             }
             #[cfg(mobile)]

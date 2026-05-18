@@ -1225,113 +1225,149 @@ export async function saveImageToGallery(
 }
 
 // =============================================================================
-// SQUEEZE CONNECT
+// LMS CLIENT
 // =============================================================================
 
-export interface SqueezePlayerInfo {
-  mac: string;
+export interface LmsServer {
   name: string;
-  state: "Disconnected" | "Stopped" | "Buffering" | "Playing" | "Paused";
-  capabilities: string;
-  current_track: SqueezeQueueTrack | null;
-  elapsed_ms: number;
-  volume: number;
-  repeat: "Off" | "One" | "All";
-  shuffle: boolean;
-  queue_length: number;
-  queue_position: number | null;
+  host: string;
+  json_port: number;
+  uuid: string;
 }
 
-export interface SqueezeQueueTrack {
+export interface LmsPlayer {
+  player_id: string;
+  name: string;
+  model: string;
+  connected: boolean;
+  power: boolean;
+  is_playing: boolean;
+}
+
+export interface LmsPlayerStatus {
+  player_id: string;
+  player_name: string;
+  mode: "playing" | "paused" | "stopped";
+  time: number;
+  duration: number;
+  volume: number;
+  repeat: "off" | "one" | "all";
+  shuffle: "off" | "songs" | "albums";
+  playlist_tracks: number;
+  playlist_index: number;
+  current_track: LmsTrack | null;
+  playlist: LmsTrack[];
+}
+
+export interface LmsTrack {
   id: number;
   title: string;
   artist: string;
   album: string;
-  path: string;
   duration: number;
-  format: string;
+  bitrate: string | null;
+  format: string | null;
+  artwork_url: string | null;
+  url: string | null;
 }
 
-export async function squeezeStartServer(): Promise<void> {
-  return await invoke("squeeze_start_server");
+// Discovery & connection
+
+export async function lmsDiscoverServers(): Promise<LmsServer[]> {
+  return await invoke("lms_discover_servers");
 }
 
-export async function squeezeStopServer(): Promise<void> {
-  return await invoke("squeeze_stop_server");
+export async function lmsConnect(host: string, port: number): Promise<void> {
+  return await invoke("lms_connect", { host, port });
 }
 
-export async function squeezeIsRunning(): Promise<boolean> {
-  return await invoke("squeeze_is_running");
+export async function lmsDisconnect(): Promise<void> {
+  return await invoke("lms_disconnect");
 }
 
-export async function squeezeGetPlayers(): Promise<SqueezePlayerInfo[]> {
-  return await invoke("squeeze_get_players");
+export async function lmsIsConnected(): Promise<boolean> {
+  return await invoke("lms_is_connected");
 }
 
-export async function squeezeGetPlayerState(
-  mac: string,
-): Promise<SqueezePlayerInfo> {
-  return await invoke("squeeze_get_player_state", { mac });
+export async function lmsGetConnectedServer(): Promise<LmsServer | null> {
+  return await invoke("lms_get_connected_server");
 }
 
-export async function squeezePlay(
-  mac: string,
-  tracks: SqueezeQueueTrack[],
-  startIndex: number,
+// Players
+
+export async function lmsGetPlayers(): Promise<LmsPlayer[]> {
+  return await invoke("lms_get_players");
+}
+
+export async function lmsGetPlayerStatus(
+  playerId: string,
+): Promise<LmsPlayerStatus> {
+  return await invoke("lms_get_player_status", { playerId });
+}
+
+// Playback control
+
+export async function lmsPlay(playerId: string): Promise<void> {
+  return await invoke("lms_play", { playerId });
+}
+
+export async function lmsPause(playerId: string): Promise<void> {
+  return await invoke("lms_pause", { playerId });
+}
+
+export async function lmsResume(playerId: string): Promise<void> {
+  return await invoke("lms_resume", { playerId });
+}
+
+export async function lmsStop(playerId: string): Promise<void> {
+  return await invoke("lms_stop", { playerId });
+}
+
+export async function lmsNext(playerId: string): Promise<void> {
+  return await invoke("lms_next", { playerId });
+}
+
+export async function lmsPrevious(playerId: string): Promise<void> {
+  return await invoke("lms_previous", { playerId });
+}
+
+export async function lmsSeek(
+  playerId: string,
+  seconds: number,
 ): Promise<void> {
-  return await invoke("squeeze_play", { mac, tracks, startIndex });
+  return await invoke("lms_seek", { playerId, seconds });
 }
 
-export async function squeezePause(mac: string): Promise<void> {
-  return await invoke("squeeze_pause", { mac });
-}
-
-export async function squeezeResume(mac: string): Promise<void> {
-  return await invoke("squeeze_resume", { mac });
-}
-
-export async function squeezeStop(mac: string): Promise<void> {
-  return await invoke("squeeze_stop", { mac });
-}
-
-export async function squeezeSetVolume(
-  mac: string,
+export async function lmsSetVolume(
+  playerId: string,
   volume: number,
 ): Promise<void> {
-  return await invoke("squeeze_set_volume", { mac, volume });
+  return await invoke("lms_set_volume", { playerId, volume });
 }
 
-export async function squeezeNext(mac: string): Promise<void> {
-  return await invoke("squeeze_next", { mac });
-}
+// Queue management
 
-export async function squeezePrevious(mac: string): Promise<void> {
-  return await invoke("squeeze_previous", { mac });
-}
-
-export async function squeezeSeek(
-  mac: string,
-  positionSeconds: number,
+export async function lmsPlayTracks(
+  playerId: string,
+  trackIds: number[],
+  startIndex: number,
 ): Promise<void> {
-  return await invoke("squeeze_seek", { mac, positionSeconds });
+  return await invoke("lms_play_tracks", { playerId, trackIds, startIndex });
 }
 
-export async function squeezeSetRepeat(
-  mac: string,
-  mode: string,
+export async function lmsAddTracks(
+  playerId: string,
+  trackIds: number[],
 ): Promise<void> {
-  return await invoke("squeeze_set_repeat", { mac, mode });
+  return await invoke("lms_add_tracks", { playerId, trackIds });
 }
 
-export async function squeezeSetShuffle(
-  mac: string,
-  enabled: boolean,
-): Promise<void> {
-  return await invoke("squeeze_set_shuffle", { mac, enabled });
+// Status subscription
+
+export async function lmsSubscribeStatus(playerId: string): Promise<void> {
+  return await invoke("lms_subscribe_status", { playerId });
 }
 
-export async function squeezeGetQueue(
-  mac: string,
-): Promise<SqueezeQueueTrack[]> {
-  return await invoke("squeeze_get_queue", { mac });
+export async function lmsUnsubscribeStatus(): Promise<void> {
+  return await invoke("lms_unsubscribe_status");
 }
