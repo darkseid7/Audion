@@ -318,7 +318,7 @@ async fn handle_prefetch(
         }
     }
 
-    tracing::debug!("Squeeze: prefetched track \"{}\" gen={}", next_track.title, gen);
+    eprintln!("[SQUEEZE] prefetch: \"{}\" by {} (gen={})", next_track.title, next_track.artist, gen);
 }
 
 /// Handle track finished (STMu): if prefetch happened, just confirm. Otherwise, play next.
@@ -350,13 +350,15 @@ async fn handle_track_finished(
         };
 
         if has_next {
-            let path = {
+            let (path, title) = {
                 let map = players.lock().await;
                 map.get(mac)
-                    .and_then(|p| p.queue.current().map(|t| PathBuf::from(&t.path)))
+                    .and_then(|p| p.queue.current().map(|t| (PathBuf::from(&t.path), t.title.clone())))
+                    .unzip()
             };
 
-            if let Some(path) = path {
+            if let (Some(path), Some(title)) = (path, title) {
+                eprintln!("[SQUEEZE] track finished -> now playing: \"{}\"", title);
                 let gen = {
                     let mut map = players.lock().await;
                     if let Some(player) = map.get_mut(mac) {
@@ -379,6 +381,7 @@ async fn handle_track_finished(
             }
         } else {
             // Queue exhausted
+            eprintln!("[SQUEEZE] queue exhausted — stopping");
             let mut map = players.lock().await;
             if let Some(player) = map.get_mut(mac) {
                 player.state = PlayerState::Stopped;
@@ -386,6 +389,7 @@ async fn handle_track_finished(
         }
     } else {
         // Prefetch already handled it — just reset the prefetch flag
+        eprintln!("[SQUEEZE] track finished (prefetch already active)");
         let mut map = players.lock().await;
         if let Some(player) = map.get_mut(mac) {
             player.prefetched_generation = None;

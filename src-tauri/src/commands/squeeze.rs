@@ -1,5 +1,6 @@
 // Tauri IPC commands for Squeeze Connect.
 
+use crate::db::Database;
 use crate::squeeze::codec::MacAddress;
 use crate::squeeze::player::{PlayerInfo, PlayerState};
 use crate::squeeze::queue::{QueueTrack, RepeatMode};
@@ -82,11 +83,39 @@ pub async fn squeeze_get_player_state(
 #[tauri::command]
 pub async fn squeeze_play(
     mac: String,
-    tracks: Vec<QueueTrack>,
+    track_ids: Vec<i64>,
     start_index: usize,
     state: State<'_, SqueezeState>,
+    db: State<'_, Database>,
 ) -> Result<(), String> {
     let mac_addr = parse_mac(&mac)?;
+    eprintln!("[SQUEEZE] play: {} track IDs, start_index={}", track_ids.len(), start_index);
+
+    // Look up tracks from DB
+    let tracks: Vec<QueueTrack> = {
+        let conn = db.conn.lock().unwrap();
+        track_ids.iter().filter_map(|&id| {
+            crate::db::queries::get_track_by_id(&conn, id)
+                .ok()
+                .flatten()
+                .map(|t| QueueTrack {
+                    id: t.id,
+                    title: t.title.unwrap_or_else(|| "Unknown".to_string()),
+                    artist: t.artist.unwrap_or_default(),
+                    album: t.album.unwrap_or_default(),
+                    path: t.path,
+                    duration: t.duration.map(|d| d as f64).unwrap_or(0.0),
+                    format: t.format.unwrap_or_else(|| "mp3".to_string()),
+                })
+        }).collect()
+    };
+
+    eprintln!("[SQUEEZE] resolved {} tracks from DB", tracks.len());
+
+    if tracks.is_empty() {
+        return Err("No valid tracks found".into());
+    }
+
     let server = state.0.lock().await;
 
     // Set the queue
@@ -102,6 +131,7 @@ pub async fn squeeze_play(
         let map = server.players.lock().await;
         let player = map.get(&mac_addr).ok_or("Player not found")?;
         let track = player.queue.current().ok_or("No track in queue")?;
+        eprintln!("[SQUEEZE] starting: \"{}\" by {}", track.title, track.artist);
         PathBuf::from(&track.path)
     };
 
@@ -119,7 +149,6 @@ pub async fn squeeze_play(
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.start_stream(HTTP_PORT, 0).await?;
-        // CometD players don't send TCP STAT messages, so set state directly
         if player.is_cometd {
             player.state = PlayerState::Playing;
             player.elapsed_ms = 0;
@@ -130,6 +159,7 @@ pub async fn squeeze_play(
     // Notify CometD subscribers
     server.cometd.notify_player_status(&mac).await;
 
+    eprintln!("[SQUEEZE] playback started successfully");
     Ok(())
 }
 

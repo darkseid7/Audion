@@ -1276,10 +1276,10 @@ export async function squeezeGetPlayerState(
 
 export async function squeezePlay(
   mac: string,
-  tracks: SqueezeQueueTrack[],
+  trackIds: number[],
   startIndex: number,
 ): Promise<void> {
-  return await invoke("squeeze_play", { mac, tracks, startIndex });
+  return await invoke("squeeze_play", { mac, trackIds, startIndex });
 }
 
 export async function squeezePause(mac: string): Promise<void> {

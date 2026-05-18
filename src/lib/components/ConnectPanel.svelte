@@ -32,7 +32,6 @@
     squeezeSetVolume,
     squeezePlay,
     type SqueezePlayerInfo,
-    type SqueezeQueueTrack,
   } from "$lib/api/tauri";
   import { get } from "svelte/store";
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
@@ -138,24 +137,15 @@
     const $current = get(currentTrack);
     if (!$current) return;
 
-    // Build tracks from library
-    const tracks: SqueezeQueueTrack[] = $library
+    const trackIds = $library
       .filter((t: any) => t.path)
-      .map((t: any) => ({
-        id: t.id,
-        title: t.title || "Unknown",
-        artist: t.artist || "Unknown",
-        album: t.album || "Unknown",
-        path: t.path,
-        duration: t.duration || 0,
-        format: t.format || "mp3",
-      }));
+      .map((t: any) => t.id);
 
-    const startIndex = tracks.findIndex((t) => t.id === $current.id);
+    const startIndex = trackIds.indexOf($current.id);
     if (startIndex === -1) return;
 
     try {
-      await squeezePlay(mac, tracks, startIndex);
+      await squeezePlay(mac, trackIds, startIndex);
     } catch (e) {
       console.error("Squeeze play error:", e);
     }
