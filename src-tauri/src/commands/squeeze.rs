@@ -118,6 +118,17 @@ pub async fn squeeze_play(
 
     let server = state.0.lock().await;
 
+    // Stop current stream before starting new one
+    {
+        let mut map = server.players.lock().await;
+        let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        player.display_track = None;
+        player.prefetched_generation = None;
+        player.suppress_track_finished = true;
+        player.stop().await?;
+        player.flush().await?;
+    }
+
     // Set the queue
     {
         let mut map = server.players.lock().await;

@@ -157,8 +157,8 @@ async fn handle_connection(
                     }
                 };
 
-                // Notify CometD subscribers if playback state changed
-                if state_changed {
+                // Notify CometD subscribers if playback state changed or track started
+                if state_changed || stat.event == codec::StatEvent::TrackStarted {
                     cometd.notify_player_status(&mac.to_string()).await;
                 }
 
