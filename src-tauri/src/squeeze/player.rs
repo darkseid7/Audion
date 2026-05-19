@@ -66,6 +66,8 @@ pub struct SqueezePlayer {
     pub is_cometd: bool,
     /// Wall-clock instant when playback started (for CometD elapsed tracking).
     pub play_started_at: Option<Instant>,
+    /// Track to show in UI during gapless transition (before old track finishes).
+    pub display_track: Option<QueueTrack>,
 }
 
 impl SqueezePlayer {
@@ -93,6 +95,7 @@ impl SqueezePlayer {
             server_ip,
             is_cometd: false,
             play_started_at: None,
+            display_track: None,
         }
     }
 
@@ -115,6 +118,7 @@ impl SqueezePlayer {
             server_ip: Ipv4Addr::LOCALHOST,
             is_cometd: true,
             play_started_at: None,
+            display_track: None,
         }
     }
 
@@ -126,19 +130,14 @@ impl SqueezePlayer {
     }
 
     /// Get current elapsed time in milliseconds.
-    /// For CometD players, computes from wall-clock time since playback started.
-    /// For TCP players, returns the value from STAT timer events.
+    /// Uses wall-clock time since playback started for smooth progress tracking.
     pub fn get_elapsed_ms(&self) -> u32 {
-        if self.is_cometd {
-            if let Some(started) = self.play_started_at {
-                if self.state == PlayerState::Playing {
-                    return self.elapsed_ms + started.elapsed().as_millis() as u32;
-                }
+        if let Some(started) = self.play_started_at {
+            if self.state == PlayerState::Playing {
+                return self.elapsed_ms + started.elapsed().as_millis() as u32;
             }
-            self.elapsed_ms
-        } else {
-            self.elapsed_ms
         }
+        self.elapsed_ms
     }
 
     /// Send raw bytes to the player (SlimProto only).
@@ -166,7 +165,8 @@ impl SqueezePlayer {
         Ok(())
     }
 
-    /// Start streaming a track. Returns the new generation.
+    /// Start streaming a track. Returns the current generation.
+    /// Callers must increment `self.generation` before calling this.
     pub async fn start_stream(
         &mut self,
         http_port: u16,
@@ -174,14 +174,13 @@ impl SqueezePlayer {
     ) -> Result<u64, String> {
         let track = self.queue.current().ok_or("No current track")?.clone();
 
-        self.generation += 1;
         let gen = self.generation;
 
         if flags & 0x40 == 0 {
             // Not gapless — reset confirmations
             self.confirmed_generation = None;
+            self.prefetched_generation = None;
         }
-        self.prefetched_generation = None;
 
         let ext = Path::new(&track.path)
             .extension()
@@ -209,7 +208,9 @@ impl SqueezePlayer {
 
         let frame = codec::encode_strm_start(&params);
         self.send(&frame).await.map_err(|e| e.to_string())?;
-        self.state = PlayerState::Buffering;
+        if flags & 0x40 == 0 {
+            self.state = PlayerState::Buffering;
+        }
 
         tracing::info!(
             "Squeeze: started stream gen={} track=\"{}\" on player {}",
@@ -263,6 +264,10 @@ impl SqueezePlayer {
             StatEvent::TrackStarted => {
                 self.state = PlayerState::Playing;
                 self.confirmed_generation = Some(self.generation);
+                self.display_track = None;
+                self.elapsed_ms = self.seek_offset_ms;
+                self.seek_offset_ms = 0;
+                self.play_started_at = Some(Instant::now());
                 tracing::debug!("Squeeze: STMs gen={} player={}", self.generation, self.mac);
                 StatAction::None
             }
@@ -289,10 +294,15 @@ impl SqueezePlayer {
                 StatAction::TrackFinished
             }
             StatEvent::Paused => {
+                if self.state == PlayerState::Playing {
+                    self.elapsed_ms = self.get_elapsed_ms();
+                    self.play_started_at = None;
+                }
                 self.state = PlayerState::Paused;
                 StatAction::None
             }
             StatEvent::Resumed => {
+                self.play_started_at = Some(Instant::now());
                 self.state = PlayerState::Playing;
                 StatAction::None
             }
@@ -301,11 +311,13 @@ impl SqueezePlayer {
                 StatAction::None
             }
             StatEvent::Timer => {
-                self.elapsed_ms = stat.elapsed_milliseconds + self.seek_offset_ms;
+                // Wall-clock tracking handles elapsed time; don't update from STAT.
                 StatAction::None
             }
             StatEvent::Connected => {
-                self.state = PlayerState::Buffering;
+                if self.state != PlayerState::Playing {
+                    self.state = PlayerState::Buffering;
+                }
                 StatAction::None
             }
             StatEvent::BufferThreshold => {
@@ -330,7 +342,7 @@ impl SqueezePlayer {
             name: self.name.clone(),
             state: self.state,
             capabilities: self.capabilities.clone(),
-            current_track: self.queue.current().cloned(),
+            current_track: self.display_track.as_ref().or_else(|| self.queue.current()).cloned(),
             elapsed_ms: self.get_elapsed_ms(),
             volume: self.volume,
             repeat: self.queue.repeat,

@@ -24,17 +24,12 @@
     squeezeStopServer,
     squeezeIsRunning,
     squeezeGetPlayers,
-    squeezePause,
-    squeezeResume,
-    squeezeStop,
-    squeezeNext,
-    squeezePrevious,
-    squeezeSetVolume,
     squeezePlay,
     type SqueezePlayerInfo,
   } from "$lib/api/tauri";
   import { get } from "svelte/store";
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
+  import { activeSqueezePlayer, squeezePlayerState } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
 
@@ -43,7 +38,6 @@
   let squeezePlayers: SqueezePlayerInfo[] = [];
   let squeezePolling: ReturnType<typeof setInterval> | null = null;
   let squeezeStarting = false;
-  let activeSqueezePlayer: string | null = null;
 
   onMount(async () => {
     try {
@@ -83,8 +77,8 @@
         squeezeRunning = false;
         squeezePlayers = [];
         stopSqueezePolling();
-        if (activeSqueezePlayer) {
-          activeSqueezePlayer = null;
+        if ($activeSqueezePlayer) {
+          activeSqueezePlayer.set(null);
           activeBackend.set("none");
         }
       } else {
@@ -99,39 +93,16 @@
   }
 
   function selectSqueezePlayer(player: SqueezePlayerInfo) {
-    if (activeSqueezePlayer === player.mac) {
-      activeSqueezePlayer = null;
+    if ($activeSqueezePlayer === player.mac) {
+      activeSqueezePlayer.set(null);
       activeBackend.set("none");
     } else {
-      activeSqueezePlayer = player.mac;
-      activeBackend.set("squeeze" as any);
+      activeSqueezePlayer.set(player.mac);
+      activeBackend.set("squeeze");
       activeRemoteDevice.set(null);
     }
   }
 
-  async function handleSqueezeCommand(mac: string, cmd: string) {
-    try {
-      switch (cmd) {
-        case "pause": await squeezePause(mac); break;
-        case "resume": await squeezeResume(mac); break;
-        case "stop": await squeezeStop(mac); break;
-        case "next": await squeezeNext(mac); break;
-        case "previous": await squeezePrevious(mac); break;
-      }
-    } catch (e) {
-      console.error("Squeeze command error:", e);
-    }
-  }
-
-  async function handleSqueezeVolume(mac: string, e: Event) {
-    const target = e.target as HTMLInputElement;
-    const vol = parseInt(target.value);
-    try {
-      await squeezeSetVolume(mac, vol);
-    } catch {}
-  }
-
-  // Send current Audion queue to the Squeeze player
   async function playOnSqueezePlayer(mac: string) {
     const $library = get(libraryTracks);
     const $current = get(currentTrack);
@@ -253,7 +224,7 @@
     </header>
 
     <div class="session-section">
-      <div class="status-card" class:remote={$activeBackend === "remote"}>
+      <div class="status-card" class:remote={$activeBackend === "remote" || $activeBackend === "squeeze"}>
         <div class="device-icon-glow">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
             <path
@@ -262,7 +233,10 @@
           </svg>
         </div>
         <div class="status-info">
-          {#if $activeBackend === "remote"}
+          {#if $activeBackend === "squeeze"}
+            <span class="label">Squeeze Connect</span>
+            <span class="value">{$squeezePlayerState?.name ?? 'Connected'}</span>
+          {:else if $activeBackend === "remote"}
             <span class="label">Controlling Remote</span>
             <span class="value">Active Session</span>
           {:else}
@@ -270,7 +244,7 @@
             <span class="value">This Device</span>
           {/if}
         </div>
-        {#if $isPlaying || $activeBackend === "remote"}
+        {#if $isPlaying || $activeBackend === "remote" || $activeBackend === "squeeze"}
           <div class="playing-indicator">
             <span></span><span></span><span></span>
           </div>
@@ -304,7 +278,7 @@
             {#each squeezePlayers as player (player.mac)}
               <div
                 class="device-card"
-                class:active={activeSqueezePlayer === player.mac}
+                class:active={$activeSqueezePlayer === player.mac}
                 in:fly={{ y: 20, duration: 300 }}
               >
                 <div class="card-main">
@@ -324,47 +298,15 @@
                       <span class="idle-text">{player.state === 'Stopped' ? 'Ready' : player.state}</span>
                     {/if}
                   </div>
-
-                  {#if player.current_track}
-                    <div class="mini-controls">
-                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'previous')}>
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
-                      </button>
-                      <button class="icon-btn highlight" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, player.state === 'Playing' ? 'pause' : 'resume')}>
-                        {#if player.state === 'Playing'}
-                          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                        {:else}
-                          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                        {/if}
-                      </button>
-                      <button class="icon-btn" on:click|stopPropagation={() => handleSqueezeCommand(player.mac, 'next')}>
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-                      </button>
-                    </div>
-                  {/if}
-                </div>
-
-                <!-- Volume slider -->
-                <div class="squeeze-volume">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" opacity="0.5">
-                    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
-                  </svg>
-                  <input
-                    type="range"
-                    min="0" max="100"
-                    value={player.volume}
-                    on:input={(e) => handleSqueezeVolume(player.mac, e)}
-                    class="volume-slider"
-                  />
                 </div>
 
                 <div class="card-actions">
                   <button
                     class="btn secondary"
-                    class:active={activeSqueezePlayer === player.mac}
+                    class:active={$activeSqueezePlayer === player.mac}
                     on:click={() => selectSqueezePlayer(player)}
                   >
-                    {activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
+                    {$activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
                   </button>
                   <button
                     class="btn primary"
@@ -1050,32 +992,6 @@
   .squeeze-icon {
     background: color-mix(in srgb, var(--accent-primary), transparent 90%) !important;
     color: var(--accent-primary) !important;
-  }
-
-  .squeeze-volume {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 4px;
-    margin-bottom: 12px;
-  }
-
-  .volume-slider {
-    flex: 1;
-    height: 4px;
-    -webkit-appearance: none;
-    appearance: none;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 2px;
-    outline: none;
-  }
-  .volume-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--accent-primary);
-    cursor: pointer;
   }
 
   .empty-state.compact {

@@ -149,10 +149,10 @@ pub async fn squeeze_play(
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.start_stream(HTTP_PORT, 0).await?;
+        player.elapsed_ms = 0;
+        player.play_started_at = Some(Instant::now());
         if player.is_cometd {
             player.state = PlayerState::Playing;
-            player.elapsed_ms = 0;
-            player.play_started_at = Some(Instant::now());
         }
     }
 
@@ -170,10 +170,9 @@ pub async fn squeeze_pause(mac: String, state: State<'_, SqueezeState>) -> Resul
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        player.elapsed_ms = player.get_elapsed_ms();
+        player.play_started_at = None;
         if player.is_cometd {
-            // Freeze elapsed time before pausing
-            player.elapsed_ms = player.get_elapsed_ms();
-            player.play_started_at = None;
             player.state = PlayerState::Paused;
         }
         player.pause().await?;
@@ -189,9 +188,8 @@ pub async fn squeeze_resume(mac: String, state: State<'_, SqueezeState>) -> Resu
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        player.play_started_at = Some(Instant::now());
         if player.is_cometd {
-            // Resume wall-clock tracking from frozen elapsed
-            player.play_started_at = Some(Instant::now());
             player.state = PlayerState::Playing;
         }
         player.resume().await?;
@@ -207,10 +205,8 @@ pub async fn squeeze_stop(mac: String, state: State<'_, SqueezeState>) -> Result
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        if player.is_cometd {
-            player.elapsed_ms = 0;
-            player.play_started_at = None;
-        }
+        player.elapsed_ms = 0;
+        player.play_started_at = None;
         player.stop().await?;
     }
     server.cometd.notify_player_status(&mac).await;
@@ -230,7 +226,6 @@ pub async fn squeeze_set_volume(
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.set_volume(volume).await?;
     }
-    server.cometd.notify_player_status(&mac).await;
     Ok(())
 }
 
@@ -243,16 +238,23 @@ pub async fn squeeze_next(mac: String, state: State<'_, SqueezeState>) -> Result
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        player.display_track = None;
         player.stop().await?;
         player.flush().await?;
         player.suppress_track_finished = true;
     }
 
-    // Advance queue
+    // Advance queue (skip if prefetch already advanced it)
     let has_next = {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.queue.next().is_some()
+        if player.prefetched_generation.is_some() {
+            // Prefetch already advanced the queue
+            player.prefetched_generation = None;
+            player.queue.current().is_some()
+        } else {
+            player.queue.next().is_some()
+        }
     };
 
     if !has_next {
@@ -280,11 +282,11 @@ pub async fn squeeze_next(mac: String, state: State<'_, SqueezeState>) -> Result
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.seek_offset_ms = 0;
+        player.elapsed_ms = 0;
+        player.play_started_at = Some(Instant::now());
         player.start_stream(HTTP_PORT, 0).await?;
         if player.is_cometd {
             player.state = PlayerState::Playing;
-            player.elapsed_ms = 0;
-            player.play_started_at = Some(Instant::now());
         }
     }
 
@@ -303,15 +305,20 @@ pub async fn squeeze_previous(mac: String, state: State<'_, SqueezeState>) -> Re
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        player.display_track = None;
         player.stop().await?;
         player.flush().await?;
         player.suppress_track_finished = true;
     }
 
-    // Go back in queue
+    // Go back in queue (undo prefetch advance first if needed)
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+        if player.prefetched_generation.is_some() {
+            player.queue.previous(); // undo prefetch advance
+            player.prefetched_generation = None;
+        }
         if player.queue.previous().is_none() {
             return Err("No previous track".into());
         }
@@ -338,11 +345,11 @@ pub async fn squeeze_previous(mac: String, state: State<'_, SqueezeState>) -> Re
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.seek_offset_ms = 0;
+        player.elapsed_ms = 0;
+        player.play_started_at = Some(Instant::now());
         player.start_stream(HTTP_PORT, 0).await?;
         if player.is_cometd {
             player.state = PlayerState::Playing;
-            player.elapsed_ms = 0;
-            player.play_started_at = Some(Instant::now());
         }
     }
 
@@ -402,10 +409,10 @@ pub async fn squeeze_seek(
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
         player.start_stream(HTTP_PORT, 0).await?;
+        player.elapsed_ms = (position_seconds * 1000.0) as u32;
+        player.play_started_at = Some(Instant::now());
         if player.is_cometd {
             player.state = PlayerState::Playing;
-            player.elapsed_ms = (position_seconds * 1000.0) as u32;
-            player.play_started_at = Some(Instant::now());
         }
     }
 

@@ -17,6 +17,7 @@
         toggleShuffle,
         cycleRepeat,
         isStreaming,
+        activeBackend,
     } from "$lib/stores/player";
     import { lyricsVisible, toggleLyrics } from "$lib/stores/lyrics";
     import {
@@ -50,6 +51,7 @@
     import ConnectPanel from "./ConnectPanel.svelte";
     import WaveformSeekBar from "./WaveformSeekBar.svelte";
     import { wsStore } from "$lib/stores/websocket";
+    import { activeSqueezePlayer, squeezePlayerState } from "$lib/stores/squeeze";
 
     $: isCurrentLiked = $currentTrack
         ? $likedTrackIds.has($currentTrack.id)
@@ -79,6 +81,10 @@
     let sleepTimerElement: HTMLDivElement;
 
     $: connectedDevices = $wsStore.devices.length;
+    $: squeezeConnected = !!$activeSqueezePlayer;
+    $: deviceTooltip = squeezeConnected && $squeezePlayerState
+        ? `Connected to ${$squeezePlayerState.name}`
+        : "Connect to a device";
 
     // Audio quality info for current track
     function parseTrackAudioInfo(track: any) {
@@ -414,9 +420,9 @@
                 >
                     <button
                         class="mini-btn connect-btn"
-                        class:active={connectedDevices > 0}
+                        class:active={connectedDevices > 0 || squeezeConnected}
                         on:click|stopPropagation={() => (showConnectPanel = !showConnectPanel)}
-                        title="Connect to a device"
+                        title={deviceTooltip}
                     >
                         <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
                             <path d="M19,2H5A3,3,0,0,0,2,5V15a3,3,0,0,0,3,3H9.17l-1.42,1.41a1,1,0,0,0,0,1.42,1,1,0,0,0,1.42,0L11,18.99,12.83,20.83a1,1,0,0,0,1.42,0,1,1,0,0,0,0-1.42L12.83,18H19a3,3,0,0,0,3-3V5A3,3,0,0,0,19,2Zm1,13a1,1,0,0,1-1,1H5a1,1,0,0,1-1-1V5A1,1,0,0,1,5,4H19a1,1,0,0,1,1,1Z"/>
@@ -664,7 +670,7 @@
                     >
                 {:else}
                     <span class="time">{formatDuration($currentTime)}</span>
-                    {#if isLocalTrack}
+                    {#if isLocalTrack && $activeBackend !== 'squeeze'}
                         <div class="waveform-container">
                             <WaveformSeekBar
                                 track={$currentTrack}
@@ -710,14 +716,14 @@
                 <!-- Connect button moved into utility group -->
                 <button
                     class="icon-btn connect-btn"
-                    class:active={connectedDevices > 0}
+                    class:active={connectedDevices > 0 || squeezeConnected}
                     on:click={() => (showConnectPanel = !showConnectPanel)}
-                    title="Connect to a device"
+                    title={deviceTooltip}
                 >
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                         <path d="M19,2H5A3,3,0,0,0,2,5V15a3,3,0,0,0,3,3H9.17l-1.42,1.41a1,1,0,0,0,0,1.42,1,1,0,0,0,1.42,0L11,18.99,12.83,20.83a1,1,0,0,0,1.42,0,1,1,0,0,0,0-1.42L12.83,18H19a3,3,0,0,0,3-3V5A3,3,0,0,0,19,2Zm1,13a1,1,0,0,1-1,1H5a1,1,0,0,1-1-1V5A1,1,0,0,1,5,4H19a1,1,0,0,1,1,1Z"/>
                     </svg>
-                    {#if connectedDevices > 0}
+                    {#if connectedDevices > 0 || squeezeConnected}
                         <div class="device-dot"></div>
                     {/if}
                 </button>
@@ -919,7 +925,7 @@
         background-color: var(--bg-elevated);
         border-top: 1px solid var(--border-color);
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+        grid-template-columns: minmax(0, 1.3fr) minmax(0, 2fr) minmax(0, 0.7fr);
         align-items: center;
         padding: 0 calc(var(--spacing-md) + 2px);
         gap: clamp(20px, 2.2vw, 36px);
@@ -1112,9 +1118,11 @@
         display: flex;
         flex-direction: column;
         align-items: center;
+        justify-content: center;
         gap: var(--spacing-xs);
         min-width: 0;
         overflow: visible;
+        height: 100%;
     }
 
     .controls-buttons {

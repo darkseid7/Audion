@@ -22,6 +22,18 @@ import { pluginStore } from '$lib/stores/plugin-store';
 import { recordTrackPlay } from '$lib/stores/activity';
 import { submitListenbrainzListen } from '$lib/api/tauri';
 import { activeRemoteDevice } from '$lib/stores/websocket';
+import { activeSqueezePlayer, squeezePlayerState, setSqueezeVolumeCooldown } from '$lib/stores/squeeze';
+import {
+    squeezePause,
+    squeezeResume,
+    squeezeNext,
+    squeezePrevious,
+    squeezeSeek,
+    squeezeSetVolume,
+    squeezeSetShuffle,
+    squeezeSetRepeat,
+    squeezePlay,
+} from '$lib/api/tauri';
 
 // =============================================================================
 // NATIVE AUDIO BACKEND
@@ -64,7 +76,7 @@ let lastEqBypassWarningHost: string | null = null;
 let dashPlayer: any | null = null;
 
 // Track which backend is currently active ('native', 'html5', 'remote', or 'none')
-export type ActiveBackend = 'native' | 'html5' | 'remote' | 'none';
+export type ActiveBackend = 'native' | 'html5' | 'remote' | 'squeeze' | 'none';
 export const activeBackend = writable<ActiveBackend>('none');
 
 // Track if we should use native audio based on platform/settings
@@ -617,8 +629,11 @@ export async function initAudioBackend(): Promise<void> {
         // Force an immediate broadcast when play/pause state changes
         // so remote Connect Panels stay perfectly in sync
         broadcastState(true);
+        const backend = get(activeBackend);
         if (playing) {
-            startStatePoller();
+            if (backend !== 'remote' && backend !== 'squeeze') {
+                startStatePoller();
+            }
         } else {
             stopStatePoller();
         }
@@ -631,6 +646,9 @@ export async function initAudioBackend(): Promise<void> {
 
     // Subscribe to volume changes to keep backends in sync
     volume.subscribe((val) => {
+        const backend = get(activeBackend);
+        if (backend === 'squeeze' || backend === 'remote') return;
+
         const audioVol = sliderToAudioVolume(val);
 
         // Update HTML5 backend
@@ -685,8 +703,8 @@ export async function initAudioBackend(): Promise<void> {
 
     // Sub due to initialization of active setting
     activeBackend.subscribe(b => {
-        if (b === 'remote') {
-            stopStatePoller(); // Ensure local poller is off
+        if (b === 'remote' || b === 'squeeze') {
+            stopStatePoller();
         }
     });
 
@@ -838,6 +856,8 @@ function startStatePoller(): void {
                 });
             } else if (get(activeBackend) === 'remote') {
                 // If remote, do NOT poll native audio. We rely purely on WebSocket pushes.
+            } else if (get(activeBackend) === 'squeeze') {
+                // Squeeze store handles time updates via polling.
             }
 
             // Sync Media Session position if something is playing
@@ -858,7 +878,7 @@ let lastBroadcast = 0;
 function broadcastState(force = false) {
     // CRITICAL: Do not broadcast if this device is not the owner of the playback.
     // This prevents infinite state "echo" loops across devices.
-    if (get(activeBackend) === 'remote') return;
+    if (get(activeBackend) === 'remote' || get(activeBackend) === 'squeeze') return;
 
     const now = Date.now();
     if (!force && now - lastBroadcast < 2000) return;
@@ -1208,6 +1228,27 @@ export async function playTrack(track: Track, skipLocalSrc = false, startTime = 
         return;
     }
 
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) {
+            const q = get(queue);
+            const idx = get(queueIndex);
+            const trackIds = q.length > 0 ? q.map(t => t.id) : [track.id];
+            const startIdx = q.length > 0 ? idx : 0;
+            try {
+                await squeezePlay(mac, trackIds, startIdx);
+            } catch (err) {
+                console.error('[Player] Squeeze play failed:', err);
+                addToast(`Squeeze playback failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+            }
+            currentTrack.set(trackForPlugins);
+            currentTime.set(startTime);
+            duration.set(track.duration || 0);
+            isPlaying.set(true);
+        }
+        return;
+    }
+
     try {
         let audioPath = track.local_src || track.path;
 
@@ -1463,6 +1504,12 @@ export async function togglePlay(): Promise<void> {
 }
 
 export async function pause(): Promise<void> {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) squeezePause(mac).catch(console.error);
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1485,6 +1532,27 @@ export async function pause(): Promise<void> {
 }
 
 export async function resume(): Promise<void> {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (!mac) return;
+
+        const state = get(squeezePlayerState);
+        if (state?.current_track) {
+            squeezeResume(mac).catch(console.error);
+        } else {
+            const q = get(queue);
+            const idx = get(queueIndex);
+            const track = get(currentTrack);
+            if (q.length > 0) {
+                const trackIds = q.map(t => t.id);
+                squeezePlay(mac, trackIds, idx).catch(console.error);
+            } else if (track) {
+                squeezePlay(mac, [track.id], 0).catch(console.error);
+            }
+        }
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1581,6 +1649,12 @@ function _advanceQueueIndex(dry = false): number | null {
 
 // Next track
 export function nextTrack(): void {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) squeezeNext(mac).catch(console.error);
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1643,6 +1717,12 @@ function playRandomFromLibrary(): void {
 
 // Previous track
 export async function previousTrack(): Promise<void> {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) squeezePrevious(mac).catch(console.error);
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1698,6 +1778,15 @@ export async function previousTrack(): Promise<void> {
 
 // Seek to position (0-1)
 export async function seek(position: number): Promise<void> {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) {
+            const posSeconds = position * get(duration);
+            squeezeSeek(mac, posSeconds).catch(console.error);
+        }
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1727,6 +1816,16 @@ export async function seek(position: number): Promise<void> {
 
 // Set volume (slider value 0-1, will be converted to logarithmic for audio)
 export async function setVolume(sliderValue: number): Promise<void> {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) {
+            volume.set(sliderValue);
+            setSqueezeVolumeCooldown();
+            throttledSqueezeVolume(mac, Math.round(sliderValue * 100));
+        }
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1754,6 +1853,12 @@ export async function setVolume(sliderValue: number): Promise<void> {
 
 // Toggle shuffle
 export function toggleShuffle(): void {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) squeezeSetShuffle(mac, !get(shuffle)).catch(console.error);
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -1792,6 +1897,16 @@ export function toggleShuffle(): void {
 
 // Cycle repeat mode
 export function cycleRepeat(): void {
+    if (get(activeBackend) === 'squeeze') {
+        const mac = get(activeSqueezePlayer);
+        if (mac) {
+            const r = get(repeat);
+            const next = r === 'none' ? 'all' : r === 'all' ? 'one' : 'off';
+            squeezeSetRepeat(mac, next).catch(console.error);
+        }
+        return;
+    }
+
     if (get(activeBackend) === 'remote') {
         const targetId = get(activeRemoteDevice);
         if (targetId) {
@@ -2295,6 +2410,21 @@ function throttledRemoteCommand(targetDeviceId: string, command: string, data: a
     remoteThrottleTimers[key] = setTimeout(() => {
         delete remoteThrottleTimers[key];
     }, delay);
+}
+
+let squeezeVolumeTimer: ReturnType<typeof setTimeout> | null = null;
+let squeezeVolumePending: { mac: string; vol: number } | null = null;
+function throttledSqueezeVolume(mac: string, vol: number) {
+    squeezeVolumePending = { mac, vol };
+    if (squeezeVolumeTimer) return;
+    squeezeSetVolume(mac, vol).catch(console.error);
+    squeezeVolumeTimer = setTimeout(() => {
+        squeezeVolumeTimer = null;
+        if (squeezeVolumePending) {
+            squeezeSetVolume(squeezeVolumePending.mac, squeezeVolumePending.vol).catch(console.error);
+            squeezeVolumePending = null;
+        }
+    }, 150);
 }
 
 /**

@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -167,6 +168,7 @@ async fn handle_connection(
                     }
                     StatAction::TrackFinished => {
                         handle_track_finished(&mac, &players, &streaming).await;
+                        cometd.notify_player_status(&mac.to_string()).await;
                     }
                     StatAction::None => {}
                 }
@@ -292,6 +294,9 @@ async fn handle_prefetch(
             None => return,
         };
 
+        // Save current track for display before advancing queue
+        player.display_track = player.queue.current().cloned();
+
         // Advance queue to next track
         let next = match player.queue.next() {
             Some(t) => t.clone(),
@@ -374,6 +379,8 @@ async fn handle_track_finished(
                 let mut map = players.lock().await;
                 if let Some(player) = map.get_mut(mac) {
                     player.seek_offset_ms = 0;
+                    player.elapsed_ms = 0;
+                    player.play_started_at = Some(Instant::now());
                     if let Err(e) = player.start_stream(HTTP_PORT, 0).await {
                         tracing::error!("Squeeze: track-finished start_stream failed: {}", e);
                     }
@@ -392,8 +399,11 @@ async fn handle_track_finished(
         eprintln!("[SQUEEZE] track finished (prefetch already active)");
         let mut map = players.lock().await;
         if let Some(player) = map.get_mut(mac) {
+            player.display_track = None;
             player.prefetched_generation = None;
             player.seek_offset_ms = 0;
+            player.elapsed_ms = 0;
+            player.play_started_at = Some(Instant::now());
         }
     }
 }
