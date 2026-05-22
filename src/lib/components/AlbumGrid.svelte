@@ -28,6 +28,8 @@
     } from "$lib/stores/pinned";
     import { setCustomArtwork } from "$lib/stores/customArtwork";
     import { addToast } from "$lib/stores/toast";
+    import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
+    import { _ } from "svelte-i18n";
 
     let currentScrollTop = getScroll("albums");
 
@@ -276,6 +278,7 @@
 
     async function handleAlbumContextMenu(album: Album, e: MouseEvent) {
         const pinned = isPinned("album", album.id, $pinnedItems);
+        const savedForLater = isInListenLater(album.id);
         contextMenu.set({
             visible: true,
             x: e.clientX,
@@ -284,6 +287,21 @@
                 {
                     label: "Play",
                     action: () => playAlbum(album),
+                },
+                {
+                    label: savedForLater
+                        ? $_("contextMenu.removeFromListenLater", { default: "Quitar de Escuchar más tarde" })
+                        : $_("contextMenu.listenLater", { default: "Escuchar más tarde" }),
+                    action: async () => {
+                        const wasSaved = isInListenLater(album.id);
+                        await toggleListenLater(album.id);
+                        addToast(
+                            wasSaved
+                                ? $_("listenLater.removedToast", { default: "Álbum eliminado de Escuchar más tarde" })
+                                : $_("listenLater.addedToast", { default: "Álbum añadido a Escuchar más tarde" }),
+                            "success",
+                        );
+                    },
                 },
                 {
                     label: pinned ? "Unpin from Top" : "Pin to Top",

@@ -1,6 +1,8 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
     import { convertFileSrc } from '$lib/api/tauri';
+    import { queue, queueIndex } from '$lib/stores/player';
+    import type { Track } from '$lib/api/tauri';
 
     export let track: any;
     export let progress: number = 0;
@@ -19,12 +21,96 @@
     let rafId: number | null = null;
     let resizeObserver: ResizeObserver;
     let abortController: AbortController | null = null;
+    let destroyed = false;
+
+    const PREFETCH_CONCURRENCY = 2;
+    const prefetchQueue: string[] = [];
+    const prefetchQueued = new Set<string>();
+    const prefetchInFlight = new Set<string>();
 
     // Session cache: path → raw high-res data
     const cache = new Map<string, { rms: Float32Array; peak: Float32Array }>();
 
-    $: if (track?.path) loadWaveform(track.path);
+    $: {
+        const path = track?.path;
+        if (path && canDecodeWaveformPath(path)) {
+            loadWaveform(path);
+        } else {
+            rawData = null;
+            loading = false;
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+            scheduleRedraw();
+        }
+    }
+    $: {
+        const tracks = $queue;
+        const idx = $queueIndex;
+        enqueueQueuePrefetch(tracks, idx);
+        pumpPrefetch();
+    }
     $: { progress; hoverPos; scheduleRedraw(); }
+
+    function canDecodeWaveformPath(path: string): boolean {
+        if (!path) return false;
+        const lower = path.toLowerCase();
+
+        if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('blob:')) {
+            return false;
+        }
+
+        // Local filesystem paths and Tauri local schemes are supported.
+        return !path.includes('://') || lower.startsWith('file://') || lower.startsWith('asset://') || lower.startsWith('tauri://');
+    }
+
+    function toWaveformUrl(path: string): string {
+        return path.includes('://') ? path : convertFileSrc(path);
+    }
+
+    function enqueueQueuePrefetch(tracks: Track[], currentIdx: number): void {
+        if (!tracks || tracks.length === 0) return;
+
+        const safeIdx = Math.max(0, Math.min(currentIdx, tracks.length - 1));
+        const ordered: string[] = [];
+
+        // Prioritize upcoming tracks, then wrap to the beginning.
+        for (let i = safeIdx; i < tracks.length; i++) {
+            const path = tracks[i]?.path;
+            if (path && canDecodeWaveformPath(path)) ordered.push(path);
+        }
+        for (let i = 0; i < safeIdx; i++) {
+            const path = tracks[i]?.path;
+            if (path && canDecodeWaveformPath(path)) ordered.push(path);
+        }
+
+        for (const path of ordered) {
+            if (cache.has(path) || prefetchQueued.has(path) || prefetchInFlight.has(path)) continue;
+            prefetchQueue.push(path);
+            prefetchQueued.add(path);
+        }
+    }
+
+    function pumpPrefetch(): void {
+        if (destroyed) return;
+
+        while (prefetchInFlight.size < PREFETCH_CONCURRENCY && prefetchQueue.length > 0) {
+            const nextPath = prefetchQueue.shift();
+            if (!nextPath) break;
+
+            prefetchQueued.delete(nextPath);
+            if (cache.has(nextPath) || prefetchInFlight.has(nextPath)) continue;
+
+            prefetchInFlight.add(nextPath);
+            void decodeAndCacheWaveform(nextPath)
+                .catch(() => {})
+                .finally(() => {
+                    prefetchInFlight.delete(nextPath);
+                    pumpPrefetch();
+                });
+        }
+    }
 
     async function loadWaveform(path: string) {
         if (cache.has(path)) {
@@ -42,22 +128,39 @@
         scheduleRedraw();
 
         try {
-            const url = convertFileSrc(path);
-            const response = await fetch(url, { signal });
-            const arrayBuffer = await response.arrayBuffer();
-            if (signal.aborted) return;
+            const decoded = await decodeAndCacheWaveform(path, signal);
+            if (signal.aborted || !decoded) return;
+            rawData = decoded;
+        } catch (e: any) {
+            if (e?.name !== 'AbortError') console.error('[WaveformSeekBar]', e);
+        } finally {
+            loading = false;
+            scheduleRedraw();
+        }
+    }
 
-            const audioCtx = new AudioContext();
+    async function decodeAndCacheWaveform(
+        path: string,
+        signal?: AbortSignal
+    ): Promise<{ rms: Float32Array; peak: Float32Array } | null> {
+        if (cache.has(path)) return cache.get(path)!;
+
+        const url = toWaveformUrl(path);
+        const response = await fetch(url, signal ? { signal } : undefined);
+        const arrayBuffer = await response.arrayBuffer();
+        if (signal?.aborted) return null;
+
+        const audioCtx = new AudioContext();
+        try {
             const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-            audioCtx.close();
-            if (signal.aborted) return;
+            if (signal?.aborted) return null;
 
             const numChannels = audioBuffer.numberOfChannels;
             const length = audioBuffer.length;
             const channels: Float32Array[] = [];
             for (let c = 0; c < numChannels; c++) channels.push(audioBuffer.getChannelData(c));
 
-            const blockSize = Math.floor(length / SOURCE_RESOLUTION);
+            const blockSize = Math.max(1, Math.floor(length / SOURCE_RESOLUTION));
             const rms = new Float32Array(SOURCE_RESOLUTION);
             const peak = new Float32Array(SOURCE_RESOLUTION);
 
@@ -65,15 +168,25 @@
                 let sumSq = 0;
                 let peakAbs = 0;
                 const start = i * blockSize;
-                for (let j = 0; j < blockSize; j++) {
+                const end = Math.min(length, start + blockSize);
+
+                if (start >= length || end <= start) {
+                    rms[i] = 0;
+                    peak[i] = 0;
+                    continue;
+                }
+
+                for (let j = start; j < end; j++) {
                     let s = 0;
-                    for (let c = 0; c < numChannels; c++) s += channels[c][start + j];
+                    for (let c = 0; c < numChannels; c++) s += channels[c][j];
                     s /= numChannels;
                     sumSq += s * s;
                     const a = Math.abs(s);
                     if (a > peakAbs) peakAbs = a;
                 }
-                rms[i] = Math.sqrt(sumSq / blockSize);
+
+                const samples = end - start;
+                rms[i] = Math.sqrt(sumSq / samples);
                 peak[i] = peakAbs;
             }
 
@@ -93,13 +206,11 @@
                 if (peak[i] < 0.01) peak[i] = 0;
             }
 
-            rawData = { rms, peak };
-            cache.set(path, rawData);
-        } catch (e: any) {
-            if (e?.name !== 'AbortError') console.error('[WaveformSeekBar]', e);
+            const result = { rms, peak };
+            cache.set(path, result);
+            return result;
         } finally {
-            loading = false;
-            scheduleRedraw();
+            audioCtx.close();
         }
     }
 
@@ -230,8 +341,12 @@
     });
 
     onDestroy(() => {
+        destroyed = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
         if (abortController) abortController.abort();
+        prefetchQueue.length = 0;
+        prefetchQueued.clear();
+        prefetchInFlight.clear();
         resizeObserver?.disconnect();
         window.removeEventListener('mousemove', handleGlobalMouseMove);
         window.removeEventListener('mouseup', handleGlobalMouseUp);

@@ -35,19 +35,10 @@
         getAlbumCoverSrc,
     } from "$lib/api/tauri";
     import { uiSlotManager } from "$lib/plugins/ui-slots";
-    import { pluginDrawerOpen } from "$lib/stores/plugin-drawer";
     import { goToArtistDetail } from "$lib/stores/view";
     import { isMobile } from "$lib/stores/mobile";
     import type { Album } from "$lib/api/tauri";
     import { likedTrackIds, toggleLike } from "$lib/stores/liked";
-    import {
-        sleepTimerActive,
-        sleepTimerLastDurationMinutes,
-        sleepTimerRemainingMs,
-        SLEEP_TIMER_PRESETS,
-        startSleepTimer,
-        stopSleepTimer,
-    } from "$lib/stores/sleepTimer";
     import ConnectPanel from "./ConnectPanel.svelte";
     import WaveformSeekBar from "./WaveformSeekBar.svelte";
     import { wsStore } from "$lib/stores/websocket";
@@ -77,8 +68,6 @@
     let imageLoadFailed = false;
     let loadedAlbum: any = null;
     let showConnectPanel = false;
-    let showSleepTimerMenu = false;
-    let sleepTimerElement: HTMLDivElement;
 
     $: connectedDevices = $wsStore.devices.length;
     $: squeezeConnected = !!$activeSqueezePlayer;
@@ -227,39 +216,6 @@
         }
     }
 
-    function getRepeatIcon(mode: "none" | "one" | "all"): string {
-        if (mode === "one") return "1";
-        return "";
-    }
-
-    function formatSleepTimerRemaining(ms: number): string {
-        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-
-        if (minutes >= 60) {
-            const hours = Math.floor(minutes / 60);
-            const remainingMinutes = minutes % 60;
-            return `${hours}h ${remainingMinutes}m`;
-        }
-
-        return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-    }
-
-    function toggleSleepTimerMenu() {
-        showSleepTimerMenu = !showSleepTimerMenu;
-    }
-
-    function setSleepTimer(minutes: number) {
-        startSleepTimer(minutes);
-        showSleepTimerMenu = false;
-    }
-
-    function cancelSleepTimer() {
-        stopSleepTimer();
-        showSleepTimerMenu = false;
-    }
-
     onMount(() => {
         // Global mouse events for seeking and volume
         const handleGlobalMouseMove = (e: MouseEvent) => {
@@ -270,19 +226,9 @@
             isSeeking = false;
             isVolumeChanging = false;
         };
-        const handleDocumentMouseDown = (e: MouseEvent) => {
-            if (
-                showSleepTimerMenu &&
-                sleepTimerElement &&
-                !sleepTimerElement.contains(e.target as Node)
-            ) {
-                showSleepTimerMenu = false;
-            }
-        };
 
         window.addEventListener("mousemove", handleGlobalMouseMove);
         window.addEventListener("mouseup", handleGlobalMouseUp);
-        document.addEventListener("mousedown", handleDocumentMouseDown);
 
         // Register UI slots
         if (slotStart)
@@ -293,7 +239,6 @@
         return () => {
             window.removeEventListener("mousemove", handleGlobalMouseMove);
             window.removeEventListener("mouseup", handleGlobalMouseUp);
-            document.removeEventListener("mousedown", handleDocumentMouseDown);
 
             // Unregister slots
             uiSlotManager.unregisterContainer("playerbar:left");
@@ -670,7 +615,7 @@
                     >
                 {:else}
                     <span class="time">{formatDuration($currentTime)}</span>
-                    {#if isLocalTrack && $activeBackend !== 'squeeze'}
+                    {#if isLocalTrack || $activeBackend === 'squeeze'}
                         <div class="waveform-container">
                             <WaveformSeekBar
                                 track={$currentTrack}
@@ -727,66 +672,6 @@
                         <div class="device-dot"></div>
                     {/if}
                 </button>
-                <div class="sleep-timer" bind:this={sleepTimerElement}>
-                    <button
-                        class="icon-btn"
-                        class:active={$sleepTimerActive}
-                        on:click={toggleSleepTimerMenu}
-                        title={$sleepTimerActive
-                            ? `Sleep timer: ${formatSleepTimerRemaining($sleepTimerRemainingMs)} remaining`
-                            : "Sleep timer"}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="20"
-                            height="20"
-                        >
-                            <path
-                                d="M9.37 5.51A7 7 0 0 0 18.5 14.63a8 8 0 1 1-9.13-9.12z"
-                            />
-                        </svg>
-                    </button>
-
-                    {#if showSleepTimerMenu}
-                        <div class="sleep-timer-menu">
-                            <div class="sleep-timer-header">
-                                <span class="sleep-timer-title">Sleep timer</span>
-                                {#if $sleepTimerActive}
-                                    <span class="sleep-timer-remaining"
-                                        >{formatSleepTimerRemaining(
-                                            $sleepTimerRemainingMs,
-                                        )}</span
-                                    >
-                                {/if}
-                            </div>
-
-                            <div class="sleep-timer-presets">
-                                {#each SLEEP_TIMER_PRESETS as minutes}
-                                    <button
-                                        class="sleep-preset-btn"
-                                        class:active={
-                                            $sleepTimerLastDurationMinutes ===
-                                            minutes
-                                        }
-                                        on:click={() => setSleepTimer(minutes)}
-                                    >
-                                        {minutes}m
-                                    </button>
-                                {/each}
-                            </div>
-
-                            {#if $sleepTimerActive}
-                                <button
-                                    class="sleep-cancel-btn"
-                                    on:click={cancelSleepTimer}
-                                >
-                                    Cancel timer
-                                </button>
-                            {/if}
-                        </div>
-                    {/if}
-                </div>
 
                 <button
                     class="icon-btn"
@@ -806,16 +691,6 @@
                 >
                     <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
                         <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6zm-2 16c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
-                    </svg>
-                </button>
-                <button
-                    class="icon-btn"
-                    class:active={$pluginDrawerOpen}
-                    on:click={() => pluginDrawerOpen.set(true)}
-                    title="Plugin Actions"
-                >
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
-                        <path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z" />
                     </svg>
                 </button>
             </div>
@@ -921,11 +796,11 @@
 
 <style>
     .player-bar {
-        height: var(--player-height);
+        height: calc(var(--player-height) + 60px);
         background-color: var(--bg-elevated);
         border-top: 1px solid var(--border-color);
         display: grid;
-        grid-template-columns: minmax(0, 1.3fr) minmax(0, 2fr) minmax(0, 0.7fr);
+        grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
         align-items: center;
         padding: 0 calc(var(--spacing-md) + 2px);
         gap: clamp(20px, 2.2vw, 36px);
@@ -943,7 +818,7 @@
     .track-info {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
+        gap: 12px;
         min-width: 0;
         overflow: hidden;
     }
@@ -953,8 +828,8 @@
     }
 
     .album-art {
-        width: 54px;
-        height: 54px;
+        width: 96px;
+        height: 96px;
         border-radius: var(--radius-md);
         overflow: hidden;
         flex-shrink: 0;
@@ -989,7 +864,7 @@
     }
 
     .track-title {
-        font-size: 0.875rem;
+        font-size: 1.32rem;
         font-weight: 500;
     }
 
@@ -1000,7 +875,7 @@
     }
 
     .track-artist {
-        font-size: 0.75rem;
+        font-size: 1.12rem;
         color: var(--text-secondary);
     }
 
@@ -1119,6 +994,10 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
+        width: calc(100% + 60px);
+        margin-left: -30px;
+        padding: 0;
+        box-sizing: border-box;
         gap: var(--spacing-xs);
         min-width: 0;
         overflow: visible;

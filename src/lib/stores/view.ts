@@ -12,6 +12,7 @@ export type ViewType =
     | 'playlists'
     | 'playlist-detail'
     | 'liked-songs'
+    | 'listen-later'
     | 'plugins'
     | 'settings'
     | 'listenbrainz'
@@ -145,6 +146,10 @@ export function goToTracksMultiSelect(playlistId: number): void {
 
 export function goToLikedSongs(): void {
     currentView.set({ type: 'liked-songs' });
+}
+
+export function goToListenLater(): void {
+    currentView.set({ type: 'listen-later' });
 }
 
 export function goToListenBrainz(): void {

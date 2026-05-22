@@ -21,13 +21,14 @@
         recentlyPlayed,
         loadActivityData,
     } from "$lib/stores/activity";
-    import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
+    import { goToAlbumDetail, goToArtistDetail, goToListenLater } from "$lib/stores/view";
     import { isStatsWrappedOpen } from "$lib/stores/ui";
     import { getTracksByAlbum } from "$lib/api/tauri";
     import MediaCard from "./MediaCard.svelte";
     import { onDestroy } from "svelte";
     import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
     import { fetchAllLatestCharts, type ChartData, type AudionApiTrack } from "$lib/api/audion-api";
+    import { listenLaterAlbumIds, listenLaterAlbumOrder } from "$lib/stores/listen-later";
     import { _, locale } from "svelte-i18n";
 
     let homeEl: HTMLDivElement;
@@ -76,6 +77,19 @@
         $topAlbums.length > 0
             ? $topAlbums.slice(0, 6).map((ta) => ta.album)
             : $libraryAlbums.slice(0, 6);
+
+    $: listenLaterOrderMap = new Map(
+        $listenLaterAlbumOrder.map((id, index) => [id, index]),
+    );
+
+    $: listenLaterAlbums = $libraryAlbums
+        .filter((album) => $listenLaterAlbumIds.has(album.id))
+        .sort((a, b) => {
+            const aIdx = listenLaterOrderMap.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+            const bIdx = listenLaterOrderMap.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+            return aIdx - bIdx;
+        })
+        .slice(0, 6);
 
     $: topTrackList = $topTracks.map((t) => t.track);
 
@@ -311,6 +325,70 @@
             <span>{currentMonthName} {$_('home.recap')}</span>
         </button>
     </header>
+
+    {#if listenLaterAlbums.length > 0}
+        <section class="home-section">
+            <div class="section-header">
+                <h2 class="section-title">{$_('listenLater.title')}</h2>
+                <button class="view-all-link" on:click={goToListenLater}>{$_('home.viewAll')}</button>
+            </div>
+            <div class="carousel-row">
+                {#each listenLaterAlbums as album}
+                    {@const isNowPlaying = playingAlbumId === album.id && playing}
+                    {@const isPaused = pausedAlbumId === album.id}
+                    <div
+                        class="carousel-card-wrapper"
+                        role="listitem"
+                        tabindex="0"
+                        on:click={() => goToAlbumDetail(album.id)}
+                        on:keydown={(e) => handleKeyActivate(e, () => goToAlbumDetail(album.id))}
+                        on:contextmenu={(e) => albumContextMenu(album, e)}
+                    >
+                        <MediaCard
+                            {isNowPlaying}
+                            {isPaused}
+                            playTooltip="Play album"
+                            resumeTooltip="Resume album"
+                            pauseTooltip="Pause"
+                            primaryText={album.name}
+                            secondaryText={album.artist || "Unknown Artist"}
+                            secondaryAction={album.artist
+                                ? () => goToArtistDetail(album.artist!)
+                                : null}
+                            ariaLabel={album.name}
+                            on:play={() => playAlbum(album)}
+                            on:pause={togglePlay}
+                        >
+                            <svelte:fragment slot="cover">
+                                {#if getAlbumCoverFromTracks(album.id)}
+                                    <img
+                                        src={getAlbumCoverFromTracks(album.id)}
+                                        alt={album.name}
+                                        loading="lazy"
+                                        decoding="async"
+                                    />
+                                {:else}
+                                    <div class="cover-placeholder">
+                                        <svg
+                                            viewBox="0 0 24 24"
+                                            fill="currentColor"
+                                            width="24"
+                                            height="24"
+                                            aria-hidden="true"
+                                        >
+                                            <path
+                                                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
+                                            />
+                                        </svg>
+                                    </div>
+                                {/if}
+                            </svelte:fragment>
+                        </MediaCard>
+                    </div>
+                {/each}
+            </div>
+        </section>
+    {/if}
 
     <!-- Quick Play Grid -->
     {#if quickPlayAlbums.length > 0}

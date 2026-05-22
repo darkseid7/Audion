@@ -23,6 +23,7 @@ import { recordTrackPlay } from '$lib/stores/activity';
 import { submitListenbrainzListen } from '$lib/api/tauri';
 import { activeRemoteDevice } from '$lib/stores/websocket';
 import { activeSqueezePlayer, squeezePlayerState, setSqueezeVolumeCooldown } from '$lib/stores/squeeze';
+import { isInListenLater, toggleListenLater } from '$lib/stores/listen-later';
 import {
     squeezePause,
     squeezeResume,
@@ -1957,6 +1958,13 @@ function handleTrackEnd(): void {
         console.log('[Player] Repeat one: restarting current track');
         playTrack(track).catch(console.error);
         return;
+    }
+
+    const ctx = get(playbackContext);
+    if (ctx?.type === 'album' && ctx.albumId && _advanceQueueIndex(true) === null) {
+        if (isInListenLater(ctx.albumId)) {
+            void toggleListenLater(ctx.albumId);
+        }
     }
 
     nextTrack();

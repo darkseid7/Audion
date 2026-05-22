@@ -14,7 +14,9 @@
     "pinToTop": "Fijar arriba",
     "unpinFromTop": "Desfijar de arriba",
     "goToArtist": "Ir al Artista",
-    "goToAlbum": "Ir al Álbum"
+    "goToAlbum": "Ir al Álbum",
+    "listenLater": "Escuchar más tarde",
+    "removeFromListenLater": "Quitar de Escuchar más tarde"
   },
   "trackList": {
     "title": "Título",
@@ -72,10 +74,19 @@
     "mostPlayedAlbums": "Álbumes más reproducidos",
     "viewAll": "Ver todo"
   },
+  "listenLater": {
+    "title": "Escuchar más tarde",
+    "albums": "álbumes",
+    "emptyTitle": "Aún no tienes álbumes guardados",
+    "emptyDescription": "Desde un álbum o lista de álbumes, usa el menú contextual para añadirlo.",
+    "addedToast": "Álbum añadido a Escuchar más tarde",
+    "removedToast": "Álbum eliminado de Escuchar más tarde"
+  },
   "sidebar": {
     "library": "Biblioteca",
     "home": "Inicio",
     "likedSongs": "Canciones Favoritas",
+    "listenLater": "Escuchar más tarde",
     "discover": "Descubrir",
     "recommendations": "Recomendaciones",
     "allTracks": "Todas las pistas",

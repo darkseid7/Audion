@@ -22,6 +22,7 @@
         goToPlugins,
         goToSettings,
         goToLikedSongs,
+        goToListenLater,
         goToListenBrainz,
         goToDiscover,
     } from "$lib/stores/view";
@@ -32,6 +33,7 @@
     } from "$lib/stores/ui";
     import { appSettings } from "$lib/stores/settings";
     import { likedCount } from "$lib/stores/liked";
+    import { listenLaterCount } from "$lib/stores/listen-later";
     import {
         selectMusicFolder,
         addFolder,
@@ -445,6 +447,26 @@
                         </svg>
                         <span>{$_('sidebar.likedSongs', { default: 'Liked Songs' })}</span>
                         <span class="nav-count">{$likedCount}</span>
+                    </button>
+                </li>
+                <li>
+                    <button
+                        class="nav-item"
+                        class:active={isActive("listen-later")}
+                        on:click={() => navigateAndClose(goToListenLater)}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="24"
+                            height="24"
+                        >
+                            <path
+                                d="M12 1.75A10.25 10.25 0 1 0 22.25 12 10.26 10.26 0 0 0 12 1.75zm0 18.5A8.25 8.25 0 1 1 20.25 12 8.26 8.26 0 0 1 12 20.25zm.75-13.25h-1.5v6l5 3 .75-1.23-4.25-2.52z"
+                            />
+                        </svg>
+                        <span>{$_('sidebar.listenLater', { default: 'Escuchar más tarde' })}</span>
+                        <span class="nav-count">{$listenLaterCount}</span>
                     </button>
                 </li>
                 <li>

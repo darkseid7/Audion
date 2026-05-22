@@ -1,6 +1,7 @@
 // Database query operations
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Instant;
 use::std::path::Path;
@@ -75,6 +76,88 @@ pub struct TrackInsert {
     pub metadata_json: Option<String>,
 }
 
+fn read_album_artist_from_metadata(metadata_json: Option<&str>) -> Option<String> {
+    let json = metadata_json?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object()?;
+
+    for (key, val) in object {
+        let normalized_key: String = key
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '_' | '-'))
+            .collect::<String>()
+            .to_lowercase();
+
+        if normalized_key == "albumartist"
+            || normalized_key == "albumartists"
+            || normalized_key == "tpe2"
+        {
+            if let Some(s) = val.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+
+            if let Some(arr) = val.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_artist_for_album_key(artist: &str) -> Option<String> {
+    let trimmed = artist.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let separators = [" feat. ", " feat ", " ft. ", " ft ", " featuring "];
+
+    let mut cut_index: Option<usize> = None;
+    for sep in separators {
+        if let Some(idx) = lowered.find(sep) {
+            cut_index = Some(match cut_index {
+                Some(current) => current.min(idx),
+                None => idx,
+            });
+        }
+    }
+
+    let base = if let Some(idx) = cut_index {
+        trimmed[..idx].trim()
+    } else {
+        trimmed
+    };
+
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+fn resolve_album_artist(track: &TrackInsert) -> Option<String> {
+    if let Some(from_metadata) = read_album_artist_from_metadata(track.metadata_json.as_deref()) {
+        return Some(from_metadata);
+    }
+
+    track
+        .artist
+        .as_deref()
+        .and_then(normalize_artist_for_album_key)
+}
+
 // Track operations
 pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<(i64, bool)> {
     // Check if a track with the same content_hash already exists (skip duplicates)
@@ -94,17 +177,18 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
     }
 
     // Check if track already exists by path
-    let existing_id: Option<i64> = conn
+    let existing_track: Option<(i64, Option<i64>)> = conn
         .query_row(
-            "SELECT id FROM tracks WHERE path = ?1",
+            "SELECT id, album_id FROM tracks WHERE path = ?1",
             params![track.path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
 
     // First, handle album if present
+    let album_artist = resolve_album_artist(track);
     let album_id = if let Some(album_name) = &track.album {
-        let artist = track.artist.as_deref();
+        let artist = album_artist.as_deref();
         Some(get_or_create_album(
             conn,
             album_name,
@@ -115,32 +199,34 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
         None
     };
 
-    if let Some(track_id) = existing_id {
+    if let Some((track_id, previous_album_id)) = existing_track {
         // update existing track
         conn.execute(
             "UPDATE tracks SET
                 title = ?1,
                 artist = ?2,
                 album = ?3,
-                track_number = ?4,
-                duration = ?5,
-                album_id = ?6,
-                format = ?7,
-                bitrate = ?8,
-                source_type = ?9,
-                cover_url = ?10,
-                external_id = ?11,
-                content_hash = ?12,
-                local_src = ?13,
+                album_artist = ?4,
+                track_number = ?5,
+                duration = ?6,
+                album_id = ?7,
+                format = ?8,
+                bitrate = ?9,
+                source_type = ?10,
+                cover_url = ?11,
+                external_id = ?12,
+                content_hash = ?13,
+                local_src = ?14,
                 disc_number = ?15,
                 musicbrainz_recording_id = ?16,
                 metadata_json = ?17,
                 date_added = COALESCE(date_added, CURRENT_TIMESTAMP)
-             WHERE id = ?14",
+             WHERE id = ?18",
             params![
                 track.title,
                 track.artist,
                 track.album,
+                album_artist,
                 track.track_number,
                 track.duration,
                 album_id,
@@ -151,24 +237,38 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 track.external_id,
                 track.content_hash,
                 track.local_src,
-                track_id, // Use existing ID
                 track.disc_number,
                 track.musicbrainz_recording_id,
                 track.metadata_json,
+                track_id, // Use existing ID
             ],
         )?;
+
+        if let Some(old_album_id) = previous_album_id {
+            if Some(old_album_id) != album_id {
+                let _ = conn.execute(
+                    "DELETE FROM albums
+                     WHERE id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM tracks WHERE album_id = ?1
+                       )",
+                    params![old_album_id],
+                );
+            }
+        }
 
         Ok((track_id, false)) // Return (existing_id, was_new = false)
     } else {
         // insert new track
         conn.execute(
-            "INSERT INTO tracks (path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, date_added)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)",
+            "INSERT INTO tracks (path, title, artist, album, album_artist, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, date_added)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)",
             params![
                 track.path,
                 track.title,
                 track.artist,
                 track.album,
+                album_artist,
                 track.track_number,
                 track.duration,
                 album_id,
@@ -252,11 +352,15 @@ fn get_or_create_album(
     artist: Option<&str>,
     art_data: Option<&[u8]>,
 ) -> Result<i64> {
-    // Match by album name only to avoid splitting albums when tracks have different artists
+    // Match by album name + artist to prevent collisions like
+    // different artists sharing common titles (e.g. "Greatest Hits").
+    let normalized_artist = artist.map(str::trim).filter(|s| !s.is_empty());
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM albums WHERE name = ?1",
-            params![name],
+            "SELECT id FROM albums
+             WHERE lower(name) = lower(?1)
+               AND lower(COALESCE(artist, '')) = lower(COALESCE(?2, ''))",
+            params![name.trim(), normalized_artist],
             |row| row.get(0),
         )
         .ok();
@@ -275,7 +379,7 @@ fn get_or_create_album(
     // Create new album (without art_data, we'll save file separately)
     conn.execute(
         "INSERT INTO albums (name, artist) VALUES (?1, ?2)",
-        params![name, artist],
+        params![name.trim(), normalized_artist],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -624,8 +728,12 @@ pub fn get_album_art_path(conn: &Connection, album_id: i64) -> Result<Option<Str
 pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt = conn
-        .prepare("SELECT id, name, artist, art_data, art_path FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, a.art_data, a.art_path
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -653,7 +761,12 @@ pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
 pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt = conn.prepare("SELECT id, name, artist FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -681,8 +794,12 @@ pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
 pub fn get_all_albums_with_paths(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt =
-        conn.prepare("SELECT id, name, artist, art_path FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, a.art_path
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -711,8 +828,10 @@ pub fn get_albums_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, artist, art_path FROM albums 
-         ORDER BY artist, name
+        "SELECT a.id, a.name, a.artist, a.art_path
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name
          LIMIT ?1 OFFSET ?2",
     )?;
 
@@ -1235,6 +1354,41 @@ pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(tracks)
+}
+
+pub fn add_album_to_listen_later(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO listen_later_albums (album_id) VALUES (?1)",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn remove_album_from_listen_later(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM listen_later_albums WHERE album_id = ?1",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn is_album_in_listen_later(conn: &Connection, album_id: i64) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM listen_later_albums WHERE album_id = ?1",
+        params![album_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+pub fn get_listen_later_album_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT album_id FROM listen_later_albums ORDER BY saved_at DESC",
+    )?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 // ============================================================================

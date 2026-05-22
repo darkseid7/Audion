@@ -582,6 +582,22 @@ export async function getLikedTracks(): Promise<Track[]> {
   return await invoke("get_liked_tracks");
 }
 
+export async function addAlbumToListenLater(albumId: number): Promise<void> {
+  return await invoke("add_album_to_listen_later", { albumId });
+}
+
+export async function removeAlbumFromListenLater(albumId: number): Promise<void> {
+  return await invoke("remove_album_from_listen_later", { albumId });
+}
+
+export async function isAlbumInListenLater(albumId: number): Promise<boolean> {
+  return await invoke("is_album_in_listen_later", { albumId });
+}
+
+export async function getListenLaterAlbumIds(): Promise<number[]> {
+  return await invoke("get_listen_later_album_ids");
+}
+
 export async function recordPlay(
   trackId: number,
   albumId: number | null,

@@ -14,7 +14,9 @@
     "pinToTop": "Pin to Top",
     "unpinFromTop": "Unpin from Top",
     "goToArtist": "Go to Artist",
-    "goToAlbum": "Go to Album"
+    "goToAlbum": "Go to Album",
+    "listenLater": "Listen Later",
+    "removeFromListenLater": "Remove from Listen Later"
   },
   "trackList": {
     "title": "Title",
@@ -72,10 +74,19 @@
     "mostPlayedAlbums": "Most Played Albums",
     "viewAll": "View all"
   },
+  "listenLater": {
+    "title": "Listen Later",
+    "albums": "albums",
+    "emptyTitle": "You have no saved albums yet",
+    "emptyDescription": "Use the album context menu to add albums for later listening.",
+    "addedToast": "Album added to Listen Later",
+    "removedToast": "Album removed from Listen Later"
+  },
   "sidebar": {
     "library": "Library",
     "home": "Home",
     "likedSongs": "Liked Songs",
+    "listenLater": "Listen Later",
     "discover": "Discover",
     "recommendations": "Recommendations",
     "allTracks": "All Tracks",

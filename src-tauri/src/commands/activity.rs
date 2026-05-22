@@ -93,6 +93,39 @@ pub async fn get_liked_tracks(db: State<'_, Database>) -> Result<Vec<queries::Tr
     queries::get_liked_tracks(&conn).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn add_album_to_listen_later(
+    album_id: i64,
+    db: State<'_, Database>,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::add_album_to_listen_later(&conn, album_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_album_from_listen_later(
+    album_id: i64,
+    db: State<'_, Database>,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::remove_album_from_listen_later(&conn, album_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn is_album_in_listen_later(
+    album_id: i64,
+    db: State<'_, Database>,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::is_album_in_listen_later(&conn, album_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_listen_later_album_ids(db: State<'_, Database>) -> Result<Vec<i64>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::get_listen_later_album_ids(&conn).map_err(|e| e.to_string())
+}
+
 // ============================================================================
 // Play History commands
 // ============================================================================

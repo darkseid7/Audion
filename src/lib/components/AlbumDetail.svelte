@@ -265,11 +265,13 @@
         isPinned,
     } from "$lib/stores/pinned";
     import { setCustomArtwork } from "$lib/stores/customArtwork";
+    import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
 
     function handleContextMenu(e: MouseEvent) {
         if (!album) return;
         e.preventDefault();
         const pinned = isPinned("album", album.id, $pinnedItems);
+        const savedForLater = isInListenLater(album.id);
         contextMenu.set({
             visible: true,
             x: e.clientX,
@@ -284,6 +286,21 @@
                         } else {
                             pinItem("album", album!.id);
                         }
+                    },
+                },
+                {
+                    label: savedForLater
+                        ? $_('contextMenu.removeFromListenLater', { default: 'Quitar de Escuchar más tarde' })
+                        : $_('contextMenu.listenLater', { default: 'Escuchar más tarde' }),
+                    action: async () => {
+                        const wasSaved = isInListenLater(album!.id);
+                        await toggleListenLater(album!.id);
+                        addToast(
+                            wasSaved
+                                ? $_('listenLater.removedToast', { default: 'Álbum eliminado de Escuchar más tarde' })
+                                : $_('listenLater.addedToast', { default: 'Álbum añadido a Escuchar más tarde' }),
+                            'success',
+                        );
                     },
                 },
                 { type: "separator" },
