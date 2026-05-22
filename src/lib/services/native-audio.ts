@@ -14,8 +14,8 @@
 // - Volume is controlled through the Rust backend
 // =============================================================================
 
-import { invoke } from '@tauri-apps/api/core';
-import { isTauri } from '$lib/api/tauri';
+import { invoke } from "@tauri-apps/api/core";
+import { isTauri } from "$lib/api/tauri";
 
 // Check if we're running on Linux
 let isLinuxPlatform: boolean | null = null;
@@ -25,51 +25,54 @@ let isLinuxPlatform: boolean | null = null;
  * This is cached after first check for performance.
  */
 export async function isLinux(): Promise<boolean> {
-    if (isLinuxPlatform !== null) {
-        return isLinuxPlatform;
-    }
+  if (isLinuxPlatform !== null) {
+    return isLinuxPlatform;
+  }
 
-    if (!isTauri()) {
-        isLinuxPlatform = false;
-        return false;
-    }
+  if (!isTauri()) {
+    isLinuxPlatform = false;
+    return false;
+  }
 
-    try {
-        // Use Tauri's os plugin to detect platform
-        const { platform } = await import('@tauri-apps/plugin-os');
-        const os = await platform();
-        isLinuxPlatform = os === 'linux';
-        console.log(`[AUDIO] Platform detected: ${os}, using ${isLinuxPlatform ? 'native' : 'HTML5'} audio`);
-        return isLinuxPlatform;
-    } catch (e) {
-        // Fallback: check navigator.platform
-        isLinuxPlatform = typeof navigator !== 'undefined' &&
-            navigator.platform.toLowerCase().includes('linux');
-        return isLinuxPlatform;
-    }
+  try {
+    // Use Tauri's os plugin to detect platform
+    const { platform } = await import("@tauri-apps/plugin-os");
+    const os = await platform();
+    isLinuxPlatform = os === "linux";
+    console.log(
+      `[AUDIO] Platform detected: ${os}, using ${isLinuxPlatform ? "native" : "HTML5"} audio`,
+    );
+    return isLinuxPlatform;
+  } catch (e) {
+    // Fallback: check navigator.platform
+    isLinuxPlatform =
+      typeof navigator !== "undefined" &&
+      navigator.platform.toLowerCase().includes("linux");
+    return isLinuxPlatform;
+  }
 }
 
 export interface NativePlaybackState {
-    is_playing: boolean;
-    position: number;  // seconds
-    duration: number;  // seconds
-    volume: number;    // 0.0 to 1.0
-    current_path: string;
-    exclusive_mode: boolean;
-    bit_perfect: boolean;
-    source_sample_rate: number;
-    source_bit_depth: number | null;
-    device_sample_rate: number;
+  is_playing: boolean;
+  position: number; // seconds
+  duration: number; // seconds
+  volume: number; // 0.0 to 1.0
+  current_path: string;
+  exclusive_mode: boolean;
+  bit_perfect: boolean;
+  source_sample_rate: number;
+  source_bit_depth: number | null;
+  device_sample_rate: number;
 }
 
 export interface EqBand {
-    frequency: number;
-    gain: number;
+  frequency: number;
+  gain: number;
 }
 
 export interface EqSettings {
-    enabled: boolean;
-    bands: EqBand[];
+  enabled: boolean;
+  bands: EqBand[];
 }
 
 /**
@@ -79,51 +82,54 @@ export interface EqSettings {
  *                       Pass null to fall back to reading the tag from the file.
  *                       Once DB integration is complete, always pass track.replay_gain_db.
  */
-export async function nativeAudioPlay(path: string, replayGainDb: number | null = null): Promise<void> {
-    console.log('[AUDIO] Native play:', path);
-    await invoke('audio_play', { path, replayGainDb });
+export async function nativeAudioPlay(
+  path: string,
+  replayGainDb: number | null = null,
+): Promise<void> {
+  console.log("[AUDIO] Native play:", path);
+  await invoke("audio_play", { path, replayGainDb });
 }
 
 /**
  * Pause playback
  */
 export async function nativeAudioPause(): Promise<void> {
-    await invoke('audio_pause');
+  await invoke("audio_pause");
 }
 
 /**
  * Resume playback
  */
 export async function nativeAudioResume(): Promise<void> {
-    await invoke('audio_resume');
+  await invoke("audio_resume");
 }
 
 /**
  * Stop playback completely
  */
 export async function nativeAudioStop(): Promise<void> {
-    await invoke('audio_stop');
+  await invoke("audio_stop");
 }
 
 /**
  * Set volume (0.0 to 1.0)
  */
 export async function nativeAudioSetVolume(volume: number): Promise<void> {
-    await invoke('audio_set_volume', { volume });
+  await invoke("audio_set_volume", { volume });
 }
 
 /**
  * Seek to position (0.0 to 1.0 as fraction of duration)
  */
 export async function nativeAudioSeek(position: number): Promise<void> {
-    await invoke('audio_seek', { position });
+  await invoke("audio_seek", { position });
 }
 
 /**
  * Get current playback state
  */
 export async function nativeAudioGetState(): Promise<NativePlaybackState> {
-    return await invoke('audio_get_state');
+  return await invoke("audio_get_state");
 }
 
 /**
@@ -131,7 +137,7 @@ export async function nativeAudioGetState(): Promise<NativePlaybackState> {
  * When enabled, the backend loops the current track at EOF without firing TrackFinished.
  */
 export async function nativeAudioSetRepeatOne(enabled: boolean): Promise<void> {
-    await invoke('audio_set_repeat_one', { enabled });
+  await invoke("audio_set_repeat_one", { enabled });
 }
 
 // =============================================================================
@@ -139,10 +145,10 @@ export async function nativeAudioSetRepeatOne(enabled: boolean): Promise<void> {
 // =============================================================================
 
 export type AudioEventType =
-    | { type: 'Idle' }
-    | { type: 'TrackFinished' }
-    | { type: 'TrackAdvanced'; data: { new_path: string } }
-    | { type: 'StateChanged'; data: { position: number } };
+  | { type: "Idle" }
+  | { type: "TrackFinished" }
+  | { type: "TrackAdvanced"; data: { new_path: string } }
+  | { type: "StateChanged"; data: { position: number } };
 
 /**
  * Poll for the next audio event (one per call, FIFO).
@@ -153,7 +159,7 @@ export type AudioEventType =
  *                    do NOT call nativeAudioPlay().
  */
 export async function nativeAudioPollEvent(): Promise<AudioEventType> {
-    return await invoke('audio_poll_event');
+  return await invoke("audio_poll_event");
 }
 
 /**
@@ -161,15 +167,18 @@ export async function nativeAudioPollEvent(): Promise<AudioEventType> {
  * The backend will decode and buffer it so the transition is seamless.
  * @param replayGainDb — pass DB value if available, null otherwise.
  */
-export async function nativeAudioPreload(path: string, replayGainDb: number | null = null): Promise<void> {
-    await invoke('audio_preload', { path, replayGainDb });
+export async function nativeAudioPreload(
+  path: string,
+  replayGainDb: number | null = null,
+): Promise<void> {
+  await invoke("audio_preload", { path, replayGainDb });
 }
 
 /**
  * Apply equalizer settings
  */
 export async function nativeAudioSetEq(settings: EqSettings): Promise<void> {
-    await invoke('audio_set_eq', { settings });
+  await invoke("audio_set_eq", { settings });
 }
 
 // =============================================================================
@@ -183,37 +192,41 @@ let nativeAudioAvailable: boolean | null = null;
  * This doesn't check user preference, just availability.
  */
 export async function isNativeAudioAvailable(): Promise<boolean> {
-    if (nativeAudioAvailable !== null) {
-        return nativeAudioAvailable;
-    }
+  if (nativeAudioAvailable !== null) {
+    return nativeAudioAvailable;
+  }
 
-    if (!isTauri()) {
-        nativeAudioAvailable = false;
-        return false;
-    }
+  if (!isTauri()) {
+    nativeAudioAvailable = false;
+    return false;
+  }
 
-    try {
-        const available = await invoke<boolean>('native_audio_available');
-        nativeAudioAvailable = available;
-        console.log(`[AUDIO] Native audio backend: ${available ? 'available' : 'not available'}`);
-        return nativeAudioAvailable;
-    } catch (e) {
-        console.log('[AUDIO] Native audio backend not available');
-        nativeAudioAvailable = false;
-        return false;
-    }
+  try {
+    const available = await invoke<boolean>("native_audio_available");
+    nativeAudioAvailable = available;
+    console.log(
+      `[AUDIO] Native audio backend: ${available ? "available" : "not available"}`,
+    );
+    return nativeAudioAvailable;
+  } catch (e) {
+    console.log("[AUDIO] Native audio backend not available");
+    nativeAudioAvailable = false;
+    return false;
+  }
 }
 
-export async function nativeAudioSetExclusiveMode(enabled: boolean): Promise<void> {
-    await invoke('audio_set_exclusive_mode', { enabled });
+export async function nativeAudioSetExclusiveMode(
+  enabled: boolean,
+): Promise<void> {
+  await invoke("audio_set_exclusive_mode", { enabled });
 }
 
 export async function isExclusiveAudioAvailable(): Promise<boolean> {
-    try {
-        return await invoke<boolean>('audio_exclusive_available');
-    } catch {
-        return false;
-    }
+  try {
+    return await invoke<boolean>("audio_exclusive_available");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -225,43 +238,45 @@ export async function isExclusiveAudioAvailable(): Promise<boolean> {
  * 3. Platform (Linux defaults to native in 'auto' mode)
  */
 export async function shouldUseNativeAudio(): Promise<boolean> {
-    const available = await isNativeAudioAvailable();
-    if (!available) {
+  const available = await isNativeAudioAvailable();
+  if (!available) {
+    return false;
+  }
+
+  // Check user preference from localStorage
+  try {
+    const stored = localStorage.getItem("audion_settings");
+    if (stored) {
+      const settings = JSON.parse(stored);
+      const backend = settings.audioBackend || "auto";
+
+      if (backend === "native") {
+        console.log("[AUDIO] User preference: native");
+        return true;
+      }
+      if (backend === "html5") {
+        console.log("[AUDIO] User preference: html5");
         return false;
+      }
+      // 'auto' falls through to platform detection
     }
+  } catch (e) {
+    // Ignore parse errors, use auto behavior
+  }
 
-    // Check user preference from localStorage
-    try {
-        const stored = localStorage.getItem('audion_settings');
-        if (stored) {
-            const settings = JSON.parse(stored);
-            const backend = settings.audioBackend || 'auto';
-
-            if (backend === 'native') {
-                console.log('[AUDIO] User preference: native');
-                return true;
-            }
-            if (backend === 'html5') {
-                console.log('[AUDIO] User preference: html5');
-                return false;
-            }
-            // 'auto' falls through to platform detection
-        }
-    } catch (e) {
-        // Ignore parse errors, use auto behavior
-    }
-
-    // Auto mode: use native on Linux and mobile platforms, HTML5 elsewhere
-    try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        const os = await platform();
-        const useNative = os === 'linux' || os === 'android' || os === 'ios';
-        console.log(`[AUDIO] Auto mode: ${useNative ? `native (${os})` : 'html5'}`);
-        return useNative;
-    } catch {
-        // Fallback to original Linux check
-        const onLinux = await isLinux();
-        console.log(`[AUDIO] Auto mode (fallback): ${onLinux ? 'native (Linux)' : 'html5'}`);
-        return onLinux;
-    }
+  // Auto mode: use native on Linux and mobile platforms, HTML5 elsewhere
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    const os = await platform();
+    const useNative = os === "linux" || os === "android" || os === "ios";
+    console.log(`[AUDIO] Auto mode: ${useNative ? `native (${os})` : "html5"}`);
+    return useNative;
+  } catch {
+    // Fallback to original Linux check
+    const onLinux = await isLinux();
+    console.log(
+      `[AUDIO] Auto mode (fallback): ${onLinux ? "native (Linux)" : "html5"}`,
+    );
+    return onLinux;
+  }
 }
