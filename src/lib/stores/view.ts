@@ -33,7 +33,7 @@ const historyUpdate = writable(0);
 let currentIndex = -1;
 let isNavigating = false;
 
-export const currentView = writable<ViewState>({ type: "tracks" });
+export const currentView = writable<ViewState>({ type: "albums" });
 
 export const navigationHistory = derived(historyUpdate, () => ({
   canGoBack: currentIndex > 0,
@@ -41,7 +41,7 @@ export const navigationHistory = derived(historyUpdate, () => ({
 }));
 
 // Initialize history with default view
-history.push({ type: "tracks" });
+history.push({ type: "albums" });
 currentIndex = 0;
 
 function notifyHistoryUpdate() {

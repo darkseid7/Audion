@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { Album } from "$lib/api/tauri";
+    import type { Album, Track } from "$lib/api/tauri";
     import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
     import {
         loadLibrary,
@@ -18,7 +18,7 @@
     import VirtualizedGrid from "./Virtualizedgrid.svelte";
     import MediaCard from "./MediaCard.svelte";
     import { confirm, prompt } from "$lib/stores/dialogs";
-    import { onDestroy } from "svelte";
+    import { onDestroy, onMount } from "svelte";
     import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
     import {
         pinnedItems,
@@ -38,6 +38,87 @@
     });
 
     export let albums: Album[] = [];
+
+    type AlbumSortOption =
+        | "artist-asc"
+        | "artist-desc"
+        | "year-desc"
+        | "year-asc"
+        | "added-desc"
+        | "added-asc"
+        | "name-asc"
+        | "name-desc";
+
+    const ALBUM_SORT_STORAGE_KEY = "audion_album_sort";
+    let albumSort: AlbumSortOption = "artist-asc";
+    let isSortMenuOpen = false;
+
+    const sortOptionLabels: Record<AlbumSortOption, string> = {
+        "artist-asc": "Artista (A-Z)",
+        "artist-desc": "Artista (Z-A)",
+        "year-desc": "Año (más reciente)",
+        "year-asc": "Año (más antiguo)",
+        "added-desc": "Antigüedad (agregados recientemente)",
+        "added-asc": "Antigüedad (agregados antes)",
+        "name-asc": "Álbum (A-Z)",
+        "name-desc": "Álbum (Z-A)",
+    };
+
+    const sortOptions: { value: AlbumSortOption; label: string }[] = [
+        { value: "artist-asc", label: sortOptionLabels["artist-asc"] },
+        { value: "artist-desc", label: sortOptionLabels["artist-desc"] },
+        { value: "year-desc", label: sortOptionLabels["year-desc"] },
+        { value: "year-asc", label: sortOptionLabels["year-asc"] },
+        { value: "added-desc", label: sortOptionLabels["added-desc"] },
+        { value: "added-asc", label: sortOptionLabels["added-asc"] },
+        { value: "name-asc", label: sortOptionLabels["name-asc"] },
+        { value: "name-desc", label: sortOptionLabels["name-desc"] },
+    ];
+
+    $: selectedSortLabel = sortOptionLabels[albumSort];
+
+    onMount(() => {
+        const saved = localStorage.getItem(ALBUM_SORT_STORAGE_KEY);
+        if (
+            saved === "artist-asc" ||
+            saved === "artist-desc" ||
+            saved === "year-desc" ||
+            saved === "year-asc" ||
+            saved === "added-desc" ||
+            saved === "added-asc" ||
+            saved === "name-asc" ||
+            saved === "name-desc"
+        ) {
+            albumSort = saved;
+        }
+
+        const handleGlobalPointerDown = (event: PointerEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (!target) return;
+
+            if (!target.closest(".sort-dropdown")) {
+                isSortMenuOpen = false;
+            }
+        };
+
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                isSortMenuOpen = false;
+            }
+        };
+
+        window.addEventListener("pointerdown", handleGlobalPointerDown);
+        window.addEventListener("keydown", handleEscape);
+
+        return () => {
+            window.removeEventListener("pointerdown", handleGlobalPointerDown);
+            window.removeEventListener("keydown", handleEscape);
+        };
+    });
+
+    $: if (typeof localStorage !== "undefined") {
+        localStorage.setItem(ALBUM_SORT_STORAGE_KEY, albumSort);
+    }
 
     // Playback state
     $: playingAlbumId = $currentAlbumId;
@@ -144,6 +225,98 @@
         return parts.length ? parts.join(" ") : "--";
     }
 
+    function extractYearFromMetadata(metadataJson: string | null | undefined): number | null {
+        if (!metadataJson) return null;
+
+        try {
+            const parsed = JSON.parse(metadataJson) as Record<string, unknown>;
+
+            for (const value of Object.values(parsed)) {
+                if (value == null) continue;
+
+                if (typeof value === "number") {
+                    if (value >= 1000 && value <= 3000) return value;
+                    continue;
+                }
+
+                const text = String(value);
+                const match = text.match(/\b(19\d{2}|20\d{2}|2100)\b/);
+                if (match) return Number(match[1]);
+            }
+        } catch {
+            return null;
+        }
+
+        return null;
+    }
+
+    function parseDateToMs(dateValue: string | null | undefined): number | null {
+        if (!dateValue) return null;
+        const ms = Date.parse(dateValue);
+        return Number.isNaN(ms) ? null : ms;
+    }
+
+    function compareNullableNumber(a: number | null, b: number | null): number {
+        if (a == null && b == null) return 0;
+        if (a == null) return 1;
+        if (b == null) return -1;
+        return a - b;
+    }
+
+    function compareText(a: string | null | undefined, b: string | null | undefined): number {
+        return (a || "").localeCompare(b || "", undefined, {
+            sensitivity: "base",
+            numeric: true,
+        });
+    }
+
+    function getAlbumArtistForSort(album: Album): string {
+        if (album.artist && album.artist.trim()) return album.artist.trim();
+        return "ZZZ_UNKNOWN_ARTIST";
+    }
+
+    function buildAlbumSortMetaMap(
+        libraryTracks: Track[],
+    ): Map<number, { year: number | null; newestAddedMs: number | null; oldestAddedMs: number | null }> {
+        const meta = new Map<
+            number,
+            { year: number | null; newestAddedMs: number | null; oldestAddedMs: number | null }
+        >();
+
+        for (const track of libraryTracks) {
+            if (!track.album_id) continue;
+
+            if (!meta.has(track.album_id)) {
+                meta.set(track.album_id, {
+                    year: null,
+                    newestAddedMs: null,
+                    oldestAddedMs: null,
+                });
+            }
+
+            const current = meta.get(track.album_id)!;
+
+            const parsedYear = extractYearFromMetadata(track.metadata_json);
+            if (parsedYear != null) {
+                current.year = current.year == null ? parsedYear : Math.max(current.year, parsedYear);
+            }
+
+            const addedMs = parseDateToMs(track.date_added);
+            if (addedMs != null) {
+                current.newestAddedMs =
+                    current.newestAddedMs == null
+                        ? addedMs
+                        : Math.max(current.newestAddedMs, addedMs);
+                current.oldestAddedMs =
+                    current.oldestAddedMs == null
+                        ? addedMs
+                        : Math.min(current.oldestAddedMs, addedMs);
+            }
+        }
+
+        return meta;
+    }
+
     function buildAlbumAudioInfoMap(libraryTracks: typeof $tracks): Map<number, AlbumAudioInfo> {
         const map = new Map<number, AlbumAudioInfo>();
         const perAlbum = new Map<
@@ -222,6 +395,7 @@
     }
 
     $: albumAudioInfoById = buildAlbumAudioInfoMap($tracks);
+    $: albumSortMetaById = buildAlbumSortMetaMap($tracks);
 
     // Sorting/Pinning logic
     $: sortedAlbums = [...albums].sort((a, b) => {
@@ -229,7 +403,52 @@
         const bPinned = isPinned("album", b.id, $pinnedItems);
         if (aPinned && !bPinned) return -1;
         if (!aPinned && bPinned) return 1;
-        return 0; // Maintain original order if both same
+
+        const aMeta = albumSortMetaById.get(a.id);
+        const bMeta = albumSortMetaById.get(b.id);
+
+        let result = 0;
+
+        switch (albumSort) {
+            case "artist-asc":
+                result = compareText(getAlbumArtistForSort(a), getAlbumArtistForSort(b));
+                break;
+            case "artist-desc":
+                result = compareText(getAlbumArtistForSort(b), getAlbumArtistForSort(a));
+                break;
+            case "year-desc":
+                result = compareNullableNumber(bMeta?.year ?? null, aMeta?.year ?? null);
+                break;
+            case "year-asc":
+                result = compareNullableNumber(aMeta?.year ?? null, bMeta?.year ?? null);
+                break;
+            case "added-desc":
+                result = compareNullableNumber(
+                    bMeta?.newestAddedMs ?? null,
+                    aMeta?.newestAddedMs ?? null,
+                );
+                break;
+            case "added-asc":
+                result = compareNullableNumber(
+                    aMeta?.oldestAddedMs ?? null,
+                    bMeta?.oldestAddedMs ?? null,
+                );
+                break;
+            case "name-desc":
+                result = compareText(b.name, a.name);
+                break;
+            case "name-asc":
+            default:
+                result = compareText(a.name, b.name);
+                break;
+        }
+
+        if (result !== 0) return result;
+
+        const byArtist = compareText(a.artist, b.artist);
+        if (byArtist !== 0) return byArtist;
+
+        return compareText(a.name, b.name);
     });
 
     // Image error cache
@@ -247,6 +466,15 @@
         }
         failedImages.add(img.src);
         failedImages = failedImages;
+    }
+
+    function toggleSortMenu() {
+        isSortMenuOpen = !isSortMenuOpen;
+    }
+
+    function selectSort(value: AlbumSortOption) {
+        albumSort = value;
+        isSortMenuOpen = false;
     }
 
     // Playback
@@ -408,86 +636,268 @@
     };
 </script>
 
-<VirtualizedGrid
-    items={sortedAlbums}
-    bind:currentScrollTop
-    initialScrollTop={currentScrollTop}
-    onItemClick={handleAlbumClick}
-    onItemContextMenu={handleAlbumContextMenu}
-    onLoadMore={handleLoadMore}
-    emptyStateConfig={emptyState}
-    cardHeightDesktop={285}
-    cardHeightMobile={235}
-    let:item={album}
->
-    {@const cover = getAlbumCoverFromTracks(album.id)}
-    {@const isNowPlaying = playingAlbumId === album.id && playing}
-    {@const isPaused = pausedAlbumId === album.id}
-    {@const audioInfo = albumAudioInfoById.get(album.id)}
-
-    <MediaCard
-        {isNowPlaying}
-        {isPaused}
-        isPinned={isPinned("album", album.id, $pinnedItems)}
-        playTooltip="Play album"
-        resumeTooltip="Resume album"
-        pauseTooltip="Pause"
-        ariaLabel={album.name}
-        primaryText={album.name}
-        secondaryText={album.artist || "Unknown Artist"}
-        secondaryAction={album.artist
-            ? () => goToArtistDetail(album.artist!)
-            : null}
-        on:play={() => playAlbum(album)}
-        on:pause={togglePlay}
-    >
-        <svelte:fragment slot="cover">
-            {#if cover && !failedImages.has(cover)}
-                <img
-                    src={cover}
-                    alt={album.name}
-                    loading="lazy"
-                    decoding="async"
-                    on:error={handleImageError}
-                />
-            {:else}
-                <div class="placeholder">
+<div class="albums-grid">
+    <div class="albums-toolbar-wrap">
+        <div class="albums-toolbar">
+            <span class="sort-label">Ordenar por</span>
+            <div class="sort-dropdown">
+                <button
+                    class="sort-trigger"
+                    type="button"
+                    aria-haspopup="menu"
+                    aria-expanded={isSortMenuOpen}
+                    on:click={toggleSortMenu}
+                >
+                    <span>{selectedSortLabel}</span>
                     <svg
+                        class:open={isSortMenuOpen}
                         viewBox="0 0 24 24"
-                        fill="currentColor"
-                        width="48"
-                        height="48"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        width="16"
+                        height="16"
                         aria-hidden="true"
                     >
-                        <path
-                            d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
-                        />
+                        <polyline points="6 9 12 15 18 9" />
                     </svg>
-                </div>
-            {/if}
-        </svelte:fragment>
+                </button>
 
-        <svelte:fragment slot="extra-info">
-            {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate}
-                <div class="audio-chips">
-                    {#if audioInfo?.format}
-                        <span class="audio-chip format">{audioInfo.format}</span>
+                {#if isSortMenuOpen}
+                    <div class="sort-menu" role="menu" aria-label="Opciones de orden">
+                        {#each sortOptions as option (option.value)}
+                            <button
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={albumSort === option.value}
+                                class="sort-menu-item"
+                                class:active={albumSort === option.value}
+                                on:click={() => selectSort(option.value)}
+                            >
+                                {option.label}
+                            </button>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        </div>
+    </div>
+
+    <div class="albums-grid-body">
+        <VirtualizedGrid
+            items={sortedAlbums}
+            bind:currentScrollTop
+            initialScrollTop={currentScrollTop}
+            onItemClick={handleAlbumClick}
+            onItemContextMenu={handleAlbumContextMenu}
+            onLoadMore={handleLoadMore}
+            emptyStateConfig={emptyState}
+            cardHeightDesktop={285}
+            cardHeightMobile={235}
+            let:item={album}
+        >
+            {@const cover = getAlbumCoverFromTracks(album.id)}
+            {@const isNowPlaying = playingAlbumId === album.id && playing}
+            {@const isPaused = pausedAlbumId === album.id}
+            {@const audioInfo = albumAudioInfoById.get(album.id)}
+
+            <MediaCard
+                {isNowPlaying}
+                {isPaused}
+                isPinned={isPinned("album", album.id, $pinnedItems)}
+                playTooltip="Play album"
+                resumeTooltip="Resume album"
+                pauseTooltip="Pause"
+                ariaLabel={album.name}
+                primaryText={album.name}
+                secondaryText={album.artist || "Unknown Artist"}
+                secondaryAction={album.artist
+                    ? () => goToArtistDetail(album.artist!)
+                    : null}
+                on:play={() => playAlbum(album)}
+                on:pause={togglePlay}
+            >
+                <svelte:fragment slot="cover">
+                    {#if cover && !failedImages.has(cover)}
+                        <img
+                            src={cover}
+                            alt={album.name}
+                            loading="lazy"
+                            decoding="async"
+                            on:error={handleImageError}
+                        />
+                    {:else}
+                        <div class="placeholder">
+                            <svg
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                                width="48"
+                                height="48"
+                                aria-hidden="true"
+                            >
+                                <path
+                                    d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
+                                />
+                            </svg>
+                        </div>
                     {/if}
-                    {#if audioInfo?.sampleRate}
-                        <span class="audio-chip">{formatSampleRate(audioInfo.sampleRate)}</span>
+                </svelte:fragment>
+
+                <svelte:fragment slot="extra-info">
+                    {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate}
+                        <div class="audio-chips">
+                            {#if audioInfo?.format}
+                                <span class="audio-chip format">{audioInfo.format}</span>
+                            {/if}
+                            {#if audioInfo?.sampleRate}
+                                <span class="audio-chip">{formatSampleRate(audioInfo.sampleRate)}</span>
+                            {/if}
+                            {#if audioInfo?.bitDepth}
+                                <span class="audio-chip">{audioInfo.bitDepth}bit</span>
+                            {:else if audioInfo?.bitrate}
+                                <span class="audio-chip">{audioInfo.bitrate}kbps</span>
+                            {/if}
+                        </div>
                     {/if}
-                    {#if audioInfo?.bitDepth}
-                        <span class="audio-chip">{audioInfo.bitDepth}bit</span>
-                    {:else if audioInfo?.bitrate}
-                        <span class="audio-chip">{audioInfo.bitrate}kbps</span>
-                    {/if}
-                </div>
-            {/if}
-        </svelte:fragment>
-    </MediaCard>
-</VirtualizedGrid>
+                </svelte:fragment>
+            </MediaCard>
+        </VirtualizedGrid>
+    </div>
+</div>
 
 <style>
+    .albums-grid {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    .albums-grid-body {
+        flex: 1;
+        min-height: 0;
+    }
+
+    .albums-toolbar-wrap {
+        padding: 0 var(--spacing-md);
+    }
+
+    .albums-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 4px;
+    }
+
+    .sort-label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+    }
+
+    .sort-dropdown {
+        position: relative;
+        min-width: 220px;
+    }
+
+    .sort-trigger {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid var(--border-color);
+        background: var(--bg-card);
+        color: var(--text-primary);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 0.8rem;
+        line-height: 1.2;
+        cursor: pointer;
+    }
+
+    .sort-trigger:focus {
+        outline: none;
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent-primary) 20%, transparent);
+    }
+
+    .sort-trigger svg {
+        color: var(--text-secondary);
+        transition: transform 0.18s ease;
+    }
+
+    .sort-trigger svg.open {
+        transform: rotate(180deg);
+    }
+
+    .sort-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 100%;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+        padding: 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        z-index: 40;
+        max-height: min(360px, 60vh);
+        overflow-y: auto;
+        overflow-x: hidden;
+        isolation: isolate;
+        opacity: 1;
+    }
+
+    .sort-menu-item {
+        border: 0;
+        background: transparent;
+        color: var(--text-primary);
+        text-align: left;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 0.8rem;
+        cursor: pointer;
+    }
+
+    .sort-menu-item:hover {
+        background: var(--bg-highlight);
+    }
+
+    .sort-menu-item.active {
+        background: color-mix(in oklab, var(--accent-primary) 20%, transparent);
+        color: var(--accent-primary);
+        font-weight: 600;
+    }
+
+    @media (max-width: 768px) {
+        .albums-toolbar-wrap {
+            padding: 0 var(--spacing-sm);
+        }
+
+        .albums-toolbar {
+            justify-content: stretch;
+            margin-top: 0;
+        }
+
+        .sort-label {
+            display: none;
+        }
+
+        .sort-dropdown {
+            width: 100%;
+            min-width: 0;
+        }
+
+        .sort-menu {
+            left: 0;
+            right: 0;
+        }
+    }
+
     .placeholder {
         width: 100%;
         height: 100%;
