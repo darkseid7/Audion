@@ -55,6 +55,11 @@ export interface NativePlaybackState {
     duration: number;  // seconds
     volume: number;    // 0.0 to 1.0
     current_path: string;
+    exclusive_mode: boolean;
+    bit_perfect: boolean;
+    source_sample_rate: number;
+    source_bit_depth: number | null;
+    device_sample_rate: number;
 }
 
 export interface EqBand {
@@ -195,6 +200,18 @@ export async function isNativeAudioAvailable(): Promise<boolean> {
     } catch (e) {
         console.log('[AUDIO] Native audio backend not available');
         nativeAudioAvailable = false;
+        return false;
+    }
+}
+
+export async function nativeAudioSetExclusiveMode(enabled: boolean): Promise<void> {
+    await invoke('audio_set_exclusive_mode', { enabled });
+}
+
+export async function isExclusiveAudioAvailable(): Promise<boolean> {
+    try {
+        return await invoke<boolean>('audio_exclusive_available');
+    } catch {
         return false;
     }
 }

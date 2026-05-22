@@ -18,6 +18,11 @@
         cycleRepeat,
         isStreaming,
         activeBackend,
+        exclusiveActive,
+        bitPerfect,
+        sourceSampleRate,
+        sourceBitDepth,
+        deviceSampleRate,
     } from "$lib/stores/player";
     import { lyricsVisible, toggleLyrics } from "$lib/stores/lyrics";
     import {
@@ -695,7 +700,15 @@
                 </button>
             </div>
 
-            <div class="volume-controls-main">
+            {#if $exclusiveActive}
+                <div class="signal-indicator" title={$bitPerfect ? 'Bit-Perfect' : 'Exclusive Mode'}>
+                    <span class="signal-badge" class:bit-perfect={$bitPerfect}>
+                        {$sourceSampleRate / 1000}kHz{#if $sourceBitDepth}/{$sourceBitDepth}bit{/if}
+                    </span>
+                </div>
+            {/if}
+
+            <div class="volume-controls-main" class:disabled={$exclusiveActive}>
                 <button
                     class="icon-btn"
                     on:click={() => setVolume($volume > 0 ? 0 : 1)}
@@ -1345,6 +1358,33 @@
         display: flex;
         align-items: center;
         gap: 4px;
+    }
+
+    .volume-controls-main.disabled {
+        opacity: 0.35;
+        pointer-events: none;
+    }
+
+    .signal-indicator {
+        display: flex;
+        align-items: center;
+        margin-right: 4px;
+    }
+
+    .signal-badge {
+        font-size: 10px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: var(--surface-tertiary, rgba(255,255,255,0.08));
+        color: var(--text-secondary);
+        white-space: nowrap;
+        letter-spacing: 0.3px;
+    }
+
+    .signal-badge.bit-perfect {
+        background: var(--accent-primary, #1DB954);
+        color: #fff;
     }
 
     .view-controls {

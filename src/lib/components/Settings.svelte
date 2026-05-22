@@ -34,7 +34,7 @@
     triggerSync,
     deleteAccount,
   } from "$lib/stores/sync";
-  import { nativeAudioStop } from "$lib/services/native-audio";
+  import { nativeAudioStop, nativeAudioSetExclusiveMode, isExclusiveAudioAvailable } from "$lib/services/native-audio";
 
   interface MigrationProgressUpdate {
     current: number;
@@ -85,14 +85,28 @@
   // Audio Backend state
   let initialAudioBackend = $appSettings.audioBackend;
   let showRefreshNotice = false;
+  let exclusiveAvailable = false;
 
   $: showRefreshNotice = $appSettings.audioBackend !== initialAudioBackend;
+
+  async function handleToggleExclusiveMode() {
+    const newValue = !$appSettings.exclusiveMode;
+    try {
+      await nativeAudioSetExclusiveMode(newValue);
+      appSettings.setExclusiveMode(newValue);
+    } catch (e) {
+      console.error('[Settings] Failed to toggle exclusive mode:', e);
+    }
+  }
 
   // Event listeners
   let unlistenSync: UnlistenFn | null = null;
   let unlistenMerge: UnlistenFn | null = null;
 
   onMount(async () => {
+    // Check exclusive mode availability
+    exclusiveAvailable = await isExclusiveAudioAvailable();
+
     // Listen for migration events (used by sync)
     unlistenSync = await listen("migration-batch-ready", (event) => {
       const data = event.payload as { progress: MigrationProgressUpdate };
@@ -872,10 +886,34 @@
               </div>
             </div>
           {/if}
+
+          <div class="divider"></div>
+
+          {#if exclusiveAvailable}
+          <div class="toggle-container">
+            <div class="toggle-info">
+              <span class="setting-title">{$_('settings.exclusiveMode', { default: 'Exclusive Mode' })}</span>
+              <span class="setting-description">{$_('settings.exclusiveModeDesc', { default: 'Bypass OS mixer for bit-perfect output (WASAPI Exclusive). Disables volume and EQ controls.' })}</span>
+              {#if $appSettings.exclusiveMode}
+                <span class="setting-description" style="color: var(--accent-warning, #ffae42);">
+                  {$_('settings.exclusiveModeWarning', { default: 'Other apps will lose audio while Audion is playing.' })}
+                </span>
+              {/if}
+            </div>
+            <button
+              class="toggle-btn"
+              class:active={$appSettings.exclusiveMode}
+              on:click={handleToggleExclusiveMode}
+              role="switch"
+              aria-checked={$appSettings.exclusiveMode}
+              aria-label="Toggle Exclusive Mode"
+            >
+              <div class="toggle-handle"></div>
+            </button>
+          </div>
+          {/if}
         </div>
       </section>
-
-      <!-- Section: Community -->
       <section class="settings-section" aria-labelledby="community-heading">
         <h2 id="community-heading" class="section-label">{$_('settings.community', { default: 'Community' })}</h2>
         <div class="settings-card">

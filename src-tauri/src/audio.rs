@@ -447,6 +447,7 @@ struct SymphoniaSource {
     sample_pos: usize,
     channels: u16,
     sample_rate: u32,
+    bit_depth: Option<u8>,
     duration: Option<Duration>,
     replay_gain: Option<f32>,
     done: bool,
@@ -457,6 +458,7 @@ struct SymphoniaSource {
     repeat_one: bool,
     event_tx: Sender<AudioEvent>,
     loop_tx: Sender<Instant>,
+    bypass_dsp: Arc<AtomicBool>,
 }
 
 impl SymphoniaSource {
@@ -468,6 +470,7 @@ impl SymphoniaSource {
         event_tx: Sender<AudioEvent>,
         loop_tx: Sender<Instant>,
         volume: Arc<AtomicU32>,
+        bypass_dsp: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
 
@@ -507,6 +510,7 @@ impl SymphoniaSource {
             .channels
             .map(|c| c.count() as u16)
             .unwrap_or(2);
+        let bit_depth = track.codec_params.bits_per_sample.map(|b| b as u8);
         let duration = track.codec_params.n_frames.and_then(|f| {
             track
                 .codec_params
@@ -529,6 +533,7 @@ impl SymphoniaSource {
             sample_pos: 0,
             channels,
             sample_rate,
+            bit_depth,
             duration,
             done: false,
             replay_gain,
@@ -539,6 +544,7 @@ impl SymphoniaSource {
             repeat_one: false,
             event_tx,
             loop_tx,
+            bypass_dsp,
         })
     }
 
@@ -630,6 +636,10 @@ impl Iterator for SymphoniaSource {
                 if self.sample_pos < buf.samples().len() {
                     let s = buf.samples()[self.sample_pos];
                     self.sample_pos += 1;
+                    // In exclusive/bit-perfect mode, pass samples untouched.
+                    if self.bypass_dsp.load(Ordering::Relaxed) {
+                        return Some(s);
+                    }
                     // Apply replay gain then volume — both scalar multiplies, no locks.
                     let s = match self.replay_gain {
                         Some(gain) => (s * gain).clamp(-1.0, 1.0),
@@ -872,7 +882,14 @@ struct AudioEngine {
     next_path: Option<String>,
     next_duration: Option<Option<Duration>>,
 
-    _stream: OutputStream,
+    exclusive_mode: bool,
+    bypass_dsp: Arc<AtomicBool>,
+    source_sample_rate: u32,
+    source_bit_depth: Option<u8>,
+
+    // In exclusive mode we own the cpal stream directly instead of rodio OutputStream.
+    _stream: Option<OutputStream>,
+    _exclusive_stream: Option<cpal::Stream>,
 }
 
 impl AudioEngine {
@@ -935,7 +952,109 @@ impl AudioEngine {
                 next_loop_rx: None,
                 next_path: None,
                 next_duration: None,
-                _stream: stream,
+                exclusive_mode: false,
+                bypass_dsp: Arc::new(AtomicBool::new(false)),
+                source_sample_rate: device_sample_rate,
+                source_bit_depth: None,
+                _stream: Some(stream),
+                _exclusive_stream: None,
+            },
+            event_rx,
+        ))
+    }
+
+    // ── new_exclusive — WASAPI exclusive mode (Windows only) ──────────────────
+    #[cfg(target_os = "windows")]
+    fn new_exclusive(
+        target_sample_rate: u32,
+        target_channels: u16,
+    ) -> Result<(Self, crossbeam::channel::Receiver<AudioEvent>), String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::{SampleFormat, StreamConfig};
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("No default output device found")?;
+
+        // Try to open with the exact sample rate the source needs.
+        let config = StreamConfig {
+            channels: target_channels,
+            sample_rate: cpal::SampleRate(target_sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let (queue_input, queue_output) = queue::<f32>(true);
+        let paused_flag = Arc::new(AtomicBool::new(false));
+        let volume_atomic = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let bypass_dsp = Arc::new(AtomicBool::new(true));
+
+        let (eq_tx, _eq_rx) = unbounded::<EqSettings>();
+        let (event_tx, event_rx) = unbounded::<AudioEvent>();
+
+        // In exclusive mode: PausableQueue only (no EQ, no resampler).
+        let pq = PausableQueue {
+            inner: queue_output,
+            paused: Arc::clone(&paused_flag),
+        };
+
+        // Convert PausableQueue into a boxed iterator we can drive from the callback.
+        let source = Arc::new(Mutex::new(Box::new(pq) as Box<dyn Iterator<Item = f32> + Send>));
+        let source_clone = Arc::clone(&source);
+
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut src = source_clone.lock().unwrap();
+                    for sample in data.iter_mut() {
+                        *sample = src.next().unwrap_or(0.0);
+                    }
+                },
+                move |err| {
+                    tracing::error!("[AUDIO-EXCLUSIVE] Stream error: {}", err);
+                },
+                None,
+            )
+            .map_err(|e| format!("Failed to build exclusive stream: {}", e))?;
+
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start exclusive stream: {}", e))?;
+
+        tracing::info!(
+            "[AUDIO-EXCLUSIVE] Opened device at {}Hz {}ch",
+            target_sample_rate,
+            target_channels
+        );
+
+        Ok((
+            Self {
+                queue_input,
+                paused_flag,
+                volume_atomic,
+                volume: 1.0, // Locked at max in exclusive mode
+                eq_tx,
+                event_tx,
+                device_sample_rate: target_sample_rate,
+                seek_tx: None,
+                current_finish_rx: None,
+                repeat_one_tx: None,
+                repeat_one: false,
+                loop_rx: None,
+                current_info: None,
+                next_seek_tx: None,
+                next_finish_rx: None,
+                next_repeat_one_tx: None,
+                next_loop_rx: None,
+                next_path: None,
+                next_duration: None,
+                exclusive_mode: true,
+                bypass_dsp,
+                source_sample_rate: target_sample_rate,
+                source_bit_depth: None,
+                _stream: None,
+                _exclusive_stream: Some(stream),
             },
             event_rx,
         ))
@@ -969,8 +1088,11 @@ impl AudioEngine {
             self.event_tx.clone(),
             loop_tx,
             Arc::clone(&self.volume_atomic),
+            Arc::clone(&self.bypass_dsp),
         )?;
         let dur = src.duration;
+        self.source_sample_rate = src.sample_rate();
+        self.source_bit_depth = src.bit_depth;
 
         tracing::info!(
             "[AUDIO] Source format: sample_rate={}, channels={}, duration={:?}",
@@ -986,7 +1108,11 @@ impl AudioEngine {
         let needs_resample = src.sample_rate() != self.device_sample_rate;
         tracing::info!("[AUDIO] Resampling needed: {}", needs_resample);
 
-        let finish_rx = if needs_resample {
+        let finish_rx = if self.exclusive_mode {
+            // In exclusive mode: never resample — signal goes raw to device.
+            // If sample rate doesn't match, the caller must rebuild the stream first.
+            self.queue_input.append_with_signal(src)
+        } else if needs_resample {
             let resampled = RubatoResampler::new(src, self.device_sample_rate)?;
             self.queue_input.append_with_signal(resampled)
         } else {
@@ -998,6 +1124,21 @@ impl AudioEngine {
 
     // ── play ─────────────────────────────────────────────────────────────────
     fn play(&mut self, path: &str, replay_gain_db: Option<f32>) -> Result<(), String> {
+        // In exclusive mode, probe the source first to check if we need to
+        // rebuild the stream for a different sample rate.
+        #[cfg(target_os = "windows")]
+        if self.exclusive_mode {
+            let probe_rate = Self::probe_sample_rate(path)?;
+            if probe_rate != self.device_sample_rate {
+                tracing::info!(
+                    "[AUDIO-EXCLUSIVE] Sample rate change: {} -> {}. Rebuilding stream.",
+                    self.device_sample_rate,
+                    probe_rate
+                );
+                self.rebuild_exclusive_stream(probe_rate, 2)?;
+            }
+        }
+
         // Clear all pending sources from the queue instantly.
         self.queue_input.clear();
 
@@ -1136,6 +1277,10 @@ impl AudioEngine {
     }
 
     fn set_volume(&mut self, v: f32) {
+        if self.exclusive_mode {
+            // In exclusive mode, volume is always 1.0 (hardware-controlled).
+            return;
+        }
         let clamped = v.clamp(0.0, 1.0);
         self.volume = clamped;
         self.volume_atomic
@@ -1144,7 +1289,112 @@ impl AudioEngine {
 
     // ── EQ ───────────────────────────────────────────────────────────────────
     fn set_eq(&mut self, settings: &EqSettings) {
+        if self.exclusive_mode {
+            // EQ disabled in exclusive mode — signal must be untouched.
+            return;
+        }
         let _ = self.eq_tx.send(settings.clone());
+    }
+
+    // ── probe sample rate without full decode ────────────────────────────────
+    fn probe_sample_rate(path: &str) -> Result<u32, String> {
+        let file =
+            File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = PathBuf::from(path).extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions {
+                    enable_gapless: true,
+                    ..Default::default()
+                },
+                &MetadataOptions {
+                    limit_metadata_bytes: symphonia::core::meta::Limit::Maximum(0),
+                    limit_visual_bytes: symphonia::core::meta::Limit::Maximum(0),
+                },
+            )
+            .map_err(|e| format!("Failed to probe {}: {}", path, e))?;
+        let track = probed
+            .format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| format!("No audio track in {}", path))?;
+        Ok(track.codec_params.sample_rate.unwrap_or(44100))
+    }
+
+    // ── rebuild exclusive stream for a new sample rate ────────────────────────
+    #[cfg(target_os = "windows")]
+    fn rebuild_exclusive_stream(
+        &mut self,
+        target_rate: u32,
+        target_channels: u16,
+    ) -> Result<(), String> {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::StreamConfig;
+
+        // Drop old exclusive stream.
+        self._exclusive_stream = None;
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("No default output device found")?;
+
+        let config = StreamConfig {
+            channels: target_channels,
+            sample_rate: cpal::SampleRate(target_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        // Rebuild queue and pausable wrapper.
+        let (queue_input, queue_output) = queue::<f32>(true);
+        let paused_flag = Arc::clone(&self.paused_flag);
+
+        let pq = PausableQueue {
+            inner: queue_output,
+            paused: Arc::clone(&paused_flag),
+        };
+        let source = Arc::new(Mutex::new(
+            Box::new(pq) as Box<dyn Iterator<Item = f32> + Send>,
+        ));
+        let source_clone = Arc::clone(&source);
+
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut src = source_clone.lock().unwrap();
+                    for sample in data.iter_mut() {
+                        *sample = src.next().unwrap_or(0.0);
+                    }
+                },
+                move |err| {
+                    tracing::error!("[AUDIO-EXCLUSIVE] Stream error: {}", err);
+                },
+                None,
+            )
+            .map_err(|e| format!("Failed to rebuild exclusive stream: {}", e))?;
+
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start exclusive stream: {}", e))?;
+
+        self.queue_input = queue_input;
+        self.device_sample_rate = target_rate;
+        self._exclusive_stream = Some(stream);
+
+        tracing::info!(
+            "[AUDIO-EXCLUSIVE] Rebuilt stream at {}Hz {}ch",
+            target_rate,
+            target_channels
+        );
+        Ok(())
     }
 
     // ── repeat one ───────────────────────────────────────────────────────────
@@ -1222,6 +1472,11 @@ impl AudioEngine {
             volume: self.volume,
             current_path,
             is_initialized: true,
+            exclusive_mode: self.exclusive_mode,
+            bit_perfect: self.exclusive_mode && self.source_sample_rate == self.device_sample_rate,
+            source_sample_rate: self.source_sample_rate,
+            source_bit_depth: self.source_bit_depth,
+            device_sample_rate: self.device_sample_rate,
         }
     }
 }
@@ -1251,6 +1506,11 @@ pub struct PlaybackState {
     pub volume: f32,
     pub current_path: String,
     pub is_initialized: bool,
+    pub exclusive_mode: bool,
+    pub bit_perfect: bool,
+    pub source_sample_rate: u32,
+    pub source_bit_depth: Option<u8>,
+    pub device_sample_rate: u32,
 }
 
 // =============================================================================
@@ -1267,6 +1527,7 @@ enum AudioCommand {
     SetVolume(f32),
     SetEq(EqSettings),
     SetRepeatOne(bool),
+    SetExclusiveMode(bool),
 }
 
 // =============================================================================
@@ -1289,6 +1550,11 @@ impl PlaybackStateSync {
             volume: 0.7,
             current_path: String::new(),
             is_initialized: false,
+            exclusive_mode: false,
+            bit_perfect: false,
+            source_sample_rate: 0,
+            source_bit_depth: None,
+            device_sample_rate: 0,
         }));
         let event_queue = Arc::new(Mutex::new(std::collections::VecDeque::<AudioEvent>::new()));
 
@@ -1354,6 +1620,41 @@ impl PlaybackStateSync {
                                 engine.set_eq(&s);
                             }
                             AudioCommand::SetRepeatOne(v) => engine.set_repeat_one(v),
+                            #[cfg(target_os = "windows")]
+                            AudioCommand::SetExclusiveMode(enabled) => {
+                                // Stop current playback first.
+                                engine.stop();
+
+                                if enabled {
+                                    // Switch to exclusive engine (default 44100/2 until first play).
+                                    match AudioEngine::new_exclusive(44100, 2) {
+                                        Ok((new_engine, evt_rx)) => {
+                                            event_rx_opt = Some(evt_rx);
+                                            *engine = new_engine;
+                                            tracing::info!("[AUDIO] Switched to EXCLUSIVE mode");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("[AUDIO] Exclusive mode failed: {}. Staying in shared mode.", e);
+                                        }
+                                    }
+                                } else {
+                                    // Switch back to shared engine.
+                                    match AudioEngine::new(&eq_settings) {
+                                        Ok((new_engine, evt_rx)) => {
+                                            event_rx_opt = Some(evt_rx);
+                                            *engine = new_engine;
+                                            tracing::info!("[AUDIO] Switched to SHARED mode");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("[AUDIO] Shared mode reinit failed: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            AudioCommand::SetExclusiveMode(_) => {
+                                tracing::warn!("[AUDIO] Exclusive mode is only supported on Windows");
+                            }
                         }
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
@@ -1488,4 +1789,17 @@ pub fn audio_set_repeat_one(
 #[tauri::command]
 pub fn native_audio_available(_state: tauri::State<'_, PlaybackStateSync>) -> bool {
     true
+}
+
+#[tauri::command]
+pub fn audio_set_exclusive_mode(
+    enabled: bool,
+    state: tauri::State<'_, PlaybackStateSync>,
+) -> Result<(), String> {
+    state.send(AudioCommand::SetExclusiveMode(enabled))
+}
+
+#[tauri::command]
+pub fn audio_exclusive_available() -> bool {
+    cfg!(target_os = "windows")
 }

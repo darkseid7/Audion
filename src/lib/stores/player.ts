@@ -624,6 +624,13 @@ export const userQueueCount = writable(0);
 // We use a logarithmic curve for actual audio output
 export const volume = writable(0.7);
 
+// Exclusive / bit-perfect state (populated from native backend polling)
+export const exclusiveActive = writable(false);
+export const bitPerfect = writable(false);
+export const sourceSampleRate = writable(0);
+export const sourceBitDepth = writable<number | null>(null);
+export const deviceSampleRate = writable(0);
+
 // Convert linear slider value (0-1) to logarithmic audio volume (0-1)
 // Human hearing is logarithmic, so linear sliders feel wrong
 // Using: audioVolume = sliderValue^2 (quadratic approximation of log curve)
@@ -866,6 +873,11 @@ function startStatePoller(): void {
         const state = await nativeAudioGetState();
 
         currentTime.set(state.position);
+        exclusiveActive.set(state.exclusive_mode);
+        bitPerfect.set(state.bit_perfect);
+        sourceSampleRate.set(state.source_sample_rate);
+        sourceBitDepth.set(state.source_bit_depth);
+        deviceSampleRate.set(state.device_sample_rate);
         if (state.duration > 0) {
           duration.set(state.duration);
         } else {
