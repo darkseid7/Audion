@@ -586,7 +586,9 @@ export async function addAlbumToListenLater(albumId: number): Promise<void> {
   return await invoke("add_album_to_listen_later", { albumId });
 }
 
-export async function removeAlbumFromListenLater(albumId: number): Promise<void> {
+export async function removeAlbumFromListenLater(
+  albumId: number,
+): Promise<void> {
   return await invoke("remove_album_from_listen_later", { albumId });
 }
 
