@@ -141,7 +141,6 @@
         bitrate: number | null;
         sampleRate: number | null;
         bitDepth: number | null;
-        year: number | null;
     };
 
     function normalizeFormat(format: string | null | undefined): string | null {
@@ -338,7 +337,6 @@
                 bestBitrate: number | null;
                 bestSampleRate: number | null;
                 bestBitDepth: number | null;
-                year: number | null;
             }
         >();
 
@@ -351,7 +349,6 @@
                     bestBitrate: null,
                     bestSampleRate: null,
                     bestBitDepth: null,
-                    year: null,
                 });
             }
 
@@ -384,11 +381,6 @@
                     parsedBitDepth,
                 );
             }
-
-            if (albumStats.year == null) {
-                const y = extractYearFromMetadata(track.metadata_json);
-                if (y != null) albumStats.year = y;
-            }
         }
 
         for (const [albumId, stats] of perAlbum.entries()) {
@@ -407,7 +399,6 @@
                 bitrate: stats.bestBitrate,
                 sampleRate: stats.bestSampleRate,
                 bitDepth: stats.bestBitDepth,
-                year: stats.year,
             });
         }
 
@@ -766,8 +757,8 @@
             emptyStateConfig={emptyState}
             cardWidthDesktop={240}
             cardWidthMobile={170}
-            cardHeightDesktop={355}
-            cardHeightMobile={285}
+            cardHeightDesktop={380}
+            cardHeightMobile={305}
             let:item={album}
         >
             {@const cover = getAlbumCoverFromTracks(album.id)}
@@ -785,7 +776,7 @@
                 pauseTooltip="Pause"
                 ariaLabel={album.name}
                 primaryText={album.name}
-                secondaryText={album.artist || "Unknown Artist"}
+                secondaryText={(album.artist || "Unknown Artist") + (album.year ? ` · ${album.year}` : '')}
                 secondaryAction={album.artist
                     ? () => goToArtistDetail(album.artist!)
                     : null}
@@ -819,11 +810,8 @@
                 </svelte:fragment>
 
                 <svelte:fragment slot="extra-info">
-                    {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate || audioInfo?.year}
+                    {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate}
                         <div class="audio-chips">
-                            {#if audioInfo?.year}
-                                <span class="audio-chip">{audioInfo.year}</span>
-                            {/if}
                             {#if audioInfo?.format}
                                 <span class="audio-chip format">{audioInfo.format}</span>
                             {/if}

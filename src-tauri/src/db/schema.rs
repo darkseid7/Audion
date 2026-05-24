@@ -45,7 +45,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL,
             artist TEXT,
             art_data TEXT,
-            art_path TEXT
+            art_path TEXT,
+            year INTEGER
         );
 
         -- Tracks table
@@ -232,6 +233,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "albums", "art_path")? {
         println!("[DB] Adding missing column 'art_path' to albums table...");
         let _ = conn.execute("ALTER TABLE albums ADD COLUMN art_path TEXT", []);
+    }
+    if !column_exists(conn, "albums", "year")? {
+        println!("[DB] Adding missing column 'year' to albums table...");
+        let _ = conn.execute("ALTER TABLE albums ADD COLUMN year INTEGER", []);
     }
 
     // ─── Sync infrastructure tables ──────────────────────────────────────────

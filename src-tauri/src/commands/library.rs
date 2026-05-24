@@ -991,7 +991,7 @@ pub async fn get_albums_by_artist(
 
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT a.id, a.name, a.artist, a.art_data, a.art_path 
+            "SELECT DISTINCT a.id, a.name, a.artist, a.art_data, a.art_path, a.year 
              FROM albums a
              INNER JOIN tracks t ON t.album_id = a.id
              WHERE t.artist = ?1
@@ -1007,6 +1007,7 @@ pub async fn get_albums_by_artist(
                 artist: row.get(2)?,
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
+                year: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?

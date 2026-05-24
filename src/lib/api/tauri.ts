@@ -170,6 +170,7 @@ export interface Album {
   artist: string | null;
   art_data: string | null; // old - base64 album art
   art_path?: string | null; // File path to album art
+  year?: number | null;
 }
 
 export interface Artist {

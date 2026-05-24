@@ -242,43 +242,45 @@
     </div>
 
     {#if secondaryText}
-      <div
-        class="text-track secondary"
-        class:animate={isActive && secondaryOverflows}
-      >
-        {#if secondaryAction}
-          <button
-            class="text-inner secondary-link"
-            bind:this={secondaryEl}
-            style="--marquee-duration: {secondaryDuration};"
-            class:marquee={isActive && secondaryOverflows}
-            on:click|stopPropagation={secondaryAction}>{secondaryText}</button
-          >
-          {#if isActive && secondaryOverflows}
+      <div class="secondary-row">
+        <div
+          class="text-track secondary"
+          class:animate={isActive && secondaryOverflows}
+        >
+          {#if secondaryAction}
             <button
-              class="text-inner secondary-link marquee"
-              aria-hidden="true"
+              class="text-inner secondary-link"
+              bind:this={secondaryEl}
               style="--marquee-duration: {secondaryDuration};"
+              class:marquee={isActive && secondaryOverflows}
               on:click|stopPropagation={secondaryAction}>{secondaryText}</button
             >
-          {/if}
-        {:else}
-          <span
-            class="text-inner"
-            bind:this={secondaryEl}
-            style="--marquee-duration: {secondaryDuration};"
-            class:marquee={isActive && secondaryOverflows}>{secondaryText}</span
-          >
-          {#if isActive && secondaryOverflows}
+            {#if isActive && secondaryOverflows}
+              <button
+                class="text-inner secondary-link marquee"
+                aria-hidden="true"
+                style="--marquee-duration: {secondaryDuration};"
+                on:click|stopPropagation={secondaryAction}>{secondaryText}</button
+              >
+            {/if}
+          {:else}
             <span
-              class="text-inner marquee"
-              aria-hidden="true"
+              class="text-inner"
+              bind:this={secondaryEl}
               style="--marquee-duration: {secondaryDuration};"
+              class:marquee={isActive && secondaryOverflows}>{secondaryText}</span
             >
-              {secondaryText}
-            </span>
+            {#if isActive && secondaryOverflows}
+              <span
+                class="text-inner marquee"
+                aria-hidden="true"
+                style="--marquee-duration: {secondaryDuration};"
+              >
+                {secondaryText}
+              </span>
+            {/if}
           {/if}
-        {/if}
+        </div>
       </div>
     {/if}
 
@@ -648,6 +650,18 @@
   .text-track.secondary .text-inner {
     font-size: 0.8125rem;
     color: var(--text-secondary);
+  }
+
+  .secondary-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .secondary-row .text-track.secondary {
+    flex: 1;
+    min-width: 0;
   }
 
   .media-card.now-playing .text-track.secondary .text-inner,
