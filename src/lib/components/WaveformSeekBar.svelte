@@ -9,7 +9,7 @@
     export let onSeek: (pos: number) => void = () => {};
 
     // High-resolution source data (fixed), downsampled at render time
-    const SOURCE_RESOLUTION = 8000;
+    const SOURCE_RESOLUTION = 16000;
     // Desired bar width in CSS pixels (gap auto-calculated to fill width)
     const TARGET_BAR_W = 1;
 
@@ -200,10 +200,10 @@
             for (let i = 0; i < SOURCE_RESOLUTION; i++) if (rms[i] > maxR) maxR = rms[i];
             if (maxR > 0) for (let i = 0; i < SOURCE_RESOLUTION; i++) rms[i] /= maxR;
 
-            // Noise gate: anything below 1% of max becomes 0 (true silence)
+            // Noise gate: anything below 0.5% of max becomes 0 (true silence)
             for (let i = 0; i < SOURCE_RESOLUTION; i++) {
-                if (rms[i] < 0.01) rms[i] = 0;
-                if (peak[i] < 0.01) peak[i] = 0;
+                if (rms[i] < 0.005) rms[i] = 0;
+                if (peak[i] < 0.005) peak[i] = 0;
             }
 
             const result = { rms, peak };
@@ -214,15 +214,31 @@
         }
     }
 
-    /** Downsample source data to N bars by averaging each block */
-    function downsample(src: Float32Array, bars: number): Float32Array {
+    /** Peak-preserving downsample: uses max value in each block to preserve transients */
+    function downsamplePeak(src: Float32Array, bars: number): Float32Array {
         const out = new Float32Array(bars);
         const ratio = src.length / bars;
         for (let i = 0; i < bars; i++) {
             const from = Math.floor(i * ratio);
-            const to = Math.floor((i + 1) * ratio);
+            const to = Math.max(from + 1, Math.floor((i + 1) * ratio));
+            let mx = 0;
+            for (let j = from; j < to && j < src.length; j++) {
+                if (src[j] > mx) mx = src[j];
+            }
+            out[i] = mx;
+        }
+        return out;
+    }
+
+    /** RMS downsample: averages each block for smooth envelope */
+    function downsampleAvg(src: Float32Array, bars: number): Float32Array {
+        const out = new Float32Array(bars);
+        const ratio = src.length / bars;
+        for (let i = 0; i < bars; i++) {
+            const from = Math.floor(i * ratio);
+            const to = Math.max(from + 1, Math.floor((i + 1) * ratio));
             let sum = 0;
-            for (let j = from; j < to; j++) sum += src[j];
+            for (let j = from; j < to && j < src.length; j++) sum += src[j];
             out[i] = sum / (to - from);
         }
         return out;
@@ -250,8 +266,8 @@
         // Responsive: calculate bars to fill entire width edge-to-edge
         // Snap to device pixels so bars never overlap
         const dprInv = 1 / dpr;
-        const barW = Math.max(dprInv, Math.floor(TARGET_BAR_W * dpr) * dprInv); // 1 device pixel
-        const gapW = Math.max(dprInv, Math.floor(1 * dpr) * dprInv); // 1 device pixel gap
+        const barW = Math.max(dprInv, Math.floor(TARGET_BAR_W * dpr) * dprInv);
+        const gapW = Math.max(dprInv, Math.floor(1 * dpr) * dprInv);
         const step = barW + gapW;
         const barCount = Math.max(20, Math.floor(w / step));
 
@@ -271,27 +287,39 @@
                 ctx.fillRect(x, cy - skH, barW, skH * 2);
             }
         } else {
-            const rms = downsample(rawData.rms, barCount);
+            // Blend RMS (smooth body) + Peak (transient detail) for Roon-like accuracy
+            const rms = downsampleAvg(rawData.rms, barCount);
+            const peaks = downsamplePeak(rawData.peak, barCount);
 
             for (let i = 0; i < barCount; i++) {
                 const x = i * step;
                 const barProg = (i + 0.5) / barCount;
                 const played = barProg < displayProg;
-                const val = rms[i];
 
-                if (val < 0.005) {
+                // Blend: 60% RMS (body) + 40% peak (transient detail)
+                const raw = rms[i] * 0.6 + peaks[i] * 0.4;
+
+                if (raw < 0.003) {
                     // Draw a minimum-height bar for silence instead of a gap
                     const minH = Math.max(1, maxHalf * 0.04);
-                    ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.12)';
+                    ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.10)';
                     ctx.fillRect(x, cy - minH, barW, minH * 2);
                     continue;
                 }
 
-                const rH = val * maxHalf;
+                // Mild power compression to bring up quiet sections (like Roon)
+                // pow(x, 0.75) compresses dynamic range without flattening
+                const val = Math.pow(raw, 0.75);
+                const rH = Math.max(1, val * maxHalf);
+
                 ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.25)';
                 ctx.fillRect(x, cy - rH, barW, rH * 2);
             }
         }
+
+        // Center line (Roon-style)
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(0, cy - 0.5, w, 1);
 
         // Playhead
         if (displayProg > 0.002 && displayProg < 0.998) {
