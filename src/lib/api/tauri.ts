@@ -1405,5 +1405,9 @@ export async function squeezeUpdateQueue(
   trackIds: number[],
   currentTrackId: number,
 ): Promise<void> {
-  return await invoke("squeeze_update_queue", { mac, trackIds, currentTrackId });
+  return await invoke("squeeze_update_queue", {
+    mac,
+    trackIds,
+    currentTrackId,
+  });
 }

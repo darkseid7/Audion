@@ -2194,7 +2194,12 @@ function handleGaplessAdvance(): void {
   // the backend may be playing the wrong track. In that case, force-play the correct one.
   const expectedPath = nextTrackObj.local_src || nextTrackObj.path;
   if (expectedPath && lastPreloadedPath && expectedPath !== lastPreloadedPath) {
-    console.log("[Player] Gapless mismatch: expected", expectedPath, "but preloaded", lastPreloadedPath);
+    console.log(
+      "[Player] Gapless mismatch: expected",
+      expectedPath,
+      "but preloaded",
+      lastPreloadedPath,
+    );
     lastPreloadedPath = null;
     playTrack(nextTrackObj).catch(console.error);
     return;
@@ -2325,8 +2330,12 @@ export function addToQueue(tracks: Track[]): void {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     if (mac) {
-      squeezeInsertQueue(mac, tracks.map(t => t.id), insertPosition).catch(e =>
-        console.error("[Player] Failed to insert into squeeze queue:", e)
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ).catch((e) =>
+        console.error("[Player] Failed to insert into squeeze queue:", e),
       );
     }
   } else {
@@ -2431,8 +2440,12 @@ export function removeFromQueue(index: number): void {
     const current = get(currentTrack);
     if (mac && current) {
       const q = get(queue);
-      squeezeUpdateQueue(mac, q.map(t => t.id), current.id).catch(e =>
-        console.error("[Player] Failed to update squeeze queue:", e)
+      squeezeUpdateQueue(
+        mac,
+        q.map((t) => t.id),
+        current.id,
+      ).catch((e) =>
+        console.error("[Player] Failed to update squeeze queue:", e),
       );
     }
   } else {
@@ -2525,8 +2538,12 @@ export function reorderQueue(fromIndex: number, toIndex: number): void {
     const current = get(currentTrack);
     if (mac && current) {
       const q = get(queue);
-      squeezeUpdateQueue(mac, q.map(t => t.id), current.id).catch(e =>
-        console.error("[Player] Failed to update squeeze queue:", e)
+      squeezeUpdateQueue(
+        mac,
+        q.map((t) => t.id),
+        current.id,
+      ).catch((e) =>
+        console.error("[Player] Failed to update squeeze queue:", e),
       );
     }
   } else {
