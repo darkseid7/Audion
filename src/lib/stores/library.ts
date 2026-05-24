@@ -200,6 +200,15 @@ const albumToTracksMap = new Map<number, number[]>();
 // Main stores (now contain ALL items but as lightweight metadata)
 export const tracks = writable<Track[]>([]);
 
+/** Increment play_count for a track in the store (reactive UI update) */
+export function incrementPlayCount(trackId: number): void {
+  tracks.update(list =>
+    list.map(t =>
+      t.id === trackId ? { ...t, play_count: (t.play_count ?? 0) + 1 } : t
+    )
+  );
+}
+
 // Album store
 export const albums = writable<Album[]>([]);
 

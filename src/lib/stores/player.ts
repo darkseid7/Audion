@@ -20,6 +20,7 @@ import {
   getAlbumCoverFromTracks,
   updateTrackCover,
   getTrackByIdSync,
+  incrementPlayCount,
 } from "$lib/stores/library";
 import { fetchTrackCover } from "$lib/services/cover-fetcher";
 import { appSettings } from "$lib/stores/settings";
@@ -48,6 +49,8 @@ import {
   squeezeSetShuffle,
   squeezeSetRepeat,
   squeezePlay,
+  squeezeInsertQueue,
+  squeezeUpdateQueue,
 } from "$lib/api/tauri";
 
 // =============================================================================
@@ -644,6 +647,9 @@ let currentSessionId = 0;
 
 // Track play start time for accurate duration recording
 let playStartTime: number = 0;
+
+// Track the last preloaded path so handleGaplessAdvance can detect mismatches
+let lastPreloadedPath: string | null = null;
 
 // Current time and duration
 export const currentTime = writable(0);
@@ -1274,6 +1280,7 @@ export async function playTrack(
         previousTrackObj.album_id ?? null,
         durationPlayed,
       );
+      incrementPlayCount(previousTrackObj.id);
       // ListenBrainz: scrobble if >= 50 % of track duration or 4 minutes played
       const trackDuration = previousTrackObj.duration ?? 0;
       if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
@@ -2103,6 +2110,7 @@ function handleTrackEnd(): void {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
       recordTrackPlay(track.id, track.album_id ?? null, durationPlayed);
+      incrementPlayCount(track.id);
       // ListenBrainz: scrobble if >= 50 % of duration or 4 minutes
       const trackDuration = track.duration ?? 0;
       if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
@@ -2152,6 +2160,7 @@ function handleGaplessAdvance(): void {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
       recordTrackPlay(prevTrack.id, prevTrack.album_id ?? null, durationPlayed);
+      incrementPlayCount(prevTrack.id);
       const trackDuration = prevTrack.duration ?? 0;
       if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
         const threshold = Math.min(Math.floor(trackDuration / 2), 240);
@@ -2179,6 +2188,17 @@ function handleGaplessAdvance(): void {
   queueIndex.set(idx);
   const nextTrackObj = q[idx];
   if (!nextTrackObj) return;
+
+  // Check if the backend is playing the correct track.
+  // If the queue was modified (add/reorder/remove) after the preload,
+  // the backend may be playing the wrong track. In that case, force-play the correct one.
+  const expectedPath = nextTrackObj.local_src || nextTrackObj.path;
+  if (expectedPath && lastPreloadedPath && expectedPath !== lastPreloadedPath) {
+    console.log("[Player] Gapless mismatch: expected", expectedPath, "but preloaded", lastPreloadedPath);
+    lastPreloadedPath = null;
+    playTrack(nextTrackObj).catch(console.error);
+    return;
+  }
 
   _advanceUiToTrack(nextTrackObj);
 }
@@ -2242,19 +2262,30 @@ function _schedulePreload(): void {
   const q = get(queue);
   const nextIdx = _advanceQueueIndex(true); // dry run — no store writes
 
-  if (nextIdx === null || nextIdx >= q.length) return;
+  if (nextIdx === null || nextIdx >= q.length) {
+    lastPreloadedPath = null;
+    return;
+  }
 
   const nextTrackObj = q[nextIdx];
-  if (!nextTrackObj || isStreaming(nextTrackObj)) return;
+  if (!nextTrackObj || isStreaming(nextTrackObj)) {
+    lastPreloadedPath = null;
+    return;
+  }
 
   const nextPath = nextTrackObj.local_src || nextTrackObj.path;
-  if (!nextPath) return;
+  if (!nextPath) {
+    lastPreloadedPath = null;
+    return;
+  }
 
+  lastPreloadedPath = nextPath;
   nativeAudioPreload(
     nextPath,
     (nextTrackObj as any).replay_gain_db ?? null,
   ).catch((e) => {
     console.warn("[Player] Preload failed (non-fatal):", e);
+    lastPreloadedPath = null;
   });
 }
 
@@ -2289,6 +2320,19 @@ export function addToQueue(tracks: Track[]): void {
 
   // Update user queue count
   userQueueCount.update((c) => c + addedCount);
+
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(mac, tracks.map(t => t.id), insertPosition).catch(e =>
+        console.error("[Player] Failed to insert into squeeze queue:", e)
+      );
+    }
+  } else {
+    // Re-schedule gapless preload so the native backend picks up the new next track
+    _schedulePreload();
+  }
 
   // Update shuffled indices to reflect the shift in queue
   if (get(shuffle)) {
@@ -2380,6 +2424,21 @@ export function removeFromQueue(index: number): void {
       shuffledIndex.set(ptr);
     }
   }
+
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    const current = get(currentTrack);
+    if (mac && current) {
+      const q = get(queue);
+      squeezeUpdateQueue(mac, q.map(t => t.id), current.id).catch(e =>
+        console.error("[Player] Failed to update squeeze queue:", e)
+      );
+    }
+  } else {
+    // Re-schedule gapless preload since queue changed
+    _schedulePreload();
+  }
 }
 
 // Reorder queue (move track from one position to another)
@@ -2459,7 +2518,20 @@ export function reorderQueue(fromIndex: number, toIndex: number): void {
     queue: get(queue),
     index: get(queueIndex),
   });
-  _schedulePreload();
+
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    const current = get(currentTrack);
+    if (mac && current) {
+      const q = get(queue);
+      squeezeUpdateQueue(mac, q.map(t => t.id), current.id).catch(e =>
+        console.error("[Player] Failed to update squeeze queue:", e)
+      );
+    }
+  } else {
+    _schedulePreload();
+  }
 }
 
 // Clear upcoming queue (keep history)

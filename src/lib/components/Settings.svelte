@@ -16,6 +16,11 @@
     deleteListenbrainzToken,
     verifyListenbrainzToken,
     isAndroid,
+    listBackups,
+    exportBackup,
+    importBackup,
+    deleteBackup,
+    type BackupInfo,
     type MergeCoverResult,
   } from "$lib/api/tauri";
   import { trackCount, playlists, loadLibrary } from "$lib/stores/library";
@@ -78,6 +83,12 @@
   let mergePercentage = 0;
 
   // Android single music folder state
+
+  // Backup state
+  let backups: BackupInfo[] = [];
+  let isLoadingBackups = false;
+  let isExporting = false;
+  let isImporting = false;
   let isUpdatingAndroidMusicFolder = false;
   let androidMusicFolderMessage = "";
   let androidMusicFolderSuccess = false;
@@ -93,6 +104,8 @@
   let unlistenMerge: UnlistenFn | null = null;
 
   onMount(async () => {
+    loadBackups();
+
     // Listen for migration events (used by sync)
     unlistenSync = await listen("migration-batch-ready", (event) => {
       const data = event.payload as { progress: MigrationProgressUpdate };
@@ -496,6 +509,74 @@
     ($authState.email ? $authState.email.split("@")[0] : "User");
   $: accountEmail = $authState.email || "No email";
   $: accountInitial = (accountDisplayName || "U").charAt(0).toUpperCase();
+
+  // Backup functions
+  async function loadBackups() {
+    isLoadingBackups = true;
+    try {
+      backups = await listBackups();
+    } catch (e) {
+      console.error("Failed to load backups:", e);
+    } finally {
+      isLoadingBackups = false;
+    }
+  }
+
+  async function handleExportBackup() {
+    isExporting = true;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const dest = await save({
+        defaultPath: `audion-backup-${new Date().toISOString().slice(0, 10)}.db`,
+        filters: [{ name: "SQLite Database", extensions: ["db"] }],
+      });
+      if (dest) {
+        await exportBackup(dest);
+        alert("Backup exported successfully.");
+      }
+    } catch (e: any) {
+      alert("Export failed: " + e);
+    } finally {
+      isExporting = false;
+    }
+  }
+
+  async function handleImportBackup() {
+    const ok = await confirm(
+      "Importing a backup will replace your current database. The app will restart. Continue?"
+    );
+    if (!ok) return;
+    isImporting = true;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const file = await open({
+        filters: [{ name: "SQLite Database", extensions: ["db"] }],
+        multiple: false,
+      });
+      if (file) {
+        await importBackup(typeof file === "string" ? file : file.path);
+      }
+    } catch (e: any) {
+      alert("Import failed: " + e);
+      isImporting = false;
+    }
+  }
+
+  async function handleDeleteBackup(filename: string) {
+    const ok = await confirm(`Delete backup "${filename}"?`);
+    if (!ok) return;
+    try {
+      await deleteBackup(filename);
+      await loadBackups();
+    } catch (e: any) {
+      alert("Delete failed: " + e);
+    }
+  }
+
+  function formatBackupSize(bytes: number): string {
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
 </script>
 
 <div class="settings-view">
@@ -786,6 +867,60 @@
                <span class="setting-description animate-pulse">{$_('settings.processingCovers', { default: 'Processing covers... view details below for progress' })}</span>
              </div>
           {/if}
+        </div>
+      </section>
+
+      <!-- Section: Backup & Restore -->
+      <section class="settings-section" aria-labelledby="backup-heading">
+        <h2 id="backup-heading" class="section-label">{$_('settings.backup', { default: 'Backup & Restore' })}</h2>
+        <div class="settings-card">
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.autoBackup', { default: 'Automatic backups' })}</span>
+            <span class="setting-description">{$_('settings.autoBackupDesc', { default: 'Your database is automatically backed up daily. Last 7 days are kept.' })}</span>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.savedBackups', { default: 'Saved backups' })}</span>
+            {#if isLoadingBackups}
+              <span class="setting-description">Loading...</span>
+            {:else if backups.length === 0}
+              <span class="setting-description">{$_('settings.noBackups', { default: 'No backups found' })}</span>
+            {:else}
+              <div class="backup-list">
+                {#each backups as backup}
+                  <div class="backup-item">
+                    <div class="backup-info">
+                      <span class="backup-name">{backup.filename}</span>
+                      <span class="setting-description" style="margin-top: 0;">{formatBackupSize(backup.size_bytes)} · {backup.date}</span>
+                    </div>
+                    <button class="btn-outline-compact btn-danger-text" on:click={() => handleDeleteBackup(backup.filename)}>
+                      {$_('settings.delete', { default: 'Delete' })}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            <button class="btn-outline-compact" style="margin-top: 8px;" on:click={loadBackups} disabled={isLoadingBackups}>
+              {$_('settings.refreshBackups', { default: 'Refresh' })}
+            </button>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.manualBackup', { default: 'Manual backup' })}</span>
+            <span class="setting-description">{$_('settings.manualBackupDesc', { default: 'Export your database to a file or restore from a previous backup.' })}</span>
+            <div class="button-group-row" style="margin-top: 8px;">
+              <button class="btn-outline-compact" on:click={handleExportBackup} disabled={isExporting}>
+                {isExporting ? $_('settings.exporting', { default: 'Exporting...' }) : $_('settings.exportBackup', { default: 'Export Backup' })}
+              </button>
+              <button class="btn-outline-compact" on:click={handleImportBackup} disabled={isImporting}>
+                {isImporting ? $_('settings.importing', { default: 'Importing...' }) : $_('settings.importBackup', { default: 'Import Backup' })}
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1533,6 +1668,37 @@
     display: flex;
     gap: var(--spacing-sm);
     flex-wrap: wrap;
+  }
+
+  .backup-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .backup-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
+  }
+
+  .backup-info {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .backup-name {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+  }
+
+  .btn-danger-text {
+    color: var(--danger, #e74c3c) !important;
+    border-color: var(--danger, #e74c3c) !important;
   }
 
   .support-links-row {

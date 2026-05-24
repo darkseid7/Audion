@@ -330,6 +330,30 @@ export async function resetDatabase(): Promise<void> {
   return await invoke("reset_database");
 }
 
+// Backup Commands
+
+export interface BackupInfo {
+  filename: string;
+  size_bytes: number;
+  date: string;
+}
+
+export async function listBackups(): Promise<BackupInfo[]> {
+  return await invoke("list_backups");
+}
+
+export async function exportBackup(destination: string): Promise<void> {
+  return await invoke("export_backup", { destination });
+}
+
+export async function importBackup(sourcePath: string): Promise<void> {
+  return await invoke("import_backup", { sourcePath });
+}
+
+export async function deleteBackup(filename: string): Promise<void> {
+  return await invoke("delete_backup", { filename });
+}
+
 // Cover Loading Commands
 
 // Migrate all existing base64 covers to file-based storage
@@ -1366,4 +1390,20 @@ export async function squeezeGetQueue(
   mac: string,
 ): Promise<SqueezeQueueTrack[]> {
   return await invoke("squeeze_get_queue", { mac });
+}
+
+export async function squeezeInsertQueue(
+  mac: string,
+  trackIds: number[],
+  position: number,
+): Promise<void> {
+  return await invoke("squeeze_insert_queue", { mac, trackIds, position });
+}
+
+export async function squeezeUpdateQueue(
+  mac: string,
+  trackIds: number[],
+  currentTrackId: number,
+): Promise<void> {
+  return await invoke("squeeze_update_queue", { mac, trackIds, currentTrackId });
 }

@@ -66,6 +66,54 @@ impl PlayQueue {
         };
     }
 
+    /// Insert tracks at a specific position in the queue without changing the current track.
+    pub fn insert_tracks(&mut self, tracks: Vec<QueueTrack>, position: usize) {
+        let insert_at = position.min(self.tracks.len());
+        let count = tracks.len();
+
+        // Insert the new tracks into the tracks vec
+        for (i, track) in tracks.into_iter().enumerate() {
+            self.tracks.insert(insert_at + i, track);
+        }
+
+        // Update order indices: shift any index >= insert_at by count
+        for idx in self.order.iter_mut() {
+            if *idx >= insert_at {
+                *idx += count;
+            }
+        }
+
+        // Add new track indices to order (after current position)
+        let insert_order_pos = if let Some(pos) = self.position {
+            pos + 1
+        } else {
+            self.order.len()
+        };
+        for i in 0..count {
+            let order_pos = (insert_order_pos + i).min(self.order.len());
+            self.order.insert(order_pos, insert_at + i);
+        }
+    }
+
+    /// Replace the queue tracks and order without changing the current playback position.
+    /// Used when the frontend reorders the queue.
+    pub fn replace_queue_keep_current(&mut self, tracks: Vec<QueueTrack>, current_track_id: i64) {
+        let len = tracks.len();
+        self.tracks = tracks;
+        self.order = (0..len).collect();
+
+        // Find where the currently playing track is in the new queue
+        self.position = self.tracks.iter().position(|t| t.id == current_track_id);
+
+        if self.shuffle && len > 1 {
+            if let Some(pos) = self.position {
+                let current_idx = self.order[pos];
+                self.reshuffle_around(current_idx);
+                self.position = Some(0);
+            }
+        }
+    }
+
     /// Get the currently playing track.
     pub fn current(&self) -> Option<&QueueTrack> {
         let pos = self.position?;

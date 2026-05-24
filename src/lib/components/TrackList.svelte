@@ -25,6 +25,7 @@
     loadLibrary,
     getTrackAlbumCover,
     loadMoreTracks,
+    tracks as libraryTracks,
   } from "$lib/stores/library";
   import { pluginStore } from "$lib/stores/plugin-store";
   import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
@@ -100,6 +101,13 @@
   const MAX_FAILED_IMAGES = 200;
   const trackAlbumArtCache = new Map<number, string | null>();
   let albumMap = new Map<number, any>();
+
+  // Reactive play count map from library store
+  let playCountMap = new Map<number, number>();
+  $: playCountMap = new Map($libraryTracks.map(t => [t.id, t.play_count ?? 0]));
+  // Force sort refresh when play counts change
+  let playCountVersion = 0;
+  $: { playCountMap; playCountVersion++; }
 
   // 1: Track albums by reference, not just length
   let lastAlbumsRef = $albums;
@@ -196,11 +204,14 @@
   let cachedSortedTracks: Track[] = [];
 
   $: {
-    // Only re-sort if sort params or tracks actually changed
+    // Re-sort if sort params, tracks, or play counts changed
+    // playCountVersion is tracked to force re-sort on play count updates
+    const _pcv = playCountVersion;
     if (
       sortField !== lastSortField ||
       sortDirection !== lastSortDirection ||
-      filteredTracks !== lastFilteredTracks
+      filteredTracks !== lastFilteredTracks ||
+      (sortField === "play_count" && _pcv)
     ) {
       if (!sortField) {
         cachedSortedTracks = filteredTracks;
@@ -231,8 +242,8 @@
               valB = b.duration || 0;
               break;
             case "play_count":
-              valA = a.play_count || 0;
-              valB = b.play_count || 0;
+              valA = playCountMap.get(a.id) ?? 0;
+              valB = playCountMap.get(b.id) ?? 0;
               break;
           }
 
@@ -1116,8 +1127,8 @@
                     class="playing-icon"
                     viewBox="0 0 24 24"
                     fill="currentColor"
-                    width="14"
-                    height="14"
+                    width="18"
+                    height="18"
                   >
                     <path
                       d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
@@ -1139,7 +1150,7 @@
                       }
                       playTracks(sortedTracks, actualIndex, playbackContext);
                     }
-                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">â–¶</button>
+                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">&#9654;</button>
                 {/if}
               </span>
 
@@ -1239,31 +1250,6 @@
                 </div>
               {:else}
                 <div class="col-artist">
-                  <span class="artist-thumb">
-                    {#if albumArt && !failedImages.has(albumArt)}
-                      <img
-                        src={albumArt}
-                        alt="Album cover"
-                        class="cover-image-small"
-                        loading="lazy"
-                        decoding="async"
-                        on:error={() => handleImageError(albumArt)}
-                      />
-                    {:else}
-                      <span class="cover-placeholder-small">
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          width="12"
-                          height="12"
-                        >
-                          <path
-                            d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                          />
-                        </svg>
-                      </span>
-                    {/if}
-                  </span>
                   <div class="artist-meta">
                     <span class="track-name truncate"
                       >{track.title || "Unknown Title"}</span
@@ -1324,7 +1310,7 @@
                     <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
                   </svg>
                 </button>
-                <span class="col-plays">{track.play_count || 0}</span>
+                <span class="col-plays">{playCountMap.get(track.id) ?? 0}</span>
               {/if}
             </div>
           {/each}
@@ -1361,6 +1347,7 @@
     padding: var(--spacing-sm) var(--spacing-md);
     padding-right: calc(var(--spacing-md) + var(--scrollbar-width, 0px));
     padding-left: var(--spacing-lg);
+    margin-bottom: 20px;
     border-bottom: 1px solid var(--border-color);
     font-size: 0.78rem;
     font-weight: 500;
@@ -1709,15 +1696,15 @@
   }
 
   .cover-image-small {
-    width: 28px;
-    height: 28px;
+    width: 40px;
+    height: 40px;
     border-radius: 6px;
     object-fit: cover;
   }
 
   .cover-placeholder-small {
-    width: 28px;
-    height: 28px;
+    width: 40px;
+    height: 40px;
     border-radius: 6px;
     background-color: var(--bg-highlight);
     color: var(--text-subdued);
@@ -1743,7 +1730,7 @@
   }
 
   .track-name {
-    font-size: 0.9375rem;
+    font-size: 1rem;
     font-weight: 500;
     color: var(--text-primary);
     line-height: 1.2;

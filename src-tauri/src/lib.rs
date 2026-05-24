@@ -328,6 +328,11 @@ pub fn run() {
             })?;
             tracing::info!("Database initialized");
 
+            // Run daily backup
+            if let Err(e) = commands::backup::run_daily_backup(app.handle(), &database) {
+                tracing::warn!("Daily backup failed (non-fatal): {}", e);
+            }
+
             app.manage(database);
             app.manage(commands::listenbrainz::ListenBrainzState::new());
             app.manage(commands::squeeze::SqueezeState::new());
@@ -640,6 +645,11 @@ pub fn run() {
                     commands::sync_delete_account,
                     commands::sync_get_access_token,
                     commands::sync_get_device_id,
+                    // Backup commands
+                    commands::backup::list_backups,
+                    commands::backup::export_backup,
+                    commands::backup::import_backup,
+                    commands::backup::delete_backup,
                     // =========================================================================
                     // NATIVE AUDIO COMMANDS
                     // =========================================================================
@@ -684,6 +694,8 @@ pub fn run() {
                     commands::squeeze::squeeze_set_repeat,
                     commands::squeeze::squeeze_set_shuffle,
                     commands::squeeze::squeeze_get_queue,
+                    commands::squeeze::squeeze_insert_queue,
+                    commands::squeeze::squeeze_update_queue,
                 ]
             }
             #[cfg(mobile)]
@@ -822,6 +834,11 @@ pub fn run() {
                     commands::sync_delete_account,
                     commands::sync_get_access_token,
                     commands::sync_get_device_id,
+                    // Backup commands
+                    commands::backup::list_backups,
+                    commands::backup::export_backup,
+                    commands::backup::import_backup,
+                    commands::backup::delete_backup,
                     // =========================================================================
                     // NATIVE AUDIO COMMANDS
                     // =========================================================================
