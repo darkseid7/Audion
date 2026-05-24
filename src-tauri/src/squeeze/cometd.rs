@@ -997,6 +997,15 @@ async fn push_to_client_by_id(state: &CometdState, client_id: &str, message: ser
 async fn notify_player_status_inner(state: &CometdState, player_mac: &str) {
     let status_data = build_player_status(state, player_mac).await;
 
+    // Log key fields for debugging
+    tracing::info!(
+        "Squeeze CometD: notify_player_status mac={} mode={} time={} duration={}",
+        player_mac,
+        status_data.get("mode").and_then(|v| v.as_str()).unwrap_or("?"),
+        status_data.get("time").and_then(|v| v.as_f64()).unwrap_or(-1.0),
+        status_data.get("duration").and_then(|v| v.as_f64()).unwrap_or(-1.0),
+    );
+
     // Collect client_id → response_channel mappings
     let subscriptions: Vec<(String, String)> = {
         let clients = state.clients.lock().await;

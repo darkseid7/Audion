@@ -160,7 +160,12 @@ async fn handle_connection(
                 };
 
                 // Notify CometD subscribers if playback state changed or track started
-                if state_changed || stat.event == codec::StatEvent::TrackStarted {
+                // Also notify on Paused/Resumed to push device-reported elapsed time
+                if state_changed
+                    || stat.event == codec::StatEvent::TrackStarted
+                    || stat.event == codec::StatEvent::Paused
+                    || stat.event == codec::StatEvent::Resumed
+                {
                     cometd.notify_player_status(&mac.to_string()).await;
                 }
 
@@ -228,10 +233,12 @@ async fn handle_connection(
                                 player.play_started_at = None;
                                 player.state = PlayerState::Paused;
                                 let _ = player.pause().await;
+                                tracing::info!("Squeeze IR: PAUSE sent to {} elapsed_ms={}", mac, player.elapsed_ms);
                             } else if player.state == PlayerState::Paused {
                                 player.play_started_at = Some(std::time::Instant::now());
                                 player.state = PlayerState::Playing;
                                 let _ = player.resume().await;
+                                tracing::info!("Squeeze IR: RESUME sent to {} elapsed_ms={}", mac, player.elapsed_ms);
                             }
                         }
                         drop(map);

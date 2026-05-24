@@ -294,16 +294,33 @@ impl SqueezePlayer {
                 StatAction::TrackFinished
             }
             StatEvent::Paused => {
-                if self.state == PlayerState::Playing {
+                let device_ms = stat.elapsed_milliseconds;
+                // Always use device-reported time when available (IR handler may have
+                // already set state to Paused with a wall-clock estimate)
+                if device_ms > 0 {
+                    self.elapsed_ms = device_ms;
+                } else if self.state == PlayerState::Playing {
                     self.elapsed_ms = self.get_elapsed_ms();
-                    self.play_started_at = None;
                 }
+                self.play_started_at = None;
                 self.state = PlayerState::Paused;
+                tracing::info!(
+                    "Squeeze: STMp paused player={} device_elapsed_ms={} device_elapsed_s={} saved_elapsed_ms={}",
+                    self.mac, stat.elapsed_milliseconds, stat.elapsed_seconds, self.elapsed_ms
+                );
                 StatAction::None
             }
             StatEvent::Resumed => {
+                let device_ms = stat.elapsed_milliseconds;
+                if device_ms > 0 {
+                    self.elapsed_ms = device_ms;
+                }
                 self.play_started_at = Some(Instant::now());
                 self.state = PlayerState::Playing;
+                tracing::info!(
+                    "Squeeze: STMr resumed player={} device_elapsed_ms={} device_elapsed_s={} saved_elapsed_ms={}",
+                    self.mac, stat.elapsed_milliseconds, stat.elapsed_seconds, self.elapsed_ms
+                );
                 StatAction::None
             }
             StatEvent::Flushed => {
@@ -311,7 +328,10 @@ impl SqueezePlayer {
                 StatAction::None
             }
             StatEvent::Timer => {
-                // Wall-clock tracking handles elapsed time; don't update from STAT.
+                tracing::debug!(
+                    "Squeeze: STMt timer player={} device_elapsed_ms={} device_elapsed_s={} our_elapsed_ms={} state={:?}",
+                    self.mac, stat.elapsed_milliseconds, stat.elapsed_seconds, self.get_elapsed_ms(), self.state
+                );
                 StatAction::None
             }
             StatEvent::Connected => {
