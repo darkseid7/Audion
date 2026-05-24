@@ -22,7 +22,7 @@
     "title": "Title",
     "album": "Album",
     "duration": "Duration",
-    "dateAdded": "Date Added",
+    "plays": "Plays",
     "noTracksFound": "No tracks found",
     "addFolderToGetStarted": "Add a music folder to get started"
   },

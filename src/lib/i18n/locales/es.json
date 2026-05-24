@@ -22,7 +22,7 @@
     "title": "Título",
     "album": "Álbum",
     "duration": "Duración",
-    "dateAdded": "Añadido",
+    "plays": "Reproducciones",
     "noTracksFound": "No se encontraron canciones",
     "addFolderToGetStarted": "Añade una carpeta de música para comenzar"
   },

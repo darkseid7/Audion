@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import type { Track } from "$lib/api/tauri";
   import {
     formatDuration,
@@ -169,11 +169,10 @@
     | "artist"
     | "album"
     | "duration"
-    | "date_added"
+    | "play_count"
     | null;
   let sortField: SortField = null;
   let sortDirection: "asc" | "desc" = "asc";
-  let showAdvancedMetadata = false;
 
   function toggleSort(field: SortField) {
     if (sortField === field) {
@@ -185,8 +184,8 @@
       }
     } else {
       sortField = field;
-      // For date_added, default to descending (Recently added)
-      sortDirection = field === "date_added" ? "desc" : "asc";
+      // For play_count, default to descending (most played first)
+      sortDirection = field === "play_count" ? "desc" : "asc";
     }
   }
 
@@ -231,9 +230,9 @@
               valA = a.duration || 0;
               valB = b.duration || 0;
               break;
-            case "date_added":
-              valA = a.date_added || "";
-              valB = b.date_added || "";
+            case "play_count":
+              valA = a.play_count || 0;
+              valB = b.play_count || 0;
               break;
           }
 
@@ -783,7 +782,7 @@
     }
   }
 
-  // ── Swipe-to-queue (mobile only) ──
+  // â”€â”€ Swipe-to-queue (mobile only) â”€â”€
   let swipeStartX = 0;
   let swipeStartY = 0;
   let swipeDeltaX = 0;
@@ -928,27 +927,6 @@
       goToArtistDetail(track.artist);
     }
   }
-
-  function formatDateAdded(dateAdded?: string | null): string {
-    if (!dateAdded) return "Unknown";
-
-    const raw = dateAdded.trim();
-    const isoLike = raw.replace(" ", "T").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
-    const parsed = new Date(isoLike);
-    if (!isNaN(parsed.getTime())) return parsed.toLocaleDateString();
-
-    // Fallback for plain sqlite datetime (YYYY-MM-DD HH:MM:SS)
-    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (match) {
-      const [, y, m, d] = match;
-      const fallback = new Date(Number(y), Number(m) - 1, Number(d));
-      return isNaN(fallback.getTime())
-        ? `${y}-${m}-${d}`
-        : fallback.toLocaleDateString();
-    }
-
-    return raw;
-  }
 </script>
 
 {#if metadataModalTrack}
@@ -961,25 +939,6 @@
 {/if}
 
 <div class="track-list">
-  {#if !$isMobile}
-    <div class="list-toolbar">
-      <span class="toolbar-hint"
-        >{showAdvancedMetadata
-          ? "Details shown: format, bitrate, source"
-          : "Minimal view"}</span
-      >
-      <button
-        class="advanced-toggle"
-        title="Toggle extra metadata (format, bitrate, source)"
-        on:click={() => {
-          showAdvancedMetadata = !showAdvancedMetadata;
-        }}
-      >
-        {showAdvancedMetadata ? "Hide details" : "Show details"}
-      </button>
-    </div>
-  {/if}
-
   <!-- Header stays fixed -->
   <header
     class="list-header"
@@ -1012,7 +971,7 @@
     <button class="col-header col-num sortable" on:click={() => toggleSort("track_number")}>
       #
       {#if sortField === "track_number"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
     <button
@@ -1021,7 +980,7 @@
     >
       {$_('trackList.title')}
       {#if sortField === "title"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
     {#if showAlbum}
@@ -1031,7 +990,7 @@
       >
         {$_('trackList.album')}
         {#if sortField === "album"}
-          <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+          <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
         {/if}
       </button>
     {/if}
@@ -1041,7 +1000,7 @@
     >
       {$_('trackList.duration')}
       {#if sortField === "duration"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
     <span class="col-header col-like">
@@ -1050,12 +1009,12 @@
       </svg>
     </span>
     <button
-      class="col-header col-date-added sortable"
-      on:click={() => toggleSort("date_added")}
+      class="col-header col-plays sortable"
+      on:click={() => toggleSort("play_count")}
     >
-      {$_('trackList.dateAdded')}
-      {#if sortField === "date_added"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+      {$_('trackList.plays')}
+      {#if sortField === "play_count"}
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
   </header>
@@ -1180,7 +1139,7 @@
                       }
                       playTracks(sortedTracks, actualIndex, playbackContext);
                     }
-                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">▶</button>
+                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">â–¶</button>
                 {/if}
               </span>
 
@@ -1339,13 +1298,6 @@
                         {/if}
                       </div>
                     {/if}
-                    {#if showAdvancedMetadata}
-                      <span class="media-metadata truncate">
-                        {track.format ? track.format.toUpperCase() : "Unknown format"}
-                        {#if track.bitrate} • {track.bitrate} kbps{/if}
-                        {#if track.source_type} • {track.source_type}{/if}
-                      </span>
-                    {/if}
                   </div>
                 </div>
               {/if}
@@ -1372,7 +1324,7 @@
                     <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
                   </svg>
                 </button>
-                <span class="col-date-added">{formatDateAdded(track.date_added)}</span>
+                <span class="col-plays">{track.play_count || 0}</span>
               {/if}
             </div>
           {/each}
@@ -1402,38 +1354,9 @@
     overflow: hidden;
   }
 
-  .list-toolbar {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 10px;
-    padding: 6px var(--spacing-md) 0;
-  }
-
-  .toolbar-hint {
-    font-size: 0.72rem;
-    color: var(--text-subdued);
-  }
-
-  .advanced-toggle {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    padding: 2px 8px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .advanced-toggle:hover {
-    color: var(--text-primary);
-    border-color: var(--text-secondary);
-  }
-
   .list-header {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 40px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-md);
     padding-right: calc(var(--spacing-md) + var(--scrollbar-width, 0px));
@@ -1451,15 +1374,15 @@
   }
 
   .list-header.with-drag {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.no-album {
-    grid-template-columns: 40px 1fr 80px 36px 130px;
+    grid-template-columns: 40px 1fr 80px 36px 100px;
   }
 
   .list-header.no-album.with-drag {
-    grid-template-columns: 32px 40px 1fr 80px 36px 130px;
+    grid-template-columns: 32px 40px 1fr 80px 36px 100px;
   }
 
   .col-header {
@@ -1509,7 +1432,7 @@
   }
 
   .col-header.col-duration {
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   .col-header.col-like {
@@ -1517,8 +1440,8 @@
     color: var(--text-subdued);
   }
 
-  .col-header.col-date-added {
-    justify-content: flex-end;
+  .col-header.col-plays {
+    justify-content: center;
   }
 
   .sort-icon {
@@ -1550,7 +1473,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 40px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: 6px var(--spacing-md);
     padding-left: var(--spacing-lg);
@@ -1565,23 +1488,23 @@
   }
 
   .list-body.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.no-album .track-row {
-    grid-template-columns: 40px 1fr 80px 36px 130px;
+    grid-template-columns: 40px 1fr 80px 36px 100px;
   }
 
   .list-body.no-album.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 80px 36px 130px;
+    grid-template-columns: 32px 40px 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect .track-row {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect.no-album .track-row {
-    grid-template-columns: 40px 40px 1fr 80px 36px 130px;
+    grid-template-columns: 40px 40px 1fr 80px 36px 100px;
   }
 
   .track-row.selected {
@@ -1904,12 +1827,12 @@
   }
 
   .col-duration {
-    text-align: right;
+    text-align: center;
     font-size: 0.875rem;
     color: var(--text-subdued);
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   .col-like {
@@ -1938,13 +1861,13 @@
     color: var(--accent-primary);
   }
 
-  .col-date-added {
-    text-align: right;
+  .col-plays {
+    text-align: center;
     font-size: 0.8125rem;
     color: var(--text-subdued);
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   .empty-state {
@@ -2033,24 +1956,20 @@
   }
 
   .list-header.multiselect {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 130px;
+    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.multiselect.no-album {
-    grid-template-columns: 40px 40px 1fr 80px 36px 130px;
+    grid-template-columns: 40px 40px 1fr 80px 36px 100px;
   }
 
-  /* ── Equalizer bars (hidden by default, shown on mobile album view) ── */
+  /* â”€â”€ Equalizer bars (hidden by default, shown on mobile album view) â”€â”€ */
   .equalizer-bars {
     display: none;
   }
 
-  /* ── Mobile ── */
+  /* â”€â”€ Mobile â”€â”€ */
   @media (max-width: 768px) {
-    .list-toolbar {
-      display: none;
-    }
-
     /* Hide the entire header row on mobile */
     .list-header {
       display: none;
@@ -2071,7 +1990,7 @@
       opacity: 1;
     }
 
-    /* ─── Base track row (shared) ─── */
+    /* â”€â”€â”€ Base track row (shared) â”€â”€â”€ */
     .track-row {
       gap: var(--spacing-sm);
       padding: var(--spacing-xs) var(--spacing-sm);
@@ -2079,10 +1998,10 @@
       min-height: 60px;
     }
 
-    /* ─────────────────────────────────────────────────
-       ALBUM VIEW — Numbered, no covers, clean & minimal
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       ALBUM VIEW â€” Numbered, no covers, clean & minimal
        Grid: [number] [title] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-album .track-row {
       grid-template-columns: 32px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -2161,7 +2080,7 @@
       }
     }
 
-    /* Title in album view — bold, prominent */
+    /* Title in album view â€” bold, prominent */
     .list-body.mobile-album .track-name {
       font-size: 0.9375rem;
       font-weight: 600;
@@ -2189,10 +2108,10 @@
       grid-template-columns: 36px 32px 1fr 48px;
     }
 
-    /* ─────────────────────────────────────────────────
-       PLAYLIST VIEW — Cover art + info, Spotify-style
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       PLAYLIST VIEW â€” Cover art + info, Spotify-style
        Grid: [cover] [title+artist] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-playlist .track-row {
       grid-template-columns: 48px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -2258,10 +2177,10 @@
       grid-template-columns: 36px 48px 1fr 48px;
     }
 
-    /* ─────────────────────────────────────────────────
-       LIBRARY VIEW — Full info with cover + album context
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       LIBRARY VIEW â€” Full info with cover + album context
        Grid: [cover] [title+artist] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-library .track-row {
       grid-template-columns: 48px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -2328,7 +2247,7 @@
       grid-template-columns: 36px 48px 1fr 48px;
     }
 
-    /* ─── Shared playing state accents ─── */
+    /* â”€â”€â”€ Shared playing state accents â”€â”€â”€ */
     .track-row.playing .track-name {
       color: var(--accent-primary);
     }
@@ -2337,7 +2256,7 @@
       color: var(--accent-primary);
     }
 
-    /* ─── Downloaded icon compact ─── */
+    /* â”€â”€â”€ Downloaded icon compact â”€â”€â”€ */
     .downloaded-icon {
       margin-left: 2px;
     }
@@ -2347,7 +2266,7 @@
       height: 12px;
     }
 
-    /* ─── Swipe-to-queue visual states ─── */
+    /* â”€â”€â”€ Swipe-to-queue visual states â”€â”€â”€ */
     .track-row {
       position: relative;
       will-change: transform;
@@ -2394,7 +2313,7 @@
     }
 
     :global(.track-row.swipe-queue-added)::after {
-      content: "✓";
+      content: "âœ“";
       opacity: 1;
     }
   }

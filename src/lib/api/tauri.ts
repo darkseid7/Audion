@@ -162,6 +162,7 @@ export interface Track {
   disc_number?: number | null;
   metadata_json?: string | null;
   date_added?: string | null;
+  play_count?: number | null;
 }
 
 export interface Album {

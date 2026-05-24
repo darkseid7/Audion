@@ -267,6 +267,7 @@ async fn handle_track_import(
         disc_number: track_data.disc_number,
         metadata_json: track_data.metadata_json.clone(),
         date_added,
+        play_count: None,
     };
 
     Ok(track)
@@ -699,6 +700,7 @@ async fn run_scan_and_import(
                             disc_number: track_data.disc_number,
                             metadata_json: track_data.metadata_json.clone(),
                             date_added,
+                            play_count: None,
                         });
                     }
                     Ok(_) => {}

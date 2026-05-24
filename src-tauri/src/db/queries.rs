@@ -27,6 +27,8 @@ pub struct Track {
     pub disc_number: Option<i32>,
     pub metadata_json: Option<String>,
     pub date_added: Option<String>,
+    #[serde(default)]
+    pub play_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +390,7 @@ pub fn get_track_by_id(conn: &Connection, track_id: i64) -> Result<Option<Track>
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: None,
             })
         },
     )
@@ -517,6 +520,7 @@ pub fn search_tracks(
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -527,9 +531,10 @@ pub fn search_tracks(
 /// Get paginated tracks
 pub fn get_tracks_paginated(conn: &Connection, limit: i32, offset: i32) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks 
-         ORDER BY artist, album, disc_number, track_number, title
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+         FROM tracks t
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title
          LIMIT ?1 OFFSET ?2",
     )?;
 
@@ -555,6 +560,7 @@ pub fn get_tracks_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -598,6 +604,7 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -620,8 +627,10 @@ pub fn get_all_tracks_lightweight(conn: &Connection) -> Result<Vec<Track>> {
     println!("[DB] get_all_tracks_lightweight: Preparing query...");
 
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, disc_number, metadata_json, date_added 
-         FROM tracks ORDER BY artist, album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+         FROM tracks t
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let prepare_time = query_start.elapsed();
@@ -653,6 +662,7 @@ pub fn get_all_tracks_lightweight(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(14)?,
                 metadata_json: row.get(15)?,
                 date_added: row.get(16)?,
+                play_count: row.get(17)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -676,8 +686,10 @@ pub fn get_all_tracks_with_paths(conn: &Connection) -> Result<Vec<Track>> {
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks ORDER BY artist, album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+         FROM tracks t
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -702,6 +714,7 @@ pub fn get_all_tracks_with_paths(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -952,8 +965,10 @@ pub fn get_all_artists(conn: &Connection) -> Result<Vec<Artist>> {
 
 pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks WHERE album_id = ?1 ORDER BY disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+         FROM tracks t
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
+         WHERE t.album_id = ?1 ORDER BY t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -978,6 +993,7 @@ pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -987,8 +1003,10 @@ pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track
 
 pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks WHERE artist = ?1 ORDER BY album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+         FROM tracks t
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
+         WHERE t.artist = ?1 ORDER BY t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -1013,6 +1031,7 @@ pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1068,9 +1087,10 @@ pub fn get_all_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added 
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
          FROM tracks t
          INNER JOIN playlist_tracks pt ON t.id = pt.track_id
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          WHERE pt.playlist_id = ?1
          ORDER BY pt.position",
     )?;
@@ -1097,6 +1117,7 @@ pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Tr
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1382,9 +1403,10 @@ pub fn get_liked_track_ids(conn: &Connection) -> Result<Vec<i64>> {
 
 pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
          FROM tracks t
          INNER JOIN liked_tracks lt ON t.id = lt.track_id
+         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          ORDER BY lt.liked_at DESC",
     )?;
 
@@ -1410,6 +1432,7 @@ pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1531,6 +1554,7 @@ pub fn get_top_tracks(conn: &Connection, limit: i32) -> Result<Vec<TrackWithCoun
                     disc_number: row.get(15)?,
                     metadata_json: row.get(16)?,
                     date_added: row.get(17)?,
+                    play_count: row.get(18)?,
                 },
                 play_count: row.get(18)?,
             })
@@ -1573,7 +1597,7 @@ pub fn get_top_albums(conn: &Connection, limit: i32) -> Result<Vec<AlbumWithCoun
 
 pub fn get_recently_played(conn: &Connection, limit: i32) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, MAX(ph.played_at) as last_played
+        "SELECT DISTINCT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, MAX(ph.played_at) as last_played, COALESCE(COUNT(ph.id), 0) as pc
          FROM tracks t
          INNER JOIN play_history ph ON t.id = ph.track_id
          GROUP BY t.id
@@ -1603,6 +1627,7 @@ pub fn get_recently_played(conn: &Connection, limit: i32) -> Result<Vec<Track>> 
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;

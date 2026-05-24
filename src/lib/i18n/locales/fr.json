@@ -22,7 +22,7 @@
     "title": "Titre",
     "album": "Album",
     "duration": "Durée",
-    "dateAdded": "Date d'ajout",
+    "plays": "Écoutes",
     "noTracksFound": "Aucune piste trouvée",
     "addFolderToGetStarted": "Ajoutez un dossier de musique pour commencer"
   },
