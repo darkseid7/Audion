@@ -66,6 +66,12 @@
   async function pollSqueezePlayers() {
     try {
       squeezePlayers = await squeezeGetPlayers();
+      // Auto-connect: select first player when detected and none active
+      if (squeezePlayers.length > 0 && !$activeSqueezePlayer) {
+        activeSqueezePlayer.set(squeezePlayers[0].mac);
+        activeBackend.set("squeeze");
+        activeRemoteDevice.set(null);
+      }
     } catch {}
   }
 

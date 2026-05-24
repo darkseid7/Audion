@@ -20,6 +20,7 @@
   // If provided, secondary text renders as a clickable button
   export let secondaryAction: (() => void) | null = null;
   export let isPinned = false;
+  export let isLiked = false;
 
   $: isRound = variant === "round";
   $: isCentered = variant === "round";
@@ -160,6 +161,14 @@
           <path
             d="M16 9V4l1 0V2H7v2l1 0v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"
           />
+        </svg>
+      </div>
+    {/if}
+
+    {#if isLiked}
+      <div class="liked-indicator" aria-label="Liked">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+          <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
         </svg>
       </div>
     {/if}
@@ -395,6 +404,17 @@
     justify-content: center;
     box-shadow: var(--shadow-md);
     z-index: 2;
+  }
+
+  /* Liked Indicator */
+  .liked-indicator {
+    position: absolute;
+    bottom: var(--spacing-sm);
+    left: var(--spacing-sm);
+    color: var(--accent-primary);
+    filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+    z-index: 2;
+    pointer-events: none;
   }
 
   /* Cover overlay */

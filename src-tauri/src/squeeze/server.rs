@@ -358,17 +358,23 @@ async fn read_and_parse_helo(
     match msg {
         ClientMessage::Helo(helo) => {
             let mac = helo.mac;
+            let name = extract_model_name(&helo.capabilities)
+                .unwrap_or_else(|| format!("Squeeze Player {}", mac));
             let mut map = players.lock().await;
 
             if let Some(existing) = map.get_mut(&mac) {
                 // Player already registered (e.g., via CometD). Merge TCP writer.
                 existing.set_writer(writer, server_ip);
                 existing.capabilities = helo.capabilities;
-                tracing::info!("Squeeze TCP: merged TCP writer into existing player {}", mac);
+                // Update name if it's still the generic placeholder
+                if existing.name.starts_with("Player ") || existing.name.starts_with("Squeeze Player ") {
+                    existing.name = name.clone();
+                }
+                tracing::info!("Squeeze TCP: merged TCP writer into existing player {} (\"{}\")", mac, existing.name);
             } else {
                 let player = SqueezePlayer::new(
                     mac,
-                    format!("Squeeze Player {}", mac),
+                    name,
                     helo.capabilities,
                     writer,
                     server_ip,
@@ -380,6 +386,20 @@ async fn read_and_parse_helo(
         }
         _ => None,
     }
+}
+
+/// Extract a human-readable model name from the SlimProto capabilities string.
+fn extract_model_name(capabilities: &str) -> Option<String> {
+    for part in capabilities.split(',') {
+        let part = part.trim();
+        if let Some(name) = part.strip_prefix("ModelName:").or_else(|| part.strip_prefix("ModelName=")) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Handle gapless prefetch: advance queue, queue file, send strm with NO_RESTART_DECODER.

@@ -54,6 +54,11 @@ impl StreamingState {
         let q = self.queue.lock().await;
         q.get(mac_str).cloned()
     }
+
+    /// Clear all queued entries (used on server stop).
+    pub async fn clear(&self) {
+        self.queue.lock().await.clear();
+    }
 }
 
 /// Combined state for the HTTP server (streaming + cometd).

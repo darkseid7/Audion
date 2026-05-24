@@ -15,7 +15,7 @@ use streaming::StreamingState;
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::task::JoinHandle;
 
 /// Top-level Squeeze server state, managed by Tauri.
@@ -55,17 +55,14 @@ impl SqueezeServer {
         let udp_socket = UdpSocket::bind("0.0.0.0:3483")
             .map_err(|e| format!("Cannot bind UDP port 3483 (discovery): {}. Is another Squeeze/LMS server running?", e))?;
 
-        let tcp_listener = TcpListener::bind("0.0.0.0:3483")
-            .await
+        let tcp_listener = bind_tcp_reuse("0.0.0.0:3483").await
             .map_err(|e| format!("Cannot bind TCP port 3483 (SlimProto): {}. Is another Squeeze/LMS server running?", e))?;
 
-        let http_listener = TcpListener::bind(("0.0.0.0", server::HTTP_PORT))
-            .await
+        let http_listener = bind_tcp_reuse(&format!("0.0.0.0:{}", server::HTTP_PORT)).await
             .map_err(|e| format!("Cannot bind TCP port {} (HTTP streaming): {}", server::HTTP_PORT, e))?;
 
         // CLI port (9090) — some Squeeze controllers (e.g. Squeezer) need this
-        let cli_listener = TcpListener::bind("0.0.0.0:9090")
-            .await
+        let cli_listener = bind_tcp_reuse("0.0.0.0:9090").await
             .map_err(|e| format!("Cannot bind TCP port 9090 (CLI): {}", e))?;
 
         // ── All sockets bound — now spawn the tasks ─────────────────────
@@ -154,14 +151,23 @@ impl SqueezeServer {
     pub async fn stop(&mut self) {
         self.shutdown_flag.store(true, Ordering::Relaxed);
 
-        // Abort all handles
+        // Give tasks a moment to notice the shutdown flag and exit gracefully,
+        // dropping their listeners so ports are freed immediately.
         for handle in self.handles.drain(..) {
-            handle.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
 
-        // Disconnect all players
+        // Clear all player state
         let mut map = self.players.lock().await;
         map.clear();
+        drop(map);
+
+        // Clear CometD client state so restart is clean
+        self.cometd.clients.lock().await.clear();
+        self.cometd.mac_to_client.lock().await.clear();
+
+        // Clear streaming queue
+        self.streaming.clear().await;
 
         self.running.store(false, Ordering::Relaxed);
         tracing::info!("Squeeze server stopped");
@@ -170,4 +176,13 @@ impl SqueezeServer {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
+}
+
+/// Bind a TCP listener with SO_REUSEADDR so the port can be reused immediately after stop.
+async fn bind_tcp_reuse(addr: &str) -> std::io::Result<TcpListener> {
+    let addr: std::net::SocketAddr = addr.parse().unwrap();
+    let socket = TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(128)
 }

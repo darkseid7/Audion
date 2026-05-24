@@ -141,6 +141,7 @@
         bitrate: number | null;
         sampleRate: number | null;
         bitDepth: number | null;
+        year: number | null;
     };
 
     function normalizeFormat(format: string | null | undefined): string | null {
@@ -337,6 +338,7 @@
                 bestBitrate: number | null;
                 bestSampleRate: number | null;
                 bestBitDepth: number | null;
+                year: number | null;
             }
         >();
 
@@ -349,6 +351,7 @@
                     bestBitrate: null,
                     bestSampleRate: null,
                     bestBitDepth: null,
+                    year: null,
                 });
             }
 
@@ -381,6 +384,11 @@
                     parsedBitDepth,
                 );
             }
+
+            if (albumStats.year == null) {
+                const y = extractYearFromMetadata(track.metadata_json);
+                if (y != null) albumStats.year = y;
+            }
         }
 
         for (const [albumId, stats] of perAlbum.entries()) {
@@ -399,6 +407,7 @@
                 bitrate: stats.bestBitrate,
                 sampleRate: stats.bestSampleRate,
                 bitDepth: stats.bestBitDepth,
+                year: stats.year,
             });
         }
 
@@ -755,8 +764,10 @@
             onItemContextMenu={handleAlbumContextMenu}
             onLoadMore={handleLoadMore}
             emptyStateConfig={emptyState}
-            cardHeightDesktop={285}
-            cardHeightMobile={235}
+            cardWidthDesktop={240}
+            cardWidthMobile={170}
+            cardHeightDesktop={355}
+            cardHeightMobile={285}
             let:item={album}
         >
             {@const cover = getAlbumCoverFromTracks(album.id)}
@@ -768,6 +779,7 @@
                 {isNowPlaying}
                 {isPaused}
                 isPinned={isPinned("album", album.id, $pinnedItems)}
+                isLiked={$likedAlbumIds.has(album.id)}
                 playTooltip="Play album"
                 resumeTooltip="Resume album"
                 pauseTooltip="Pause"
@@ -807,8 +819,11 @@
                 </svelte:fragment>
 
                 <svelte:fragment slot="extra-info">
-                    {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate}
+                    {#if audioInfo?.format || audioInfo?.sampleRate || audioInfo?.bitDepth || audioInfo?.bitrate || audioInfo?.year}
                         <div class="audio-chips">
+                            {#if audioInfo?.year}
+                                <span class="audio-chip">{audioInfo.year}</span>
+                            {/if}
                             {#if audioInfo?.format}
                                 <span class="audio-chip format">{audioInfo.format}</span>
                             {/if}
