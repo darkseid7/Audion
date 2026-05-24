@@ -190,20 +190,16 @@
                 peak[i] = peakAbs;
             }
 
-            // Normalize peak to [0,1] - raw, no compression
-            let maxP = 0;
-            for (let i = 0; i < SOURCE_RESOLUTION; i++) if (peak[i] > maxP) maxP = peak[i];
-            if (maxP > 0) for (let i = 0; i < SOURCE_RESOLUTION; i++) peak[i] /= maxP;
+            // NO per-track normalization — keep absolute loudness values.
+            // PCM is [-1,1] so peak is already in [0,1] absolute (1.0 = 0 dBFS).
+            // RMS reflects true loudness: ~0.4-0.5 = brickwalled, ~0.1 = dynamic.
+            // This lets the waveform height show actual track loudness (like Roon)
+            // so you can visually spot loudness war victims vs dynamic masters.
 
-            // RMS: normalize raw (no compression — preserve true dynamics)
-            let maxR = 0;
-            for (let i = 0; i < SOURCE_RESOLUTION; i++) if (rms[i] > maxR) maxR = rms[i];
-            if (maxR > 0) for (let i = 0; i < SOURCE_RESOLUTION; i++) rms[i] /= maxR;
-
-            // Noise gate: anything below 0.5% of max becomes 0 (true silence)
+            // Noise gate: silence below absolute threshold
             for (let i = 0; i < SOURCE_RESOLUTION; i++) {
-                if (rms[i] < 0.005) rms[i] = 0;
-                if (peak[i] < 0.005) peak[i] = 0;
+                if (rms[i] < 0.002) rms[i] = 0;
+                if (peak[i] < 0.002) peak[i] = 0;
             }
 
             const result = { rms, peak };
@@ -297,9 +293,13 @@
                 const played = barProg < displayProg;
 
                 // Blend: 60% RMS (body) + 40% peak (transient detail)
-                const raw = rms[i] * 0.6 + peaks[i] * 0.4;
+                // No artificial scaling — absolute values reflect true loudness:
+                // - Brickwalled (-6 LUFS): raw ~0.55 → bars ~60% height
+                // - Well-mastered (-14 LUFS): raw ~0.25 → bars ~30% height
+                // - Dynamic classical (-20 LUFS): raw ~0.10 → bars ~14% height
+                const raw = Math.min(1.0, rms[i] * 0.6 + peaks[i] * 0.4);
 
-                if (raw < 0.003) {
+                if (raw < 0.005) {
                     // Draw a minimum-height bar for silence instead of a gap
                     const minH = Math.max(1, maxHalf * 0.04);
                     ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.10)';
@@ -307,9 +307,8 @@
                     continue;
                 }
 
-                // Mild power compression to bring up quiet sections (like Roon)
-                // pow(x, 0.75) compresses dynamic range without flattening
-                const val = Math.pow(raw, 0.75);
+                // Light compression — preserve dynamics, just soften extremes
+                const val = Math.pow(raw, 0.85);
                 const rH = Math.max(1, val * maxHalf);
 
                 ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.25)';
