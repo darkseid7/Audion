@@ -11,12 +11,8 @@ pub struct BackupInfo {
 }
 
 /// Get the backups directory path
-fn backups_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    Ok(app_dir.join("backups"))
+fn backups_dir(_app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(r"F:\Music metadata backup"))
 }
 
 /// Get the main database file path

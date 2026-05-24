@@ -279,7 +279,13 @@
                 const played = barProg < displayProg;
                 const val = rms[i];
 
-                if (val < 0.005) continue; // skip silence — no bar drawn
+                if (val < 0.005) {
+                    // Draw a minimum-height bar for silence instead of a gap
+                    const minH = Math.max(1, maxHalf * 0.04);
+                    ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.12)';
+                    ctx.fillRect(x, cy - minH, barW, minH * 2);
+                    continue;
+                }
 
                 const rH = val * maxHalf;
                 ctx.fillStyle = played ? accentColor : 'rgba(255,255,255,0.25)';

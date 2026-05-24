@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
     import { onMount } from "svelte";
     import {
         currentTrack,
@@ -35,7 +35,7 @@
         getAlbumCoverSrc,
     } from "$lib/api/tauri";
     import { uiSlotManager } from "$lib/plugins/ui-slots";
-    import { goToArtistDetail } from "$lib/stores/view";
+    import { goToArtistDetail, goToAlbumDetail } from "$lib/stores/view";
     import { isMobile } from "$lib/stores/mobile";
     import type { Album } from "$lib/api/tauri";
     import { likedTrackIds, toggleLike } from "$lib/stores/liked";
@@ -51,7 +51,7 @@
     $: isLocalTrack = !!$currentTrack &&
         ($currentTrack.source_type === 'local' || (!$currentTrack.source_type && !!$currentTrack.path));
 
-    // Detect live streams (radio, etc.) — no duration, streaming source
+    // Detect live streams (radio, etc.) â€” no duration, streaming source
     $: isLive = $currentTrack
         ? $currentTrack.source_type === "radio" ||
           (isStreaming($currentTrack) &&
@@ -171,7 +171,7 @@
         if (!seekBarElement) return;
         const rect = seekBarElement.getBoundingClientRect();
         const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        // Update UI immediately for smooth drag — fire-and-forget to backend
+        // Update UI immediately for smooth drag â€” fire-and-forget to backend
         // i know the drag is buggy. but this is the best we can do
         // Poller will correct position on next tick if keyframe alignment differs.
         currentTime.set(pos * $duration);
@@ -341,10 +341,10 @@
                             width="20"
                             height="20"
                             fill={isCurrentLiked
-                                ? "var(--accent-color, #1db954)"
+                                ? "var(--accent-primary, #1db954)"
                                 : "none"}
                             stroke={isCurrentLiked
-                                ? "var(--accent-color, #1db954)"
+                                ? "var(--accent-primary, #1db954)"
                                 : "currentColor"}
                             stroke-width="2"
                         >
@@ -415,7 +415,13 @@
         <!-- Track info -->
         <div class="track-info desktop-track-info">
             {#if $currentTrack}
-                <div class="album-art">
+                <div class="album-art" role="button" tabindex="0"
+                    on:click|stopPropagation={() => {
+                        if ($currentTrack?.album_id) goToAlbumDetail($currentTrack.album_id);
+                    }}
+                    on:keydown={(e) => {
+                        if (e.key === "Enter" && $currentTrack?.album_id) goToAlbumDetail($currentTrack.album_id);
+                    }}>
                     {#if albumArt && !imageLoadFailed}
                         <img
                             src={albumArt}
@@ -489,10 +495,10 @@
                         width="16"
                         height="16"
                         fill={isCurrentLiked
-                            ? "var(--accent-color, #1db954)"
+                            ? "var(--accent-primary, #1db954)"
                             : "none"}
                         stroke={isCurrentLiked
-                            ? "var(--accent-color, #1db954)"
+                            ? "var(--accent-primary, #1db954)"
                             : "currentColor"}
                         stroke-width="2"
                     >
@@ -885,6 +891,16 @@
         cursor: pointer;
     }
 
+    .track-album-link {
+        color: var(--text-subdued);
+        cursor: pointer;
+    }
+
+    .track-album-link:hover {
+        color: var(--text-primary);
+        text-decoration: underline;
+    }
+
     .player-audio-chips {
         display: flex;
         flex-wrap: wrap;
@@ -940,7 +956,7 @@
     }
 
     .icon-btn.active {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     .connect-btn {
@@ -953,13 +969,13 @@
         right: 4px;
         width: 6px;
         height: 6px;
-        background: var(--accent-color, #1db954);
+        background: var(--accent-primary, #1db954);
         border-radius: 50%;
-        box-shadow: 0 0 5px var(--accent-color, #1db954);
+        box-shadow: 0 0 5px var(--accent-primary, #1db954);
     }
 
     .like-btn.liked {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     .like-btn.liked:hover {
@@ -985,7 +1001,7 @@
     }
 
     .mini-like-btn.liked {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     /* Playback controls */
@@ -1220,7 +1236,7 @@
         min-width: 0;
     }
 
-    /* Live progress bar — non-interactive, steady glow */
+    /* Live progress bar â€” non-interactive, steady glow */
     .live-bar {
         cursor: default;
     }
@@ -1303,7 +1319,7 @@
 
     .sleep-timer-remaining {
         font-size: 0.72rem;
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
         font-weight: 600;
     }
 
@@ -1327,13 +1343,13 @@
 
     .sleep-preset-btn:hover,
     .sleep-cancel-btn:hover {
-        border-color: var(--accent-color, #1db954);
+        border-color: var(--accent-primary, #1db954);
         color: var(--text-primary);
     }
 
     .sleep-preset-btn.active {
-        border-color: var(--accent-color, #1db954);
-        color: var(--accent-color, #1db954);
+        border-color: var(--accent-primary, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     .sleep-cancel-btn {

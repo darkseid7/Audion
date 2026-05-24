@@ -61,7 +61,26 @@
         | "name-desc";
 
     const ALBUM_SORT_STORAGE_KEY = "audion_album_sort";
-    let albumSort: AlbumSortOption = "artist-asc";
+
+    function loadAlbumSort(): AlbumSortOption {
+        if (typeof localStorage === "undefined") return "artist-asc";
+        const saved = localStorage.getItem(ALBUM_SORT_STORAGE_KEY);
+        if (
+            saved === "artist-asc" ||
+            saved === "artist-desc" ||
+            saved === "year-desc" ||
+            saved === "year-asc" ||
+            saved === "added-desc" ||
+            saved === "added-asc" ||
+            saved === "name-asc" ||
+            saved === "name-desc"
+        ) {
+            return saved;
+        }
+        return "artist-asc";
+    }
+
+    let albumSort: AlbumSortOption = loadAlbumSort();
     let isSortMenuOpen = false;
 
     const sortOptionLabels: Record<AlbumSortOption, string> = {
@@ -89,20 +108,6 @@
     $: selectedSortLabel = sortOptionLabels[albumSort];
 
     onMount(() => {
-        const saved = localStorage.getItem(ALBUM_SORT_STORAGE_KEY);
-        if (
-            saved === "artist-asc" ||
-            saved === "artist-desc" ||
-            saved === "year-desc" ||
-            saved === "year-asc" ||
-            saved === "added-desc" ||
-            saved === "added-asc" ||
-            saved === "name-asc" ||
-            saved === "name-desc"
-        ) {
-            albumSort = saved;
-        }
-
         const handleGlobalPointerDown = (event: PointerEvent) => {
             const target = event.target as HTMLElement | null;
             if (!target) return;
