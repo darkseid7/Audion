@@ -31,10 +31,11 @@ pub struct SqueezeServer {
 impl SqueezeServer {
     pub fn new() -> Self {
         let players = player::new_player_map();
+        let streaming = StreamingState::new();
         Self {
-            cometd: CometdState::new(players.clone()),
+            cometd: CometdState::new(players.clone(), streaming.clone()),
             players,
-            streaming: StreamingState::new(),
+            streaming,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             handles: Vec::new(),

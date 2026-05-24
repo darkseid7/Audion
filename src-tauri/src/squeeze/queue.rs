@@ -130,6 +130,13 @@ impl PlayQueue {
         self.current()
     }
 
+    /// Jump to an absolute position in the queue.
+    pub fn jump_to(&mut self, index: usize) {
+        if index < self.order.len() {
+            self.position = Some(index);
+        }
+    }
+
     /// Go to previous track.
     pub fn previous(&mut self) -> Option<&QueueTrack> {
         let pos = self.position?;

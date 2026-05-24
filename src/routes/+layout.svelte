@@ -16,6 +16,7 @@
   import { mobileSearchOpen } from "$lib/stores/mobile";
   import { initAndroidNotification } from "$lib/services/android-notification";
   import { loadLikedTracks } from "$lib/stores/liked";
+  import { loadLikedAlbums } from "$lib/stores/liked-albums";
   import { loadListenLaterAlbums } from "$lib/stores/listen-later";
   import { goBack, navigationHistory } from "$lib/stores/view";
   import {
@@ -106,8 +107,9 @@
     initMobileDetection();
     await initAudioBackend();
 
-    // Load liked tracks from database
+    // Load liked tracks and albums from database
     loadLikedTracks();
+    loadLikedAlbums();
     loadListenLaterAlbums();
 
     // Initialize sync state (auth check, event listeners)

@@ -266,6 +266,7 @@
     } from "$lib/stores/pinned";
     import { setCustomArtwork } from "$lib/stores/customArtwork";
     import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
+    import { likedAlbumIds, toggleAlbumLike } from "$lib/stores/liked-albums";
 
     function handleContextMenu(e: MouseEvent) {
         if (!album) return;
@@ -490,6 +491,20 @@
                             <path d="M8 5v14l11-7z" />
                         </svg>
                         {$_('album.play')}
+                    </button>
+
+                    <button
+                        class="btn-like-album"
+                        class:liked={$likedAlbumIds.has(albumId)}
+                        on:click={() => toggleAlbumLike(albumId)}
+                        title={$likedAlbumIds.has(albumId) ? "Unlike album" : "Like album"}
+                    >
+                        <svg viewBox="0 0 24 24" width="22" height="22"
+                            fill={$likedAlbumIds.has(albumId) ? "currentColor" : "none"}
+                            stroke="currentColor" stroke-width="2"
+                        >
+                            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                        </svg>
                     </button>
 
                     {#if hasDownloadable}
@@ -799,6 +814,31 @@
     .album-actions {
         display: flex;
         gap: var(--spacing-md);
+        align-items: center;
+    }
+
+    .btn-like-album {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-subdued);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+    }
+
+    .btn-like-album:hover {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+
+    .btn-like-album.liked {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
     }
 
     .play-all-btn {

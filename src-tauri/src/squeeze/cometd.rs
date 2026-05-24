@@ -10,13 +10,17 @@
 use crate::squeeze::codec::MacAddress;
 use crate::squeeze::player::{PlayerMap, PlayerState};
 use crate::squeeze::queue::QueueTrack;
+use crate::squeeze::streaming::StreamingState;
+use crate::squeeze::server::HTTP_PORT;
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Mutex, Notify};
 
 // ── Bayeux message types ─────────────────────────────────────────────────────
@@ -122,16 +126,19 @@ pub struct CometdState {
     pub mac_to_client: Arc<Mutex<HashMap<String, String>>>,
     /// Player map shared with the rest of the squeeze system.
     pub players: PlayerMap,
+    /// Streaming state for queueing audio files.
+    pub streaming: StreamingState,
     /// Counter for generating client IDs.
     counter: Arc<Mutex<u64>>,
 }
 
 impl CometdState {
-    pub fn new(players: PlayerMap) -> Self {
+    pub fn new(players: PlayerMap, streaming: StreamingState) -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
             mac_to_client: Arc::new(Mutex::new(HashMap::new())),
             players,
+            streaming,
             counter: Arc::new(Mutex::new(1)),
         }
     }
@@ -487,9 +494,10 @@ async fn handle_slim_request(state: &CometdState, msg: &BayeuxRequest) -> Vec<se
 
         if let Some(request) = data.get("request").and_then(|v| v.as_array()) {
             let player_id = request.first().and_then(|v| v.as_str()).unwrap_or("");
+            tracing::info!("Cometd: slim/request raw request array ({} elements): {:?}", request.len(), request);
             if let Some(cmd_array) = request.get(1).and_then(|v| v.as_array()) {
                 let cmd_name = cmd_array.first().and_then(|v| v.as_str()).unwrap_or("");
-                tracing::info!("Cometd: slim request player={} cmd={} response_channel={}", player_id, cmd_name, response_channel);
+                tracing::info!("Cometd: slim request player={} cmd={} full_cmd={:?} response_channel={}", player_id, cmd_name, cmd_array, response_channel);
 
                 match cmd_name {
                     "serverstatus" => {
@@ -549,12 +557,235 @@ async fn handle_slim_request(state: &CometdState, msg: &BayeuxRequest) -> Vec<se
                             }
                         }
                     }
+                    "play" => {
+                        tracing::info!("Cometd: >>> PLAY handler entered for player={}", player_id);
+                        if !player_id.is_empty() {
+                            let mac = parse_mac_address(player_id);
+                            let mut players = state.players.lock().await;
+                            if let Some(player) = players.get_mut(&mac) {
+                                tracing::info!("Cometd: play: current state={:?}", player.state);
+                                if player.state == PlayerState::Paused {
+                                    player.play_started_at = Some(Instant::now());
+                                    player.state = PlayerState::Playing;
+                                    let _ = player.resume().await;
+                                }
+                            }
+                            drop(players);
+                            state.notify_player_status(player_id).await;
+                        }
+                    }
+                    "pause" => {
+                        tracing::info!("Cometd: >>> PAUSE handler entered for player={}", player_id);
+                        if !player_id.is_empty() {
+                            let mac = parse_mac_address(player_id);
+                            // LMS semantics: pause (no arg) = toggle, pause 0 = unpause, pause 1 = force pause
+                            let sub_val = cmd_array.get(1).and_then(|v| {
+                                v.as_str().map(|s| s.to_string())
+                                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+                            });
+                            tracing::info!("Cometd: pause sub_val={:?}", sub_val);
+                            let mut players = state.players.lock().await;
+                            if let Some(player) = players.get_mut(&mac) {
+                                tracing::info!("Cometd: pause: current state={:?}, sub_val={:?}", player.state, sub_val);
+                                match sub_val.as_deref() {
+                                    Some("0") => {
+                                        tracing::info!("Cometd: pause -> explicit UNPAUSE");
+                                        // Explicit unpause
+                                        if player.state == PlayerState::Paused {
+                                            player.play_started_at = Some(Instant::now());
+                                            player.state = PlayerState::Playing;
+                                            let _ = player.resume().await;
+                                        }
+                                    }
+                                    Some("1") => {
+                                        tracing::info!("Cometd: pause -> explicit FORCE PAUSE");
+                                        // Explicit pause
+                                        if player.state == PlayerState::Playing {
+                                            player.elapsed_ms = player.get_elapsed_ms();
+                                            player.play_started_at = None;
+                                            player.state = PlayerState::Paused;
+                                            let _ = player.pause().await;
+                                        }
+                                    }
+                                    _ => {
+                                        tracing::info!("Cometd: pause -> TOGGLE (no arg)");
+                                        // No argument or unknown = toggle
+                                        if player.state == PlayerState::Playing {
+                                            player.elapsed_ms = player.get_elapsed_ms();
+                                            player.play_started_at = None;
+                                            player.state = PlayerState::Paused;
+                                            let _ = player.pause().await;
+                                        } else if player.state == PlayerState::Paused {
+                                            player.play_started_at = Some(Instant::now());
+                                            player.state = PlayerState::Playing;
+                                            let _ = player.resume().await;
+                                        }
+                                    }
+                                }
+                            }
+                            drop(players);
+                            state.notify_player_status(player_id).await;
+                        }
+                    }
+                    "stop" => {
+                        if !player_id.is_empty() {
+                            let mac = parse_mac_address(player_id);
+                            let mut players = state.players.lock().await;
+                            if let Some(player) = players.get_mut(&mac) {
+                                player.elapsed_ms = 0;
+                                player.play_started_at = None;
+                                player.state = PlayerState::Stopped;
+                                let _ = player.stop().await;
+                            }
+                            drop(players);
+                            state.notify_player_status(player_id).await;
+                        }
+                    }
+                    "playlist" => {
+                        tracing::info!("Cometd: >>> PLAYLIST handler entered for player={}", player_id);
+                        if !player_id.is_empty() {
+                            let sub_cmd = cmd_array.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                            let mac = parse_mac_address(player_id);
+                            tracing::info!("Cometd: playlist sub_cmd={} raw_arg2={:?}", sub_cmd, cmd_array.get(2));
+                            match sub_cmd {
+                                "index" | "jump" => {
+                                    // Handle both string ("+1") and numeric (1) values
+                                    let idx_val = cmd_array.get(2);
+                                    let idx_str = idx_val.and_then(|v| {
+                                        v.as_str().map(|s| s.to_string())
+                                            .or_else(|| v.as_i64().map(|n| {
+                                                if n > 0 { format!("+{}", n) } else { n.to_string() }
+                                            }))
+                                    }).unwrap_or_else(|| "0".to_string());
+                                    if idx_str == "+1" {
+                                        cometd_skip_track(state, player_id, &mac, true).await;
+                                    } else if idx_str == "-1" {
+                                        cometd_skip_track(state, player_id, &mac, false).await;
+                                    } else if let Ok(abs_idx) = idx_str.parse::<usize>() {
+                                        cometd_jump_to_index(state, player_id, &mac, abs_idx).await;
+                                    }
+                                }
+                                "repeat" => {
+                                    let val = cmd_array.get(2).and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| ""))).unwrap_or("0");
+                                    let repeat = match val {
+                                        "1" => crate::squeeze::queue::RepeatMode::One,
+                                        "2" => crate::squeeze::queue::RepeatMode::All,
+                                        _ => crate::squeeze::queue::RepeatMode::Off,
+                                    };
+                                    let mut players = state.players.lock().await;
+                                    if let Some(player) = players.get_mut(&mac) {
+                                        player.queue.repeat = repeat;
+                                    }
+                                    drop(players);
+                                    state.notify_player_status(player_id).await;
+                                }
+                                "shuffle" => {
+                                    let val = cmd_array.get(2).and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| ""))).unwrap_or("0");
+                                    let enabled = val != "0";
+                                    let mut players = state.players.lock().await;
+                                    if let Some(player) = players.get_mut(&mac) {
+                                        player.queue.set_shuffle(enabled);
+                                    }
+                                    drop(players);
+                                    state.notify_player_status(player_id).await;
+                                }
+                                _ => {
+                                    tracing::info!("Cometd: unhandled playlist sub-command: {}", sub_cmd);
+                                }
+                            }
+                        }
+                    }
+                    "button" => {
+                        tracing::info!("Cometd: >>> BUTTON handler entered for player={}", player_id);
+                        if !player_id.is_empty() {
+                            let btn = cmd_array.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                            tracing::info!("Cometd: button name={}", btn);
+                            let mac = parse_mac_address(player_id);
+                            match btn {
+                                "fwd" | "fwd.single" | "fwd.hold" => {
+                                    cometd_skip_track(state, player_id, &mac, true).await;
+                                }
+                                "rew" | "rew.single" | "rew.hold" => {
+                                    cometd_skip_track(state, player_id, &mac, false).await;
+                                }
+                                "pause" | "pause.single" => {
+                                    let mut players = state.players.lock().await;
+                                    if let Some(player) = players.get_mut(&mac) {
+                                        if player.state == PlayerState::Playing {
+                                            player.elapsed_ms = player.get_elapsed_ms();
+                                            player.play_started_at = None;
+                                            player.state = PlayerState::Paused;
+                                            let _ = player.pause().await;
+                                        } else if player.state == PlayerState::Paused {
+                                            player.play_started_at = Some(Instant::now());
+                                            player.state = PlayerState::Playing;
+                                            let _ = player.resume().await;
+                                        }
+                                    }
+                                    drop(players);
+                                    state.notify_player_status(player_id).await;
+                                }
+                                "play" | "play.single" => {
+                                    let mut players = state.players.lock().await;
+                                    if let Some(player) = players.get_mut(&mac) {
+                                        if player.state == PlayerState::Paused {
+                                            player.play_started_at = Some(Instant::now());
+                                            player.state = PlayerState::Playing;
+                                            let _ = player.resume().await;
+                                        }
+                                    }
+                                    drop(players);
+                                    state.notify_player_status(player_id).await;
+                                }
+                                _ => {
+                                    tracing::info!("Cometd: unhandled button: {}", btn);
+                                }
+                            }
+                        }
+                    }
+                    "time" => {
+                        // Seek command: time <seconds>
+                        if !player_id.is_empty() {
+                            if let Some(secs_val) = cmd_array.get(1) {
+                                let secs: f64 = secs_val.as_f64()
+                                    .or_else(|| secs_val.as_str().and_then(|s| s.parse().ok()))
+                                    .unwrap_or(0.0);
+                                let mac = parse_mac_address(player_id);
+                                cometd_seek(state, player_id, &mac, secs).await;
+                            }
+                        }
+                    }
+                    "power" => {
+                        // Power on/off — we treat power off as stop
+                        if !player_id.is_empty() {
+                            let val = cmd_array.get(1).and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| ""))).unwrap_or("1");
+                            if val == "0" {
+                                let mac = parse_mac_address(player_id);
+                                let mut players = state.players.lock().await;
+                                if let Some(player) = players.get_mut(&mac) {
+                                    player.elapsed_ms = 0;
+                                    player.play_started_at = None;
+                                    player.state = PlayerState::Stopped;
+                                    let _ = player.stop().await;
+                                }
+                                drop(players);
+                                state.notify_player_status(player_id).await;
+                            }
+                        }
+                    }
                     _ => {
                         tracing::info!("Cometd: unhandled slim request cmd={}", cmd_name);
                     }
                 }
+            } else {
+                // request[1] is not an array — maybe flat command format
+                tracing::info!("Cometd: request[1] is NOT an array! raw={:?}, full request={:?}", request.get(1), request);
             }
+        } else {
+            tracing::info!("Cometd: no 'request' key in data. full data={:?}", msg.data);
         }
+    } else {
+        tracing::info!("Cometd: slim/request with no data field");
     }
 
     // Ack comes after the data events
@@ -815,6 +1046,160 @@ impl CometdState {
         let map = self.mac_to_client.lock().await;
         map.keys().cloned().collect()
     }
+}
+
+// ── Playback helpers for CometD commands ─────────────────────────────────────
+
+/// Skip to next or previous track (called from CometD handlers).
+async fn cometd_skip_track(state: &CometdState, player_id: &str, mac: &MacAddress, forward: bool) {
+    // Stop current stream
+    {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.display_track = None;
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+            player.suppress_track_finished = true;
+        }
+    }
+
+    // Advance or rewind queue
+    let has_track = {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            if forward {
+                if player.prefetched_generation.is_some() {
+                    player.prefetched_generation = None;
+                    player.queue.current().is_some()
+                } else {
+                    player.queue.next().is_some()
+                }
+            } else {
+                if player.prefetched_generation.is_some() {
+                    player.queue.previous();
+                    player.prefetched_generation = None;
+                }
+                player.queue.previous().is_some()
+            }
+        } else {
+            false
+        }
+    };
+
+    if !has_track {
+        tracing::info!("Cometd: no {} track for {}", if forward { "next" } else { "previous" }, player_id);
+        return;
+    }
+
+    cometd_start_current_track(state, player_id, mac).await;
+}
+
+/// Jump to an absolute queue index.
+async fn cometd_jump_to_index(state: &CometdState, player_id: &str, mac: &MacAddress, index: usize) {
+    // Stop current stream
+    {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.display_track = None;
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+            player.suppress_track_finished = true;
+            player.prefetched_generation = None;
+            player.queue.jump_to(index);
+        }
+    }
+
+    cometd_start_current_track(state, player_id, mac).await;
+}
+
+/// Seek to a position in seconds.
+async fn cometd_seek(state: &CometdState, player_id: &str, mac: &MacAddress, position_seconds: f64) {
+    // Stop and flush
+    {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.suppress_track_finished = true;
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+        }
+    }
+
+    // Calculate byte offset
+    let (path, duration) = {
+        let players = state.players.lock().await;
+        match players.get(mac).and_then(|p| p.queue.current().map(|t| (PathBuf::from(&t.path), t.duration))) {
+            Some(v) => v,
+            None => return,
+        }
+    };
+
+    let byte_offset = if duration > 0.0 {
+        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        ((position_seconds / duration) * file_size as f64) as u64
+    } else {
+        0
+    };
+
+    let gen = {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.generation += 1;
+            player.seek_offset_ms = (position_seconds * 1000.0) as u32;
+            player.generation
+        } else {
+            return;
+        }
+    };
+
+    state.streaming.queue_file(mac, path, gen, byte_offset).await;
+
+    {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            let _ = player.start_stream(HTTP_PORT, 0).await;
+            player.elapsed_ms = (position_seconds * 1000.0) as u32;
+            player.play_started_at = Some(Instant::now());
+            player.state = PlayerState::Playing;
+        }
+    }
+
+    state.notify_player_status(player_id).await;
+}
+
+/// Start streaming the current track in a player's queue.
+async fn cometd_start_current_track(state: &CometdState, player_id: &str, mac: &MacAddress) {
+    let path = {
+        let players = state.players.lock().await;
+        match players.get(mac).and_then(|p| p.queue.current().map(|t| PathBuf::from(&t.path))) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+
+    let gen = {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.generation += 1;
+            player.generation
+        } else {
+            return;
+        }
+    };
+
+    state.streaming.queue_file(mac, path, gen, 0).await;
+
+    {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(mac) {
+            player.seek_offset_ms = 0;
+            player.elapsed_ms = 0;
+            player.play_started_at = Some(Instant::now());
+            let _ = player.start_stream(HTTP_PORT, 0).await;
+            player.state = PlayerState::Playing;
+        }
+    }
+
+    state.notify_player_status(player_id).await;
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────

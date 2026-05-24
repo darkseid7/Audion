@@ -41,6 +41,7 @@
   import { confirm, prompt } from "$lib/stores/dialogs";
   import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
   import { setCustomArtwork } from "$lib/stores/customArtwork";
+  import { likedTrackIds, toggleLike } from "$lib/stores/liked";
   import MetadataModal from "$lib/components/MetadataModal.svelte";
   import { _, locale } from "svelte-i18n";
 
@@ -446,25 +447,6 @@
       multiSelect.toggleTrack(trackId);
       return;
     }
-
-    const trackIndex = trackIndexMap.get(trackId);
-
-    if (trackIndex === undefined) return;
-
-    const track = sortedTracks[trackIndex];
-    if (!track || isTrackUnavailable(track)) return;
-
-    // Use unified queueTracks if available, otherwise fallback to local sortedTracks
-    if (queueTracks) {
-      // Find index of this track in the global/unified queue
-      const globalIndex = queueTracks.findIndex((t) => t.id === trackId);
-      if (globalIndex !== -1) {
-        playTracks(queueTracks, globalIndex, playbackContext);
-        return;
-      }
-    }
-
-    playTracks(sortedTracks, trackIndex, playbackContext);
   }
 
   function handleBodyDoubleClick(e: MouseEvent) {
@@ -1062,6 +1044,11 @@
         <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
       {/if}
     </button>
+    <span class="col-header col-like">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+      </svg>
+    </span>
     <button
       class="col-header col-date-added sortable"
       on:click={() => toggleSort("date_added")}
@@ -1185,7 +1172,15 @@
                   </span>
                 {:else}
                   <span class="track-index">{actualIndex + 1}</span>
-                  <span class="hover-play" aria-hidden="true">▶</span>
+                  <button class="hover-play" on:click|stopPropagation={() => {
+                    if (!isTrackUnavailable(track)) {
+                      if (queueTracks) {
+                        const gi = queueTracks.findIndex((t) => t.id === track.id);
+                        if (gi !== -1) { playTracks(queueTracks, gi, playbackContext); return; }
+                      }
+                      playTracks(sortedTracks, actualIndex, playbackContext);
+                    }
+                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">▶</button>
                 {/if}
               </span>
 
@@ -1363,6 +1358,20 @@
               {/if}
               <span class="col-duration">{formatDuration(track.duration)}</span>
               {#if !$isMobile}
+                <button
+                  class="col-like"
+                  class:liked={$likedTrackIds.has(track.id)}
+                  on:click|stopPropagation={() => toggleLike(track.id)}
+                  on:dblclick|stopPropagation
+                  title={$likedTrackIds.has(track.id) ? "Unlike" : "Like"}
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16"
+                    fill={$likedTrackIds.has(track.id) ? "currentColor" : "none"}
+                    stroke="currentColor" stroke-width="2"
+                  >
+                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                  </svg>
+                </button>
                 <span class="col-date-added">{formatDateAdded(track.date_added)}</span>
               {/if}
             </div>
@@ -1424,7 +1433,7 @@
 
   .list-header {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 1fr 1fr 80px 36px 130px;
     gap: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-md);
     padding-right: calc(var(--spacing-md) + var(--scrollbar-width, 0px));
@@ -1442,15 +1451,15 @@
   }
 
   .list-header.with-drag {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 130px;
   }
 
   .list-header.no-album {
-    grid-template-columns: 40px 1fr 80px 130px;
+    grid-template-columns: 40px 1fr 80px 36px 130px;
   }
 
   .list-header.no-album.with-drag {
-    grid-template-columns: 32px 40px 1fr 80px 130px;
+    grid-template-columns: 32px 40px 1fr 80px 36px 130px;
   }
 
   .col-header {
@@ -1503,6 +1512,11 @@
     justify-content: flex-end;
   }
 
+  .col-header.col-like {
+    justify-content: center;
+    color: var(--text-subdued);
+  }
+
   .col-header.col-date-added {
     justify-content: flex-end;
   }
@@ -1536,7 +1550,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 1fr 1fr 80px 36px 130px;
     gap: var(--spacing-md);
     padding: 6px var(--spacing-md);
     padding-left: var(--spacing-lg);
@@ -1551,23 +1565,23 @@
   }
 
   .list-body.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 130px;
   }
 
   .list-body.no-album .track-row {
-    grid-template-columns: 40px 1fr 80px 130px;
+    grid-template-columns: 40px 1fr 80px 36px 130px;
   }
 
   .list-body.no-album.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 80px 130px;
+    grid-template-columns: 32px 40px 1fr 80px 36px 130px;
   }
 
   .list-body.multiselect .track-row {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 130px;
   }
 
   .list-body.multiselect.no-album .track-row {
-    grid-template-columns: 40px 40px 1fr 80px 130px;
+    grid-template-columns: 40px 40px 1fr 80px 36px 130px;
   }
 
   .track-row.selected {
@@ -1652,11 +1666,16 @@
   }
 
   .hover-play {
+    all: unset;
     position: absolute;
     opacity: 0;
     color: var(--text-primary);
-    font-size: 0.82rem;
+    font-size: 1.1rem;
     line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .track-row:hover .track-index {
@@ -1893,6 +1912,32 @@
     justify-content: flex-end;
   }
 
+  .col-like {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-subdued);
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast);
+  }
+
+  .col-like.liked {
+    opacity: 1;
+    color: var(--accent-primary);
+  }
+
+  .track-row:hover .col-like {
+    opacity: 1;
+  }
+
+  .col-like:hover {
+    color: var(--accent-primary);
+  }
+
   .col-date-added {
     text-align: right;
     font-size: 0.8125rem;
@@ -1988,11 +2033,11 @@
   }
 
   .list-header.multiselect {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 130px;
   }
 
   .list-header.multiselect.no-album {
-    grid-template-columns: 40px 40px 1fr 80px 130px;
+    grid-template-columns: 40px 40px 1fr 80px 36px 130px;
   }
 
   /* ── Equalizer bars (hidden by default, shown on mobile album view) ── */

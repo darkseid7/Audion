@@ -290,7 +290,15 @@ pub enum ClientMessage {
     Resp(Vec<u8>),
     Meta(Vec<u8>),
     Setd(Vec<u8>),
+    Butn(ButtonMessage),
     Unknown(String, Vec<u8>),
+}
+
+/// Parsed BUTN message from a player (button press).
+#[derive(Debug, Clone)]
+pub struct ButtonMessage {
+    pub timestamp: u32,
+    pub button_code: u32,
 }
 
 /// Parse one complete client→server message from `[tag(4)][len(4)][payload(len)]`.
@@ -310,6 +318,8 @@ pub fn parse_client_message(tag: &[u8; 4], payload: &[u8]) -> ClientMessage {
         b"RESP" => ClientMessage::Resp(payload.to_vec()),
         b"META" => ClientMessage::Meta(payload.to_vec()),
         b"SETD" => ClientMessage::Setd(payload.to_vec()),
+        b"BUTN" => parse_butn(payload),
+        b"IR  " => parse_butn(payload),  // IR uses same format
         _ => {
             let tag_str = String::from_utf8_lossy(tag).to_string();
             ClientMessage::Unknown(tag_str, payload.to_vec())
@@ -394,5 +404,29 @@ fn parse_stat(data: &[u8]) -> ClientMessage {
         // byte 41-42 = voltage (skip)
         elapsed_milliseconds: read_u32_be(data, 43),
         timestamp: read_u32_be(data, 47),
+    })
+}
+
+fn parse_butn(data: &[u8]) -> ClientMessage {
+    // IR frame format from Squeezer/SlimProto:
+    //   Offset 0-3: timestamp (u32 BE)
+    //   Offset 4:   format (u8) — 0xFF = NEC, 0x02 = JVC
+    //   Offset 5:   number of bits (u8)
+    //   Offset 6-9: IR code (u32 BE)
+    //
+    // BUTN frame format:
+    //   Offset 0-3: timestamp (u32 BE)
+    //   Offset 4-7: button code (u32 BE)
+    let timestamp = read_u32_be(data, 0);
+    let button_code = if data.len() >= 10 {
+        // IR frame: code is at offset 6
+        read_u32_be(data, 6)
+    } else {
+        // Short BUTN frame: code at offset 4
+        read_u32_be(data, 4)
+    };
+    ClientMessage::Butn(ButtonMessage {
+        timestamp,
+        button_code,
     })
 }

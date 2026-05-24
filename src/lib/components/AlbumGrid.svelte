@@ -1,3 +1,8 @@
+<script context="module" lang="ts">
+    let _searchQuery = "";
+    let _showOnlyFavorites = false;
+</script>
+
 <script lang="ts">
     import type { Album, Track } from "$lib/api/tauri";
     import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
@@ -29,12 +34,18 @@
     import { setCustomArtwork } from "$lib/stores/customArtwork";
     import { addToast } from "$lib/stores/toast";
     import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
+    import { likedAlbumIds } from "$lib/stores/liked-albums";
     import { _ } from "svelte-i18n";
 
     let currentScrollTop = getScroll("albums");
 
+    let searchQuery = _searchQuery;
+    let showOnlyFavorites = _showOnlyFavorites;
+
     onDestroy(() => {
         saveScroll("albums", currentScrollTop);
+        _searchQuery = searchQuery;
+        _showOnlyFavorites = showOnlyFavorites;
     });
 
     export let albums: Album[] = [];
@@ -397,8 +408,25 @@
     $: albumAudioInfoById = buildAlbumAudioInfoMap($tracks);
     $: albumSortMetaById = buildAlbumSortMetaMap($tracks);
 
+    // Filtering logic
+    $: filteredAlbums = (() => {
+        let result = albums;
+        if (showOnlyFavorites) {
+            result = result.filter((a) => $likedAlbumIds.has(a.id));
+        }
+        if (searchQuery.trim()) {
+            const q = searchQuery.trim().toLowerCase();
+            result = result.filter(
+                (a) =>
+                    (a.name && a.name.toLowerCase().includes(q)) ||
+                    (a.artist && a.artist.toLowerCase().includes(q)),
+            );
+        }
+        return result;
+    })();
+
     // Sorting/Pinning logic
-    $: sortedAlbums = [...albums].sort((a, b) => {
+    $: sortedAlbums = [...filteredAlbums].sort((a, b) => {
         const aPinned = isPinned("album", a.id, $pinnedItems);
         const bPinned = isPinned("album", b.id, $pinnedItems);
         if (aPinned && !bPinned) return -1;
@@ -639,7 +667,41 @@
 <div class="albums-grid">
     <div class="albums-toolbar-wrap">
         <div class="albums-toolbar">
-            <span class="sort-label">Ordenar por</span>
+            <div class="search-filter-group">
+                <div class="album-search">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                    </svg>
+                    <input
+                        type="text"
+                        class="search-input"
+                        placeholder="Buscar álbumes..."
+                        bind:value={searchQuery}
+                    />
+                    {#if searchQuery}
+                        <button class="search-clear" on:click={() => (searchQuery = "")} aria-label="Limpiar búsqueda">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    {/if}
+                </div>
+                <button
+                    class="filter-favorites"
+                    class:active={showOnlyFavorites}
+                    on:click={() => (showOnlyFavorites = !showOnlyFavorites)}
+                    title={showOnlyFavorites ? "Mostrar todos" : "Solo favoritos"}
+                    aria-pressed={showOnlyFavorites}
+                >
+                    <svg viewBox="0 0 24 24" width="18" height="18"
+                        fill={showOnlyFavorites ? "currentColor" : "none"}
+                        stroke="currentColor" stroke-width="2"
+                    >
+                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="sort-group">
+                <span class="sort-label">Ordenar por</span>
             <div class="sort-dropdown">
                 <button
                     class="sort-trigger"
@@ -679,6 +741,7 @@
                         {/each}
                     </div>
                 {/if}
+            </div>
             </div>
         </div>
     </div>
@@ -785,9 +848,102 @@
     .albums-toolbar {
         display: flex;
         align-items: center;
-        justify-content: flex-end;
-        gap: 8px;
+        justify-content: space-between;
+        gap: 12px;
         margin-top: 4px;
+    }
+
+    .search-filter-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+        min-width: 0;
+        max-width: 400px;
+    }
+
+    .album-search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+        min-width: 0;
+        border: 1px solid var(--border-color);
+        background: var(--bg-card);
+        border-radius: 8px;
+        padding: 0 10px;
+        height: 34px;
+        transition: border-color 0.15s;
+    }
+
+    .album-search:focus-within {
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent-primary) 20%, transparent);
+    }
+
+    .search-icon {
+        color: var(--text-secondary);
+        flex-shrink: 0;
+    }
+
+    .search-input {
+        all: unset;
+        flex: 1;
+        min-width: 0;
+        font-size: 0.8rem;
+        color: var(--text-primary);
+    }
+
+    .search-input::placeholder {
+        color: var(--text-secondary);
+    }
+
+    .search-clear {
+        all: unset;
+        cursor: pointer;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        padding: 2px;
+        border-radius: 4px;
+    }
+
+    .search-clear:hover {
+        color: var(--text-primary);
+    }
+
+    .filter-favorites {
+        all: unset;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        background: var(--bg-card);
+        color: var(--text-secondary);
+        flex-shrink: 0;
+        transition: all 0.15s;
+    }
+
+    .filter-favorites:hover {
+        color: var(--text-primary);
+        border-color: var(--text-secondary);
+    }
+
+    .filter-favorites.active {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+        background: color-mix(in oklab, var(--accent-primary) 12%, transparent);
+    }
+
+    .sort-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
     }
 
     .sort-label {
@@ -879,8 +1035,14 @@
         }
 
         .albums-toolbar {
-            justify-content: stretch;
+            flex-wrap: wrap;
+            gap: 8px;
             margin-top: 0;
+        }
+
+        .search-filter-group {
+            max-width: none;
+            width: 100%;
         }
 
         .sort-label {
@@ -890,6 +1052,10 @@
         .sort-dropdown {
             width: 100%;
             min-width: 0;
+        }
+
+        .sort-group {
+            width: 100%;
         }
 
         .sort-menu {

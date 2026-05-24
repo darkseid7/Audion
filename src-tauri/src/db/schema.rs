@@ -106,6 +106,13 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
+        -- Liked albums table
+        CREATE TABLE IF NOT EXISTS liked_albums (
+            album_id INTEGER PRIMARY KEY,
+            liked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+        );
+
         -- Listen later albums table
         CREATE TABLE IF NOT EXISTS listen_later_albums (
             album_id INTEGER PRIMARY KEY,

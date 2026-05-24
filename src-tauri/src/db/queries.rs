@@ -1356,6 +1356,34 @@ pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
+// ============================================================================
+// Liked Albums
+// ============================================================================
+
+pub fn like_album(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO liked_albums (album_id) VALUES (?1)",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn unlike_album(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM liked_albums WHERE album_id = ?1",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_liked_album_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT album_id FROM liked_albums ORDER BY liked_at DESC")?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 pub fn add_album_to_listen_later(conn: &Connection, album_id: i64) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO listen_later_albums (album_id) VALUES (?1)",

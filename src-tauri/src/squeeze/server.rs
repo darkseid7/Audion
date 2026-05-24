@@ -143,6 +143,8 @@ async fn handle_connection(
         }
 
         let msg = codec::parse_client_message(&tag_buf, &payload);
+        let tag_str = String::from_utf8_lossy(&tag_buf);
+
 
         match msg {
             ClientMessage::Stat(stat) => {
@@ -206,8 +208,100 @@ async fn handle_connection(
             ClientMessage::Resp(_) | ClientMessage::Meta(_) => {
                 // HTTP headers / metadata from stream — we don't need these
             }
-            ClientMessage::Unknown(tag, _) => {
-                tracing::trace!("Squeeze TCP: unknown message '{}' from {}", tag, mac);
+            ClientMessage::Butn(btn) => {
+                tracing::info!("Squeeze TCP: BUTN from {} code=0x{:08x}", mac, btn.button_code);
+                let mac_str = mac.to_string();
+                // IR codes observed from Eversolo + standard Squeezebox codes:
+                //   Pause/play toggle: 0x768920df (Eversolo pause), 0x768910ef (Eversolo resume)
+                //   Next/fwd:          0x7689a05f (Eversolo), 0x7689e01f (Squeezebox fwd), 0x7689a25d (Squeezebox fwd.single)
+                //   Prev/rew:          0x7689c03f (Eversolo), 0x7689d02f (Squeezebox rew), 0x7689c23d (Squeezebox rew.single)
+                //   Volume up:         0x768940bf
+                //   Volume down:       0x7689c43b
+                //   Power:             0x76898877
+                match btn.button_code {
+                    0x768920df | 0x768910ef => {
+                        // Pause/Play toggle
+                        let mut map = players.lock().await;
+                        if let Some(player) = map.get_mut(&mac) {
+                            if player.state == PlayerState::Playing {
+                                player.elapsed_ms = player.get_elapsed_ms();
+                                player.play_started_at = None;
+                                player.state = PlayerState::Paused;
+                                let _ = player.pause().await;
+                            } else if player.state == PlayerState::Paused {
+                                player.play_started_at = Some(std::time::Instant::now());
+                                player.state = PlayerState::Playing;
+                                let _ = player.resume().await;
+                            }
+                        }
+                        drop(map);
+                        cometd.notify_player_status(&mac_str).await;
+                    }
+                    0x7689a05f | 0x7689e01f | 0x7689a25d => {
+                        // Next track
+
+                        {
+                            let mut map = players.lock().await;
+                            if let Some(player) = map.get_mut(&mac) {
+                                player.display_track = None;
+                                let _ = player.stop().await;
+                                let _ = player.flush().await;
+                                player.suppress_track_finished = true;
+                            }
+                        }
+                        let has_next = {
+                            let mut map = players.lock().await;
+                            if let Some(player) = map.get_mut(&mac) {
+                                if player.prefetched_generation.is_some() {
+                                    player.prefetched_generation = None;
+                                    player.queue.current().is_some()
+                                } else {
+                                    player.queue.next().is_some()
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        if has_next {
+                            handle_butn_start_track(&mac, &players, &streaming).await;
+                        }
+                        cometd.notify_player_status(&mac_str).await;
+                    }
+                    0x7689c03f | 0x7689d02f | 0x7689c23d => {
+                        // Previous track
+
+                        {
+                            let mut map = players.lock().await;
+                            if let Some(player) = map.get_mut(&mac) {
+                                player.display_track = None;
+                                let _ = player.stop().await;
+                                let _ = player.flush().await;
+                                player.suppress_track_finished = true;
+                                if player.prefetched_generation.is_some() {
+                                    player.prefetched_generation = None;
+                                }
+                            }
+                        }
+                        let has_prev = {
+                            let mut map = players.lock().await;
+                            if let Some(player) = map.get_mut(&mac) {
+                                player.queue.previous().is_some()
+                            } else {
+                                false
+                            }
+                        };
+                        if has_prev {
+                            handle_butn_start_track(&mac, &players, &streaming).await;
+                        }
+                        cometd.notify_player_status(&mac_str).await;
+                    }
+                    _ => {
+                        tracing::info!("Squeeze TCP: unhandled BUTN code 0x{:08x} from {}", btn.button_code, mac);
+                    }
+                }
+            }
+            ClientMessage::Unknown(tag, data) => {
+                tracing::info!("Squeeze TCP: unknown message '{}' from {} ({} bytes)", tag, mac, data.len());
             }
         }
     }
@@ -323,7 +417,7 @@ async fn handle_prefetch(
         }
     }
 
-    eprintln!("[SQUEEZE] prefetch: \"{}\" by {} (gen={})", next_track.title, next_track.artist, gen);
+    tracing::info!("Squeeze: prefetch: \"{}\" by {} (gen={})", next_track.title, next_track.artist, gen);
 }
 
 /// Handle track finished (STMu): if prefetch happened, just confirm. Otherwise, play next.
@@ -363,7 +457,7 @@ async fn handle_track_finished(
             };
 
             if let (Some(path), Some(title)) = (path, title) {
-                eprintln!("[SQUEEZE] track finished -> now playing: \"{}\"", title);
+                tracing::info!("Squeeze: track finished -> now playing: \"{}\"", title);
                 let gen = {
                     let mut map = players.lock().await;
                     if let Some(player) = map.get_mut(mac) {
@@ -388,7 +482,7 @@ async fn handle_track_finished(
             }
         } else {
             // Queue exhausted
-            eprintln!("[SQUEEZE] queue exhausted — stopping");
+            tracing::info!("Squeeze: queue exhausted — stopping");
             let mut map = players.lock().await;
             if let Some(player) = map.get_mut(mac) {
                 player.state = PlayerState::Stopped;
@@ -396,7 +490,7 @@ async fn handle_track_finished(
         }
     } else {
         // Prefetch already handled it — just reset the prefetch flag
-        eprintln!("[SQUEEZE] track finished (prefetch already active)");
+        tracing::debug!("Squeeze: track finished (prefetch already active)");
         let mut map = players.lock().await;
         if let Some(player) = map.get_mut(mac) {
             player.display_track = None;
@@ -404,6 +498,43 @@ async fn handle_track_finished(
             player.seek_offset_ms = 0;
             player.elapsed_ms = 0;
             player.play_started_at = Some(Instant::now());
+        }
+    }
+}
+
+/// Start streaming the current track for a player (used by BUTN handler).
+async fn handle_butn_start_track(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+) {
+    let path = {
+        let map = players.lock().await;
+        match map.get(mac).and_then(|p| p.queue.current().map(|t| PathBuf::from(&t.path))) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+
+    let gen = {
+        let mut map = players.lock().await;
+        if let Some(player) = map.get_mut(mac) {
+            player.generation += 1;
+            player.generation
+        } else {
+            return;
+        }
+    };
+
+    streaming.queue_file(mac, path, gen, 0).await;
+
+    let mut map = players.lock().await;
+    if let Some(player) = map.get_mut(mac) {
+        player.seek_offset_ms = 0;
+        player.elapsed_ms = 0;
+        player.play_started_at = Some(Instant::now());
+        if let Err(e) = player.start_stream(HTTP_PORT, 0).await {
+            tracing::error!("Squeeze: BUTN start_stream failed: {}", e);
         }
     }
 }
