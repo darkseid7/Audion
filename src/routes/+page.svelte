@@ -16,6 +16,7 @@
   import { loadLibrary, loadPlaylists } from "$lib/stores/library";
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import { isTauri } from "$lib/api/tauri";
+  import { squeezeStartServer } from "$lib/api/tauri";
   import {
     initializeFromPersistedState,
     setupAutoSave,
@@ -92,6 +93,11 @@
       console.error("Failed to load library:", error);
     } finally {
       isLoading = false;
+
+      // Auto-start Squeeze server
+      squeezeStartServer().catch((e) =>
+        console.warn("[SQUEEZE] Auto-start failed:", e)
+      );
 
       // Lazy load plugins- reduce startup time
       requestIdleCallback(() => {

@@ -315,17 +315,6 @@
                 ctx.fillRect(x, cy - rH, barW, rH * 2);
             }
         }
-
-        // Center line (Roon-style)
-        ctx.fillStyle = 'rgba(255,255,255,0.15)';
-        ctx.fillRect(0, cy - 0.5, w, 1);
-
-        // Playhead
-        if (displayProg > 0.002 && displayProg < 0.998) {
-            const px = displayProg * w;
-            ctx.fillStyle = 'rgba(255,255,255,0.9)';
-            ctx.fillRect(px - 0.75, 0, 1.5, h);
-        }
     }
 
     function posFromEvent(e: MouseEvent): number {

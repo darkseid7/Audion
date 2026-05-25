@@ -37,6 +37,7 @@
     import { uiSlotManager } from "$lib/plugins/ui-slots";
     import { goToArtistDetail, goToAlbumDetail } from "$lib/stores/view";
     import { isMobile } from "$lib/stores/mobile";
+    import { getAlbumCoverFromTracks } from "$lib/stores/library";
     import type { Album } from "$lib/api/tauri";
     import { likedTrackIds, toggleLike } from "$lib/stores/liked";
     import ConnectPanel from "./ConnectPanel.svelte";
@@ -116,28 +117,35 @@
     }
 
     async function loadTrackCover(track: any) {
+        const trackId = track.id;
         imageLoadFailed = false;
 
         if (track.track_cover_path) {
-            // Priority 1: Track's file-based cover
             albumArt = getTrackCoverSrc(track);
         } else if (track.track_cover) {
-            // Priority 2: Track's base64 cover - old
             albumArt = getAlbumArtSrc(track.track_cover);
         } else if (track.cover_url) {
-            // Priority 3: Streaming track cover URL
             albumArt = track.cover_url;
         } else if (track.album_id) {
-            // Priority 4 & 5: Album art (file-based or base64)
-            await loadAlbumArt(track.album_id);
+            // Try in-memory cover cache first (instant)
+            const memoryCover = getAlbumCoverFromTracks(track.album_id);
+            if (memoryCover) {
+                albumArt = memoryCover;
+                return;
+            }
+            // Fallback: async fetch from backend
+            await loadAlbumArt(track.album_id, trackId);
         } else {
             albumArt = null;
         }
     }
 
-    async function loadAlbumArt(albumId: number) {
+    async function loadAlbumArt(albumId: number, originTrackId: number) {
         try {
             const album = await getAlbum(albumId);
+
+            // Guard: if track changed while we were fetching, discard result
+            if ($currentTrack?.id !== originTrackId) return;
 
             if (!album) {
                 albumArt = null;
@@ -148,10 +156,8 @@
             loadedAlbum = album;
 
             if (album.art_path) {
-                // Priority 4: Album's file-based art
                 albumArt = getAlbumCoverSrc(album);
             } else if (album.art_data) {
-                // Priority 5: Album's base64 art - old
                 albumArt = getAlbumArtSrc(album.art_data);
             } else {
                 albumArt = null;
@@ -194,25 +200,41 @@
         setVolume(Math.max(0, Math.min(1, pos)));
     }
 
+    /** For squeeze, snap volume to integer 0-100 to avoid float drift. */
+    function squeezeVolStep(delta: number): number {
+        return Math.min(100, Math.max(0, Math.round($volume * 100) + delta)) / 100;
+    }
+
     function handleVolumeKey(e: KeyboardEvent) {
-        const step = 0.05;
         if (e.key === "ArrowRight" || e.key === "ArrowUp") {
             e.preventDefault();
-            setVolume(Math.min(1, $volume + step));
+            if ($activeBackend === 'squeeze') {
+                setVolume(squeezeVolStep(2));
+            } else {
+                setVolume(Math.min(1, $volume + 0.05));
+            }
         } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
             e.preventDefault();
-            setVolume(Math.max(0, $volume - step));
+            if ($activeBackend === 'squeeze') {
+                setVolume(squeezeVolStep(-2));
+            } else {
+                setVolume(Math.max(0, $volume - 0.05));
+            }
         }
     }
 
     function handleVolumeScroll(e: WheelEvent) {
         e.preventDefault();
         if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-        const step = 0.05;
-        if (e.deltaY < 0) {
-            setVolume(Math.min(1, $volume + step));
-        } else if (e.deltaY > 0) {
-            setVolume(Math.max(0, $volume - step));
+        if ($activeBackend === 'squeeze') {
+            setVolume(squeezeVolStep(e.deltaY < 0 ? 2 : -2));
+        } else {
+            const step = 0.05;
+            if (e.deltaY < 0) {
+                setVolume(Math.min(1, $volume + step));
+            } else if (e.deltaY > 0) {
+                setVolume(Math.max(0, $volume - step));
+            }
         }
     }
 
@@ -742,6 +764,17 @@
                         </svg>
                     {/if}
                 </button>
+                {#if $activeBackend === 'squeeze'}
+                    <button
+                        class="icon-btn vol-step-btn"
+                        on:click={() => setVolume(squeezeVolStep(-1))}
+                        title="Volume −1%"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                            <path d="M19 13H5v-2h14v2z"/>
+                        </svg>
+                    </button>
+                {/if}
                 <div
                     class="volume-bar"
                     bind:this={volumeBarElement}
@@ -763,6 +796,20 @@
                     </div>
                     <div class="volume-thumb" style="left: {$volume * 100}%"></div>
                 </div>
+                {#if $activeBackend === 'squeeze'}
+                    <button
+                        class="icon-btn vol-step-btn"
+                        on:click={() => setVolume(squeezeVolStep(1))}
+                        title="Volume +1%"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                        </svg>
+                    </button>
+                    <span class="vol-db-label" title="Volume">
+                        {Math.round($volume * 100)}%
+                    </span>
+                {/if}
             </div>
 
             <div class="view-controls">
@@ -1361,6 +1408,31 @@
         display: flex;
         align-items: center;
         gap: 4px;
+    }
+
+    .vol-step-btn {
+        width: 22px;
+        height: 22px;
+        min-width: 22px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        opacity: 0.7;
+    }
+
+    .vol-step-btn:hover {
+        opacity: 1;
+    }
+
+    .vol-db-label {
+        font-size: 10px;
+        color: var(--text-secondary);
+        min-width: 38px;
+        text-align: center;
+        white-space: nowrap;
+        user-select: none;
     }
 
     .view-controls {

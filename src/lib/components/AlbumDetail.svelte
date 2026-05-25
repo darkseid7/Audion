@@ -240,8 +240,9 @@
     }
 
     function handlePlayAll() {
-        if (tracks.length > 0 && album) {
-            playTracks(tracks, 0, {
+        const tracksToPlay = showOnlyLiked ? likedTracks : tracks;
+        if (tracksToPlay.length > 0 && album) {
+            playTracks(tracksToPlay, 0, {
                 type: "album",
                 albumId: album.id,
                 displayName: album.name,
@@ -267,6 +268,13 @@
     import { setCustomArtwork } from "$lib/stores/customArtwork";
     import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
     import { likedAlbumIds, toggleAlbumLike } from "$lib/stores/liked-albums";
+    import { likedTrackIds } from "$lib/stores/liked";
+
+    let showOnlyLiked = false;
+
+    $: likedTracks = tracks.filter(t => $likedTrackIds.has(t.id));
+    $: displayTracks = showOnlyLiked ? likedTracks : tracks;
+    $: displayGroupedTracks = showOnlyLiked ? groupTracksByDisc(likedTracks) : groupedTracks;
 
     function handleContextMenu(e: MouseEvent) {
         if (!album) return;
@@ -507,6 +515,22 @@
                         </svg>
                     </button>
 
+                    {#if likedTracks.length > 0 && likedTracks.length < tracks.length}
+                        <button
+                            class="btn-filter-liked"
+                            class:active={showOnlyLiked}
+                            on:click={() => showOnlyLiked = !showOnlyLiked}
+                            title={showOnlyLiked ? "Show all tracks" : "Show only liked tracks"}
+                        >
+                            <svg viewBox="0 0 24 24" width="18" height="18"
+                                fill="currentColor" stroke="none"
+                            >
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                            </svg>
+                            <span>{likedTracks.length}</span>
+                        </button>
+                    {/if}
+
                     {#if hasDownloadable}
                         <button
                             class="btn-secondary download-btn"
@@ -590,8 +614,8 @@
         {/if}
 
         <section class="track-list-section">
-            {#if groupedTracks.length > 1}
-                {#each groupedTracks as group}
+            {#if displayGroupedTracks.length > 1}
+                {#each displayGroupedTracks as group}
                     <div class="disc-group">
                         <div class="disc-header">
                             <span class="disc-icon">
@@ -616,20 +640,20 @@
                                 albumId,
                                 displayName: album?.name,
                             }}
-                            queueTracks={tracks}
+                            queueTracks={displayTracks}
                         />
                     </div>
                 {/each}
             {:else}
                 <TrackList
-                    {tracks}
+                    tracks={displayTracks}
                     showAlbum={false}
                     playbackContext={{
                         type: "album",
                         albumId,
                         displayName: album?.name,
                     }}
-                    queueTracks={tracks}
+                    queueTracks={displayTracks}
                 />
             {/if}
         </section>
@@ -839,6 +863,34 @@
     .btn-like-album.liked {
         color: var(--accent-primary);
         border-color: var(--accent-primary);
+    }
+
+    .btn-filter-liked {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        height: 36px;
+        padding: 0 12px;
+        border-radius: var(--radius-full);
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-subdued);
+        cursor: pointer;
+        font-size: 0.8rem;
+        font-weight: 600;
+        transition: all var(--transition-fast);
+    }
+
+    .btn-filter-liked:hover {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+
+    .btn-filter-liked.active {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
     }
 
     .play-all-btn {

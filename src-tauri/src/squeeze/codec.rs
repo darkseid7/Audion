@@ -151,10 +151,17 @@ pub fn encode_strm_simple(cmd: StrmCommand, timestamp: u32) -> Vec<u8> {
 /// Volume is 0.0..1.0 applied to both channels.
 pub fn encode_audg(left: f64, right: f64) -> Vec<u8> {
     let mut data = vec![0u8; 18];
-    // bytes 0..9 = old gain + dvc + preamp (all zeros)
+    // bytes 0..3 = old left gain (u32 BE) — legacy, set same as new
+    // bytes 4..7 = old right gain (u32 BE) — legacy, set same as new
+    // byte 8 = digitalVolumeControl (1 = player applies volume)
+    // byte 9 = preamp (0)
     // bytes 10..13 = new_left as 16.16 fixed-point
+    // bytes 14..17 = new_right as 16.16 fixed-point
     let l_fixed = (left * 65536.0) as u32;
     let r_fixed = (right * 65536.0) as u32;
+    data[0..4].copy_from_slice(&l_fixed.to_be_bytes());
+    data[4..8].copy_from_slice(&r_fixed.to_be_bytes());
+    data[8] = 1; // dvc=1: tell the player to apply digital volume control
     data[10..14].copy_from_slice(&l_fixed.to_be_bytes());
     data[14..18].copy_from_slice(&r_fixed.to_be_bytes());
     server_frame(b"audg", &data)

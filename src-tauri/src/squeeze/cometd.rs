@@ -252,29 +252,37 @@ fn build_cometd_response(responses: &[serde_json::Value]) -> axum::response::Res
 async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxResponse {
     let client_id = state.next_client_id().await;
 
-    // Extract MAC and UUID from ext
-    let (mac_str, uuid) = if let Some(ext) = &msg.ext {
+    // Extract MAC, UUID, and optionally name from ext
+    let (mac_str, uuid, ext_name) = if let Some(ext) = &msg.ext {
+        tracing::info!("Cometd: handshake ext = {:?}", ext);
         let mac = ext.get("mac").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let uuid = ext.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        (mac, uuid)
+        let name = ext.get("name").and_then(|v| v.as_str())
+            .or_else(|| ext.get("devicename").and_then(|v| v.as_str()))
+            .or_else(|| ext.get("deviceName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        (mac, uuid, name)
     } else {
-        (String::new(), String::new())
+        (String::new(), String::new(), None)
     };
 
     // Parse MAC
     let mac = parse_mac_address(&mac_str);
 
     tracing::info!(
-        "Cometd: handshake from MAC={} UUID={} → clientId={}",
-        mac_str, uuid, client_id
+        "Cometd: handshake from MAC={} UUID={} name={:?} → clientId={}",
+        mac_str, uuid, ext_name, client_id
     );
+
+    // Use device name from ext if available, otherwise fall back to MAC
+    let player_name = ext_name.clone().unwrap_or_else(|| format!("Player {}", mac_str));
 
     // Register the client
     let client = CometdClient {
         client_id: client_id.clone(),
         mac,
         uuid: uuid.clone(),
-        name: format!("Squeeze Player {}", mac_str),
+        name: player_name.clone(),
         subscriptions: Vec::new(),
         status_channels: HashMap::new(),
         push_queue: Vec::new(),
@@ -291,11 +299,27 @@ async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
     }
 
     // Register in the player map (so the frontend sees this player)
+    // Don't overwrite existing players — they may already have a real name from SETD
     {
         use crate::squeeze::player::SqueezePlayer;
-        let player = SqueezePlayer::new_cometd(mac, mac_str.clone(), uuid);
         let mut map = state.players.lock().await;
-        map.insert(mac, player);
+        if let Some(existing) = map.get_mut(&mac) {
+            // Player already registered (e.g., via TCP). Update CometD flag but keep name.
+            existing.is_cometd = true;
+            if let Some(ref n) = ext_name {
+                // Only update name if CometD handshake sent a real name
+                existing.name = n.clone();
+            }
+            tracing::info!("Cometd: merged into existing player {} (\"{}\")", mac_str, existing.name);
+        } else {
+            let mut player = SqueezePlayer::new_cometd(mac, mac_str.clone(), uuid);
+            // Only override the name if the handshake sent a real name;
+            // new_cometd already applies friendly_name() lookup.
+            if let Some(ref n) = ext_name {
+                player.name = n.clone();
+            }
+            map.insert(mac, player);
+        }
     }
 
     BayeuxResponse {
@@ -770,6 +794,58 @@ async fn handle_slim_request(state: &CometdState, msg: &BayeuxRequest) -> Vec<se
                                 }
                                 drop(players);
                                 state.notify_player_status(player_id).await;
+                            }
+                        }
+                    }
+                    "name" => {
+                        // Player name set/query: ["MAC", ["name", "?"]]
+                        // or ["MAC", ["name", "New Name"]]
+                        if !player_id.is_empty() {
+                            let name_val = cmd_array.get(1).and_then(|v| v.as_str()).unwrap_or("?");
+                            let mac = parse_mac_address(player_id);
+                            if name_val != "?" && !name_val.is_empty() {
+                                // Set player name only if no hardcoded friendly name
+                                use crate::squeeze::player::friendly_name;
+                                if friendly_name(&mac).is_none() {
+                                    let mut players = state.players.lock().await;
+                                    if let Some(player) = players.get_mut(&mac) {
+                                        player.name = name_val.to_string();
+                                        tracing::info!("Cometd: player {} name set to '{}'", player_id, name_val);
+                                    }
+                                }
+                            }
+                            // Respond with current name
+                            if !response_channel.is_empty() {
+                                let players = state.players.lock().await;
+                                let current_name = players.get(&mac)
+                                    .map(|p| p.name.clone())
+                                    .unwrap_or_else(|| player_id.to_string());
+                                result.push(serde_json::json!({
+                                    "channel": response_channel,
+                                    "id": msg.id,
+                                    "data": { "_name": current_name },
+                                }));
+                            }
+                        }
+                    }
+                    "playerpref" => {
+                        // Player preferences: ["MAC", ["playerpref", "playername", "New Name"]]
+                        if !player_id.is_empty() {
+                            let pref_key = cmd_array.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                            if pref_key == "playername" {
+                                if let Some(name_val) = cmd_array.get(2).and_then(|v| v.as_str()) {
+                                    if !name_val.is_empty() && name_val != "?" {
+                                        let mac = parse_mac_address(player_id);
+                                        use crate::squeeze::player::friendly_name;
+                                        if friendly_name(&mac).is_none() {
+                                            let mut players = state.players.lock().await;
+                                            if let Some(player) = players.get_mut(&mac) {
+                                                player.name = name_val.to_string();
+                                                tracing::info!("Cometd: player {} playername set to '{}'", player_id, name_val);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

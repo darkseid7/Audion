@@ -70,6 +70,14 @@ pub struct SqueezePlayer {
     pub display_track: Option<QueueTrack>,
 }
 
+/// Map known MAC addresses to friendly device names.
+pub fn friendly_name(mac: &MacAddress) -> Option<&'static str> {
+    match mac.to_string().as_str() {
+        "80:0a:80:5e:d6:a5" => Some("EverSolo Play"),
+        _ => None,
+    }
+}
+
 impl SqueezePlayer {
     pub fn new(
         mac: MacAddress,
@@ -78,9 +86,10 @@ impl SqueezePlayer {
         writer: OwnedWriteHalf,
         server_ip: Ipv4Addr,
     ) -> Self {
+        let display_name = friendly_name(&mac).map(|s| s.to_string()).unwrap_or(name);
         Self {
             mac,
-            name,
+            name: display_name,
             capabilities,
             writer: Some(writer),
             state: PlayerState::Stopped,
@@ -101,9 +110,12 @@ impl SqueezePlayer {
 
     /// Create a Cometd-based player (no TCP writer).
     pub fn new_cometd(mac: MacAddress, mac_str: String, uuid: String) -> Self {
+        let display_name = friendly_name(&mac)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Player {}", mac_str));
         Self {
             mac,
-            name: format!("Player {}", mac_str),
+            name: display_name,
             capabilities: format!("cometd,uuid={}", uuid),
             writer: None,
             state: PlayerState::Stopped,
@@ -160,8 +172,13 @@ impl SqueezePlayer {
         // 4. Enable both DAC and SPDIF
         self.send(&codec::encode_aude(true, true)).await?;
         // 5. Set initial volume
-        let vol = self.volume as f64 / 100.0;
-        self.send(&codec::encode_audg(vol, vol)).await?;
+        let gain = if self.volume == 0 {
+            0.0
+        } else {
+            let db = -50.0 * (1.0 - self.volume as f64 / 100.0);
+            10.0_f64.powf(db / 20.0)
+        };
+        self.send(&codec::encode_audg(gain, gain)).await?;
         Ok(())
     }
 
@@ -249,11 +266,26 @@ impl SqueezePlayer {
         Ok(())
     }
 
-    /// Set volume (0-100).
+    /// Set volume (0-100).  Maps slider position linearly in dB then converts
+    /// to linear gain so the perceived loudness change is uniform.
+    /// Range: 0 → mute, 1 → −50 dB, 100 → 0 dB (LMS standard).
     pub async fn set_volume(&mut self, vol: u8) -> Result<(), String> {
         self.volume = vol.min(100);
-        let v = self.volume as f64 / 100.0;
-        let frame = codec::encode_audg(v, v);
+        let gain = if self.volume == 0 {
+            0.0
+        } else {
+            let db = -50.0 * (1.0 - self.volume as f64 / 100.0);
+            10.0_f64.powf(db / 20.0)
+        };
+        let fixed = (gain * 65536.0) as u32;
+        tracing::info!(
+            "Squeeze: set_volume vol={} dB={:.1} gain={:.6} fixed={}",
+            self.volume,
+            if self.volume == 0 { f64::NEG_INFINITY } else { -50.0 * (1.0 - self.volume as f64 / 100.0) },
+            gain,
+            fixed
+        );
+        let frame = codec::encode_audg(gain, gain);
         self.send(&frame).await.map_err(|e| e.to_string())?;
         Ok(())
     }

@@ -767,11 +767,6 @@
     transition: 0.3s;
   }
 
-  .device-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateY(-2px);
-  }
-
   .device-card.active {
     background: color-mix(in srgb, var(--accent-primary), transparent 95%);
     border-color: color-mix(in srgb, var(--accent-primary), transparent 70%);

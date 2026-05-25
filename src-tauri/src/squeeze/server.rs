@@ -3,7 +3,7 @@
 
 use crate::squeeze::codec::{self, ClientMessage, MacAddress};
 use crate::squeeze::cometd::CometdState;
-use crate::squeeze::player::{PlayerMap, PlayerState, SqueezePlayer, StatAction};
+use crate::squeeze::player::{PlayerMap, PlayerState, SqueezePlayer, StatAction, friendly_name};
 use crate::squeeze::streaming::StreamingState;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -202,8 +202,11 @@ async fn handle_connection(
                     let name = String::from_utf8_lossy(&data[1..]).trim_end_matches('\0').to_string();
                     let mut map = players.lock().await;
                     if let Some(player) = map.get_mut(&mac) {
-                        player.name = name.clone();
-                        tracing::info!("Squeeze TCP: player {} name = \"{}\"", mac, name);
+                        // Only update if we don't already have a friendly name
+                        if friendly_name(&mac).is_none() {
+                            player.name = name.clone();
+                        }
+                        tracing::info!("Squeeze TCP: player {} SETD name = \"{}\" (using \"{}\")", mac, name, player.name);
                     }
                 }
             }
