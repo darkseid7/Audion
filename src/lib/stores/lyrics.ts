@@ -581,7 +581,6 @@ export async function fetchLyricsForTrack(): Promise<void> {
         if (fetchId === currentFetchId) {
             lyricsData.set(null);
             lyricsError.set('No lyrics found');
-            addToast('No lyrics found for this track', 'error');
             await refreshAvailableSources(track.path, isStream);
         }
 

@@ -38,6 +38,7 @@ export const currentView = writable<ViewState>({ type: "albums" });
 export const navigationHistory = derived(historyUpdate, () => ({
   canGoBack: currentIndex > 0,
   canGoForward: currentIndex < history.length - 1,
+  previousView: currentIndex > 0 ? history[currentIndex - 1] : null,
 }));
 
 // Initialize history with default view

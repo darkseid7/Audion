@@ -166,6 +166,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         ("date_added", "TEXT DEFAULT CURRENT_TIMESTAMP"),
         ("genre", "TEXT"),
         ("metadata_json", "TEXT"),
+        ("play_count", "INTEGER DEFAULT 0"),
     ];
 
     for (col_name, col_def) in tracks_columns {
@@ -204,6 +205,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // Keep this idempotent so Date Added is always present for existing tracks.
     let _ = conn.execute(
         "UPDATE tracks SET date_added = CURRENT_TIMESTAMP WHERE date_added IS NULL",
+        [],
+    );
+
+    // Backfill play_count from play_history for tracks that have NULL or 0 play_count
+    let _ = conn.execute(
+        "UPDATE tracks SET play_count = (
+            SELECT COUNT(*) FROM play_history WHERE play_history.track_id = tracks.id
+         ) WHERE play_count IS NULL OR play_count = 0",
         [],
     );
 

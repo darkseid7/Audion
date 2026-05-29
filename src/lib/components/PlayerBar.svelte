@@ -19,7 +19,7 @@
         isStreaming,
         activeBackend,
     } from "$lib/stores/player";
-    import { lyricsVisible, toggleLyrics } from "$lib/stores/lyrics";
+    import { lyricsVisible, toggleLyrics, lyricsData } from "$lib/stores/lyrics";
     import {
         isFullScreen,
         toggleFullScreen,
@@ -468,6 +468,18 @@
                 </div>
                 <div class="track-details">
                     <span class="track-title truncate"
+                        role="button"
+                        tabindex="0"
+                        on:click|stopPropagation={() => {
+                            if ($currentTrack?.album_id) {
+                                goToAlbumDetail($currentTrack.album_id);
+                            }
+                        }}
+                        on:keydown={(e) => {
+                            if (e.key === "Enter" && $currentTrack?.album_id) {
+                                goToAlbumDetail($currentTrack.album_id);
+                            }
+                        }}
                         >{$currentTrack.title || "Unknown Title"}</span
                     >
                     <span
@@ -712,14 +724,18 @@
                     </svg>
                 </button>
                 <button
-                    class="icon-btn"
+                    class="icon-btn lyrics-btn"
                     class:active={$lyricsVisible}
+                    class:has-lyrics={$lyricsData != null}
                     on:click={toggleLyrics}
                     title="Lyrics (L)"
                 >
                     <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
                         <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6zm-2 16c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
                     </svg>
+                    {#if $lyricsData != null}
+                        <span class="lyrics-dot"></span>
+                    {/if}
                 </button>
             </div>
 
@@ -1004,6 +1020,21 @@
 
     .icon-btn.active {
         color: var(--accent-primary, #1db954);
+    }
+
+    .lyrics-btn {
+        position: relative;
+    }
+
+    .lyrics-dot {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 6px;
+        height: 6px;
+        background: var(--accent-primary, #1db954);
+        border-radius: 50%;
+        pointer-events: none;
     }
 
     .connect-btn {

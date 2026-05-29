@@ -531,9 +531,8 @@ pub fn search_tracks(
 /// Get paginated tracks
 pub fn get_tracks_paginated(conn: &Connection, limit: i32, offset: i32) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -627,9 +626,8 @@ pub fn get_all_tracks_lightweight(conn: &Connection) -> Result<Vec<Track>> {
     println!("[DB] get_all_tracks_lightweight: Preparing query...");
 
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
@@ -686,9 +684,8 @@ pub fn get_all_tracks_with_paths(conn: &Connection) -> Result<Vec<Track>> {
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
@@ -965,9 +962,8 @@ pub fn get_all_artists(conn: &Connection) -> Result<Vec<Artist>> {
 
 pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          WHERE t.album_id = ?1 ORDER BY t.disc_number, t.track_number, t.title",
     )?;
 
@@ -1003,9 +999,8 @@ pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track
 
 pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          WHERE t.artist = ?1 ORDER BY t.album, t.disc_number, t.track_number, t.title",
     )?;
 
@@ -1087,10 +1082,9 @@ pub fn get_all_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
          INNER JOIN playlist_tracks pt ON t.id = pt.track_id
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          WHERE pt.playlist_id = ?1
          ORDER BY pt.position",
     )?;
@@ -1403,10 +1397,9 @@ pub fn get_liked_track_ids(conn: &Connection) -> Result<Vec<i64>> {
 
 pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(pc.play_count, 0)
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
          INNER JOIN liked_tracks lt ON t.id = lt.track_id
-         LEFT JOIN (SELECT track_id, COUNT(*) as play_count FROM play_history GROUP BY track_id) pc ON t.id = pc.track_id
          ORDER BY lt.liked_at DESC",
     )?;
 
@@ -1516,6 +1509,10 @@ pub fn record_play(
     conn.execute(
         "INSERT INTO play_history (track_id, album_id, duration_played) VALUES (?1, ?2, ?3)",
         params![track_id, album_id, duration_played],
+    )?;
+    conn.execute(
+        "UPDATE tracks SET play_count = COALESCE(play_count, 0) + 1 WHERE id = ?1",
+        params![track_id],
     )?;
     Ok(())
 }

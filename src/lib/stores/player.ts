@@ -1270,33 +1270,8 @@ export async function playTrack(
   const previousTrackObj = get(currentTrack);
   const sessionId = ++currentSessionId;
 
-  // Record play for the previous track (if any)
-  if (previousTrackObj && playStartTime > 0) {
-    const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
-    if (durationPlayed > 5) {
-      // Only record if played for more than 5 seconds
-      recordTrackPlay(
-        previousTrackObj.id,
-        previousTrackObj.album_id ?? null,
-        durationPlayed,
-      );
-      incrementPlayCount(previousTrackObj.id);
-      // ListenBrainz: scrobble if >= 50 % of track duration or 4 minutes played
-      const trackDuration = previousTrackObj.duration ?? 0;
-      if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
-        const threshold = Math.min(Math.floor(trackDuration / 2), 240);
-        if (durationPlayed >= threshold) {
-          submitListenbrainzListen(
-            previousTrackObj.artist ?? "Unknown Artist",
-            previousTrackObj.title ?? "Unknown",
-            previousTrackObj.album,
-            previousTrackObj.duration,
-            false,
-          ).catch((e) => console.warn("[ListenBrainz] Scrobble failed:", e));
-        }
-      }
-    }
-  }
+  // Reset playStartTime — play counting only happens on natural track completion
+  // (handleTrackEnd / handleGaplessAdvance), not on manual skip/play.
   playStartTime = Date.now();
 
   // ListenBrainz: notify 'playing_now'
@@ -1850,6 +1825,13 @@ export function nextTrack(): void {
   const idx = _advanceQueueIndex();
 
   if (idx === null) {
+    // End of queue — check if we should remove from listen-later
+    const ctx = get(playbackContext);
+    if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
+      console.log("[Player] Album finished, removing from listen-later:", ctx.albumId);
+      void toggleListenLater(ctx.albumId);
+    }
+
     // End of queue/shuffle with no repeat
     if (settings.autoplay) {
       playRandomFromLibrary();
@@ -2109,6 +2091,7 @@ function handleTrackEnd(): void {
   if (track && playStartTime > 0) {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
+      console.log(`[Player] Recording play for "${track.title}" (${durationPlayed}s)`);
       recordTrackPlay(track.id, track.album_id ?? null, durationPlayed);
       incrementPlayCount(track.id);
       // ListenBrainz: scrobble if >= 50 % of duration or 4 minutes
@@ -2125,8 +2108,10 @@ function handleTrackEnd(): void {
           ).catch((e) => console.warn("[ListenBrainz] Scrobble failed:", e));
         }
       }
+    } else {
+      console.log(`[Player] Track "${track.title}" played only ${durationPlayed}s, not recording`);
     }
-    playStartTime = 0; // Reset so playTrack doesn't double-record
+    playStartTime = 0;
   }
 
   // Repeat one logic for backends that don't handle it internally (like HTML5)
@@ -2134,17 +2119,6 @@ function handleTrackEnd(): void {
     console.log("[Player] Repeat one: restarting current track");
     playTrack(track).catch(console.error);
     return;
-  }
-
-  const ctx = get(playbackContext);
-  if (
-    ctx?.type === "album" &&
-    ctx.albumId &&
-    _advanceQueueIndex(true) === null
-  ) {
-    if (isInListenLater(ctx.albumId)) {
-      void toggleListenLater(ctx.albumId);
-    }
   }
 
   nextTrack();
@@ -2159,6 +2133,7 @@ function handleGaplessAdvance(): void {
   if (prevTrack && playStartTime > 0) {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
+      console.log(`[Player] Gapless: recording play for "${prevTrack.title}" (${durationPlayed}s)`);
       recordTrackPlay(prevTrack.id, prevTrack.album_id ?? null, durationPlayed);
       incrementPlayCount(prevTrack.id);
       const trackDuration = prevTrack.duration ?? 0;
@@ -2174,14 +2149,28 @@ function handleGaplessAdvance(): void {
           ).catch((e) => console.warn("[ListenBrainz] Scrobble failed:", e));
         }
       }
+    } else {
+      console.log(`[Player] Gapless: track "${prevTrack.title}" played only ${durationPlayed}s, not recording`);
     }
   }
   playStartTime = Date.now();
 
   const idx = _advanceQueueIndex();
   if (idx === null) {
-    // Nothing to advance to — treat as track finished
-    handleTrackEnd();
+    // End of queue after gapless advance — play was already recorded above.
+    // Just handle queue end (listen-later removal, autoplay, stop).
+    playStartTime = 0;
+    const ctx = get(playbackContext);
+    if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
+      console.log("[Player] Album finished (gapless), removing from listen-later:", ctx.albumId);
+      void toggleListenLater(ctx.albumId);
+    }
+    const settings = get(appSettings);
+    if (settings.autoplay) {
+      playRandomFromLibrary();
+    } else {
+      isPlaying.set(false);
+    }
     return;
   }
 

@@ -362,59 +362,6 @@
     {/if}
 
         <div class="queue-content">
-            {#if $currentTrack}
-                <section class="queue-section">
-                    <h4 class="section-title">Now Playing</h4>
-                    <div class="now-playing">
-                        <div class="queue-track current">
-                            <div class="track-art">
-                                {#if getTrackArt($currentTrack)}
-                                    <img
-                                        src={getTrackArt($currentTrack)}
-                                        alt=""
-                                        loading="lazy"
-                                        decoding="async"
-                                    />
-                                {:else}
-                                    <div class="art-placeholder">
-                                        <svg
-                                            viewBox="0 0 24 24"
-                                            fill="currentColor"
-                                            width="16"
-                                            height="16"
-                                        >
-                                            <path
-                                                d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                                            />
-                                        </svg>
-                                    </div>
-                                {/if}
-                                {#if $isPlaying}
-                                    <div class="playing-indicator">
-                                        <span class="bar"></span>
-                                        <span class="bar"></span>
-                                        <span class="bar"></span>
-                                    </div>
-                                {/if}
-                            </div>
-                            <div class="track-info">
-                                <span class="track-title truncate"
-                                    >{$currentTrack.title ||
-                                        "Unknown Title"}</span
-                                >
-                                <span class="track-artist truncate"
-                                    >{$currentTrack.artist ||
-                                        "Unknown Artist"}</span
-                                >
-                            </div>
-                            <span class="track-duration"
-                                >{formatDuration($currentTrack.duration)}</span
-                            >
-                        </div>
-                    </div>
-                </section>
-            {/if}
-
             {#if upcomingTracks.length > 0}
                 <section class="queue-section">
                     <h4 class="section-title">

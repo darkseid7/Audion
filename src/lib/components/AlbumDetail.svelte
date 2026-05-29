@@ -12,7 +12,7 @@
         type MbReleaseInfo,
     } from "$lib/api/tauri";
     import { playTracks, currentTrack, isPlaying } from "$lib/stores/player";
-    import { goToAlbums, goToArtistDetail } from "$lib/stores/view";
+    import { goToAlbums, goToArtistDetail, goBack } from "$lib/stores/view";
     import { loadLibrary, getAlbumCoverFromTracks } from "$lib/stores/library";
     import TrackList from "./TrackList.svelte";
     import {
@@ -414,8 +414,8 @@
         >
             <button
                 class="back-btn"
-                on:click={goToAlbums}
-                aria-label="Back to Albums"
+                on:click={goBack}
+                aria-label="Back"
             >
                 <svg
                     viewBox="0 0 24 24"
