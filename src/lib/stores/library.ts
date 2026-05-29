@@ -534,6 +534,13 @@ export function getTrackByIdSync(trackId: number): Track | null {
 }
 
 /**
+ * Cache a track into the metadata cache so future getTrackByIdSync calls find it.
+ */
+export function cacheTrack(track: Track): void {
+  ingestTracks([track]);
+}
+
+/**
  * Get full album with art data
  */
 export function getFullAlbum(albumId: number): Album | null {

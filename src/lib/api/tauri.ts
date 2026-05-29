@@ -257,6 +257,10 @@ export async function getLibrary(): Promise<Library> {
   return await invoke("get_library");
 }
 
+export async function getTrackById(trackId: number): Promise<Track | null> {
+  return await invoke("get_track_by_id", { trackId });
+}
+
 export async function getTracksPaginated(
   limit: number,
   offset: number,

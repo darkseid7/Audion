@@ -2,6 +2,7 @@ import { writable, get } from "svelte/store";
 import {
   squeezeGetPlayerState,
   getTrackCoverSrc,
+  getTrackById,
   type SqueezePlayerInfo,
 } from "$lib/api/tauri";
 import {
@@ -14,7 +15,7 @@ import {
   shuffle,
   repeat,
 } from "$lib/stores/player";
-import { getTrackByIdSync, incrementPlayCount } from "$lib/stores/library";
+import { getTrackByIdSync, incrementPlayCount, cacheTrack } from "$lib/stores/library";
 import { recordTrackPlay } from "$lib/stores/activity";
 
 export const activeSqueezePlayer = writable<string | null>(null);
@@ -61,8 +62,20 @@ async function pollSqueezeState(mac: string) {
       if (get(duration) !== trackDur) duration.set(trackDur);
 
       const currentObj = get(currentTrack);
-      const localTrack = getTrackByIdSync(info.current_track.id);
+      let localTrack = getTrackByIdSync(info.current_track.id);
       const sameTrack = currentObj?.id === info.current_track.id;
+
+      // If track not in memory cache, fetch from backend and cache it
+      if (!localTrack && !sameTrack) {
+        try {
+          const fetched = await getTrackById(info.current_track.id);
+          if (fetched) {
+            cacheTrack(fetched);
+            localTrack = fetched;
+          }
+        } catch { /* non-critical */ }
+      }
+
       const canUpgradeFromLocal =
         sameTrack &&
         !!localTrack &&

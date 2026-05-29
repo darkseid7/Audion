@@ -927,6 +927,15 @@ pub async fn get_library(db: State<'_, Database>) -> Result<Library, String> {
 }
 
 #[tauri::command]
+pub async fn get_track_by_id(
+    track_id: i64,
+    db: State<'_, Database>,
+) -> Result<Option<queries::Track>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::get_track_by_id(&conn, track_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_tracks_paginated(
     limit: i32,
     offset: i32,
