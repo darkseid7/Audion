@@ -35,7 +35,21 @@ fn generate_content_hash(
 }
 
 pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
-    let path = Path::new(path);
+    let file_path = Path::new(path);
+
+    // Get file modification time (epoch seconds)
+    let file_mtime = std::fs::metadata(file_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+
+    let mut track = extract_metadata_inner(file_path)?;
+    track.file_modified_at = file_mtime;
+    Some(track)
+}
+
+fn extract_metadata_inner(path: &Path) -> Option<TrackInsert> {
 
     // Try to read the file
     // Try to read the file with default options first
@@ -172,6 +186,7 @@ pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
                 local_src: None,
                 musicbrainz_recording_id,
                 metadata_json,
+                file_modified_at: None, // set by extract_metadata wrapper
             })
         }
         None => {
@@ -272,6 +287,7 @@ fn create_fallback_metadata(path: &Path) -> TrackInsert {
         local_src: None,
         musicbrainz_recording_id: None,
         metadata_json: None,
+        file_modified_at: None,
     }
 }
 
@@ -347,6 +363,7 @@ fn extract_flac_metadata_fallback(path: &Path, _duration_hint: Option<i32>) -> O
                 local_src: None,
                 musicbrainz_recording_id: None,
                 metadata_json,
+                file_modified_at: None, // set by extract_metadata wrapper
             })
         }
         Err(e) => {

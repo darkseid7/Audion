@@ -440,6 +440,13 @@
         const aMeta = albumSortMetaById.get(a.id);
         const bMeta = albumSortMetaById.get(b.id);
 
+        // Albums with no loaded tracks (no sort metadata) always go to the end
+        const aHasMeta = aMeta != null;
+        const bHasMeta = bMeta != null;
+        if (aHasMeta && !bHasMeta) return -1;
+        if (!aHasMeta && bHasMeta) return 1;
+        if (!aHasMeta && !bHasMeta) return compareText(a.name, b.name);
+
         let result = 0;
 
         switch (albumSort) {

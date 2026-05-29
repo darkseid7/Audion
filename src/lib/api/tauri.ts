@@ -249,6 +249,19 @@ export async function rescanMusic(): Promise<ScanResult> {
   return await invoke("rescan_music");
 }
 
+// File watcher commands (desktop only)
+export async function startWatcher(): Promise<void> {
+  return await invoke("start_watcher");
+}
+
+export async function stopWatcher(): Promise<void> {
+  return await invoke("stop_watcher");
+}
+
+export async function getWatcherStatus(): Promise<boolean> {
+  return await invoke("get_watcher_status");
+}
+
 export async function getDefaultMusicDirs(): Promise<string[]> {
   return await invoke("get_default_music_dirs");
 }

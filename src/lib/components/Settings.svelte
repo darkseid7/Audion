@@ -22,6 +22,8 @@
     deleteBackup,
     type BackupInfo,
     type MergeCoverResult,
+    startWatcher,
+    stopWatcher,
   } from "$lib/api/tauri";
   import { trackCount, playlists, loadLibrary } from "$lib/stores/library";
   import UpdatePopup from "./UpdatePopup.svelte";
@@ -816,6 +818,36 @@
               <button class="selector-btn" on:click={handleSetDownloadLocation} aria-label={$_('settings.change', { default: 'Change location' })}>{$_('settings.change', { default: 'Change' })}</button>
             </div>
           </div>
+
+          {#if !isAndroid()}
+            <div class="divider"></div>
+            <div class="toggle-container">
+              <div class="toggle-info">
+                <span class="setting-title">{$_('settings.autoScanLibrary', { default: 'Auto-scan library' })}</span>
+                <span class="setting-description">{$_('settings.autoScanLibraryDesc', { default: 'Automatically detect file changes in your music folders' })}</span>
+              </div>
+              <button
+                class="toggle-btn"
+                class:active={$appSettings.autoScanLibrary}
+                on:click={async () => {
+                  const newValue = !$appSettings.autoScanLibrary;
+                  appSettings.setAutoScanLibrary(newValue);
+                  try {
+                    if (newValue) {
+                      await startWatcher();
+                    } else {
+                      await stopWatcher();
+                    }
+                  } catch (e) {
+                    console.error('[Settings] Failed to toggle watcher:', e);
+                  }
+                }}
+                aria-label={$_('settings.autoScanLibrary', { default: 'Auto-scan library' })}
+              >
+                <div class="toggle-handle"></div>
+              </button>
+            </div>
+          {/if}
 
           {#if isAndroid()}
             <div class="divider"></div>

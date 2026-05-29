@@ -8,6 +8,8 @@
     migrateCoversToFiles,
     isAndroid,
     isTauri,
+    startWatcher,
+    rescanMusic,
     ensureAudioPermission,
     openAppSettings,
     initPlatformDetection,
@@ -18,6 +20,8 @@
   import { loadLikedTracks } from "$lib/stores/liked";
   import { loadLikedAlbums } from "$lib/stores/liked-albums";
   import { loadListenLaterAlbums } from "$lib/stores/listen-later";
+  import { loadLibrary, refreshLibrarySilently } from "$lib/stores/library";
+  import { progressiveScan } from "$lib/stores/progressiveScan";
   import { goBack, navigationHistory } from "$lib/stores/view";
   import {
     isFullScreen,
@@ -38,6 +42,7 @@
   import "../app.css";
 
   let handleVisibilityChange: (() => void) | null = null;
+  let watcherUnlisten: (() => void) | null = null;
   let migrationStatus = "";
   let showMigrationBanner = false;
   let showPermissionBanner = false;
@@ -99,6 +104,30 @@
 
     appSettings.initialize();
     theme.initialize();
+
+    // Auto-start file watcher if enabled (desktop only)
+    if (!isAndroid() && isTauri()) {
+      const settings = get(appSettings);
+      if (settings.autoScanLibrary) {
+        // Quick incremental rescan to catch changes made while app was closed
+        rescanMusic()
+          .then(() => {
+            console.log('[Layout] Startup rescan complete');
+            refreshLibrarySilently();
+          })
+          .catch((e: unknown) => console.warn('[Layout] Startup rescan failed:', e));
+
+        startWatcher().catch((e: unknown) => console.warn('[Layout] Auto-start watcher failed:', e));
+      }
+
+      // Reload library when watcher detects file changes
+      const { listen } = await import("@tauri-apps/api/event");
+      const unlistenWatcher = await listen("watcher-files-changed", (event: any) => {
+        console.log('[Watcher] Files changed:', event.payload);
+        refreshLibrarySilently();
+      });
+      watcherUnlisten = unlistenWatcher;
+    }
     
     // Initialize i18n with saved preference or navigator default
     const savedLang = localStorage.getItem("audion_language");
@@ -241,6 +270,9 @@
 
     // Cleanup player resources
     cleanupPlayer();
+
+    // Cleanup file watcher listener
+    watcherUnlisten?.();
 
     // Cleanup sync event listeners
     destroySync();

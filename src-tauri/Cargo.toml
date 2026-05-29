@@ -145,6 +145,9 @@ trash = "5"
 tauri-plugin-global-shortcut = "2"
 # Single instance to route deep links to existing window on Windows/Linux
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# File system watching for auto-scan (desktop only)
+notify = "7"
+notify-debouncer-full = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = [

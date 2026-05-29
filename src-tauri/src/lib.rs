@@ -337,6 +337,10 @@ pub fn run() {
             app.manage(commands::listenbrainz::ListenBrainzState::new());
             app.manage(commands::squeeze::SqueezeState::new());
 
+            // File watcher state (desktop only)
+            #[cfg(desktop)]
+            app.manage(scanner::watcher::WatcherState::new());
+
             // Initialize Discord RPC state (desktop only)
             #[cfg(desktop)]
             app.manage(discord::DiscordState(std::sync::Mutex::new(None)));
@@ -697,6 +701,10 @@ pub fn run() {
                     commands::squeeze::squeeze_get_queue,
                     commands::squeeze::squeeze_insert_queue,
                     commands::squeeze::squeeze_update_queue,
+                    // File watcher commands (desktop only)
+                    commands::library::start_watcher,
+                    commands::library::stop_watcher,
+                    commands::library::get_watcher_status,
                 ]
             }
             #[cfg(mobile)]

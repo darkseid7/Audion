@@ -663,6 +663,44 @@ export async function getFullTracks(
 }
 
 // LOADING FUNCTIONS
+
+/**
+ * Silently refresh the library after watcher events or startup rescan.
+ * Loads ALL albums and tracks so sort metadata is always complete.
+ * Does not flash isLoading, preserving scroll position and sort order.
+ */
+export async function refreshLibrarySilently(): Promise<void> {
+  try {
+    // First get total counts from the library metadata
+    const library = await getLibrary();
+
+    totalTrackCount = library.tracks.length;
+    totalAlbumCount = library.albums.length;
+    totalArtistCount = library.artists.length;
+    trackCount.set(totalTrackCount);
+    albumCount.set(totalAlbumCount);
+    artistCount.set(totalArtistCount);
+
+    // Load ALL albums and tracks so sort metadata covers everything
+    const [freshTracks, freshAlbums] = await Promise.all([
+      getTracksPaginated(totalTrackCount, 0),
+      getAlbumsPaginated(totalAlbumCount, 0),
+    ]);
+
+    // Ingest and update stores (no isLoading flash)
+    const lightTracks = ingestTracks(freshTracks);
+    const lightAlbums = ingestAlbums(freshAlbums);
+
+    albums.set(lightAlbums);
+    artists.set(library.artists);
+    tracks.set(lightTracks);
+
+    console.log(`[Library] Silent refresh: ${lightAlbums.length} albums, ${lightTracks.length} tracks`);
+  } catch (error) {
+    console.error("[Library] Silent refresh failed:", error);
+  }
+}
+
 /**
  * Load library: artists in full, first paginated batch of tracks and albums.
  * Additional items arrive via loadMoreTracks() and loadMoreAlbums().
