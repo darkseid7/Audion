@@ -7,8 +7,9 @@
 //   - Deleted files    → remove from DB + cleanup empty albums
 
 use crate::db::queries::{self, TrackInsert};
+use crate::scanner::cover_storage;
 use crate::scanner::metadata::extract_metadata;
-use crate::scanner::walker::is_supported_audio_file;
+use crate::scanner::walker::{is_supported_audio_file, scan_directory};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use rusqlite::Connection;
@@ -124,39 +125,55 @@ fn process_debounced_events(
 ) {
     let mut files_to_upsert: HashSet<PathBuf> = HashSet::new();
     let mut files_to_remove: HashSet<PathBuf> = HashSet::new();
+    let mut dirs_removed: Vec<PathBuf> = Vec::new();
 
     for event in &events {
         use notify::EventKind;
 
         for path in &event.paths {
-            if !is_supported_audio_file(path) {
-                continue;
-            }
-
             match &event.kind {
                 EventKind::Create(_) | EventKind::Modify(_) => {
-                    // If a file was created/modified, make sure it's not in the remove set
-                    files_to_remove.remove(path);
-                    files_to_upsert.insert(path.clone());
+                    if is_supported_audio_file(path) {
+                        files_to_remove.remove(path);
+                        files_to_upsert.insert(path.clone());
+                    } else if path.is_dir() {
+                        // Directory created (e.g. album folder pasted in)
+                        // Walk it for audio files
+                        let result = scan_directory(&path.to_string_lossy());
+                        tracing::info!("[Watcher] Dir created, found {} audio files in {:?}", 
+                            result.audio_files.len(), path);
+                        for file in result.audio_files {
+                            let p = PathBuf::from(&file);
+                            files_to_remove.remove(&p);
+                            files_to_upsert.insert(p);
+                        }
+                    }
                 }
                 EventKind::Remove(_) => {
-                    // If it was queued for upsert, cancel that
-                    files_to_upsert.remove(path);
-                    files_to_remove.insert(path.clone());
+                    if is_supported_audio_file(path) {
+                        // Single audio file removed
+                        files_to_upsert.remove(path);
+                        files_to_remove.insert(path.clone());
+                    } else if path.extension().is_none() {
+                        // No extension = likely a directory removal
+                        // (Windows emits Remove for the folder, not individual files)
+                        dirs_removed.push(path.clone());
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    if files_to_upsert.is_empty() && files_to_remove.is_empty() {
+    if files_to_upsert.is_empty() && files_to_remove.is_empty() && dirs_removed.is_empty() {
         return;
     }
 
     tracing::info!(
-        "[Watcher] Processing {} upsert(s), {} removal(s)",
+        "[Watcher] Processing {} upsert(s), {} file removal(s), {} dir removal(s)",
         files_to_upsert.len(),
-        files_to_remove.len()
+        files_to_remove.len(),
+        dirs_removed.len(),
     );
 
     let mut added = 0usize;
@@ -187,13 +204,49 @@ fn process_debounced_events(
         match extract_metadata(path_str) {
             Some(track) => {
                 match queries::insert_or_update_track(&conn, &track) {
-                    Ok((_id, was_new)) => {
+                    Ok((track_id, was_new)) if track_id > 0 => {
                         if was_new {
                             added += 1;
                         } else {
                             updated += 1;
                         }
+
+                        // Save track cover
+                        let cover_path = track.track_cover.as_ref().and_then(|bytes| {
+                            cover_storage::save_track_cover(track_id, bytes).ok()
+                        });
+                        if let Some(ref path) = cover_path {
+                            let _ = queries::update_track_cover_path(&conn, track_id, Some(path));
+                        }
+
+                        // Save album art if the album doesn't have one yet
+                        if let Some(album_id) = conn
+                            .query_row(
+                                "SELECT album_id FROM tracks WHERE id = ?1",
+                                rusqlite::params![track_id],
+                                |row| row.get::<_, Option<i64>>(0),
+                            )
+                            .ok()
+                            .flatten()
+                        {
+                            if let Some(ref art_bytes) = track.album_art {
+                                let has_art: bool = conn
+                                    .query_row(
+                                        "SELECT art_path IS NOT NULL FROM albums WHERE id = ?1",
+                                        rusqlite::params![album_id],
+                                        |row| row.get(0),
+                                    )
+                                    .unwrap_or(false);
+
+                                if !has_art {
+                                    if let Ok(art_path) = cover_storage::save_album_art(album_id, art_bytes) {
+                                        let _ = queries::update_album_art_path(&conn, album_id, Some(&art_path));
+                                    }
+                                }
+                            }
+                        }
                     }
+                    Ok(_) => {} // duplicate skipped
                     Err(e) => {
                         errors.push(format!("DB error for {}: {}", path_str, e));
                     }
@@ -205,7 +258,7 @@ fn process_debounced_events(
         }
     }
 
-    // Process removals
+    // Process removals (individual files)
     for path in &files_to_remove {
         let path_str = match path.to_str() {
             Some(s) => s,
@@ -221,6 +274,26 @@ fn process_debounced_events(
             }
             Err(e) => {
                 errors.push(format!("DB remove error for {}: {}", path_str, e));
+            }
+        }
+    }
+
+    // Process directory removals — delete all tracks whose path starts with the removed dir
+    for dir_path in &dirs_removed {
+        let dir_str = match dir_path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        match delete_tracks_by_directory(&conn, dir_str) {
+            Ok(count) => {
+                removed += count;
+                if count > 0 {
+                    tracing::info!("[Watcher] Removed {} tracks from deleted dir: {}", count, dir_str);
+                }
+            }
+            Err(e) => {
+                errors.push(format!("DB dir remove error for {}: {}", dir_str, e));
             }
         }
     }
@@ -255,4 +328,21 @@ fn process_debounced_events(
 fn delete_track_by_path(conn: &Connection, path: &str) -> Result<bool, rusqlite::Error> {
     let deleted = conn.execute("DELETE FROM tracks WHERE path = ?1", rusqlite::params![path])?;
     Ok(deleted > 0)
+}
+
+/// Delete all tracks whose path starts with the given directory path.
+/// Used when a whole folder is removed/moved.
+/// Returns the number of tracks deleted.
+fn delete_tracks_by_directory(conn: &Connection, dir_path: &str) -> Result<usize, rusqlite::Error> {
+    // Ensure the pattern ends with a path separator so we don't match partial names
+    let pattern = if dir_path.ends_with('\\') || dir_path.ends_with('/') {
+        format!("{}%", dir_path)
+    } else {
+        format!("{}\\%", dir_path) // Windows separator
+    };
+    let deleted = conn.execute(
+        "DELETE FROM tracks WHERE path LIKE ?1",
+        rusqlite::params![pattern],
+    )?;
+    Ok(deleted)
 }

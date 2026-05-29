@@ -77,6 +77,7 @@ pub struct TrackInsert {
     pub local_src: Option<String>,
     pub musicbrainz_recording_id: Option<String>,
     pub metadata_json: Option<String>,
+    pub file_modified_at: Option<i64>,
 }
 
 fn read_album_artist_from_metadata(metadata_json: Option<&str>) -> Option<String> {
@@ -207,6 +208,25 @@ fn resolve_album_artist(track: &TrackInsert) -> Option<String> {
 }
 
 // Track operations
+
+/// Get a map of file path -> file_modified_at for all local tracks.
+/// Used by incremental rescan to skip unchanged files.
+pub fn get_track_mtimes(conn: &Connection) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, file_modified_at FROM tracks WHERE file_modified_at IS NOT NULL AND source_type = 'local'"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        if let Ok((path, mtime)) = row {
+            map.insert(path, mtime);
+        }
+    }
+    Ok(map)
+}
+
 pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<(i64, bool)> {
     // Check if a track with the same content_hash already exists (skip duplicates)
     if let Some(ref hash) = track.content_hash {
@@ -270,8 +290,9 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 disc_number = ?15,
                 musicbrainz_recording_id = ?16,
                 metadata_json = ?17,
+                file_modified_at = ?18,
                 date_added = COALESCE(date_added, CURRENT_TIMESTAMP)
-             WHERE id = ?18",
+             WHERE id = ?19",
             params![
                 track.title,
                 track.artist,
@@ -290,6 +311,7 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 track.disc_number,
                 track.musicbrainz_recording_id,
                 track.metadata_json,
+                track.file_modified_at,
                 track_id, // Use existing ID
             ],
         )?;
@@ -311,8 +333,8 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
     } else {
         // insert new track
         conn.execute(
-            "INSERT INTO tracks (path, title, artist, album, album_artist, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, date_added)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)",
+            "INSERT INTO tracks (path, title, artist, album, album_artist, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, file_modified_at, date_added)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, CURRENT_TIMESTAMP)",
             params![
                 track.path,
                 track.title,
@@ -332,6 +354,7 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 track.disc_number,
                 track.musicbrainz_recording_id,
                 track.metadata_json,
+                track.file_modified_at,
             ],
         )?;
 

@@ -499,9 +499,40 @@ async fn run_scan_and_import(
     folders: Vec<String>, // used for timestamp update after batch
     source: ScanSource,
 ) -> Result<ScanResult, String> {
-    let total_files = all_files.len();
     let total_start = std::time::Instant::now();
- 
+
+    // ── Incremental scan: skip files whose mtime hasn't changed ──
+    let known_mtimes = {
+        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        queries::get_track_mtimes(&conn).unwrap_or_default()
+    };
+
+    let files_to_process: Vec<String> = all_files
+        .into_iter()
+        .filter(|file_path| {
+            let fs_mtime = std::fs::metadata(file_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+
+            match (known_mtimes.get(file_path.as_str()), fs_mtime) {
+                (Some(&db_mtime), Some(fs_mt)) => db_mtime != fs_mt, // changed
+                (None, _) => true,   // new file
+                (_, None) => true,   // can't read mtime, process anyway
+            }
+        })
+        .collect();
+
+    let skipped = known_mtimes.len().saturating_sub(0); // info only
+    let total_files = files_to_process.len();
+
+    tracing::info!(
+        "[Scan] {} files to process ({} skipped as unchanged)",
+        total_files,
+        known_mtimes.len().saturating_sub(total_files),
+    );
+
     if total_files == 0 {
         let result = ScanResult {
             tracks_added: 0,
@@ -523,7 +554,7 @@ async fn run_scan_and_import(
     let extracted_count_clone = extracted_count.clone();
 
     std::thread::spawn(move || {
-        all_files.par_iter().for_each(|file_path| {
+        files_to_process.par_iter().for_each(|file_path| {
             if let Some(track_data) = extract_metadata(file_path) {
                 let _ = tx.send(track_data);
             }
@@ -1193,6 +1224,7 @@ pub async fn add_external_track(
         local_src: None,
         musicbrainz_recording_id: track.musicbrainz_recording_id,
         metadata_json: track.metadata_json,
+        file_modified_at: None,
     };
 
     queries::insert_or_update_track(&conn, &track_insert)

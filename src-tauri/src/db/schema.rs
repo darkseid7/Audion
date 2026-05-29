@@ -167,6 +167,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         ("genre", "TEXT"),
         ("metadata_json", "TEXT"),
         ("play_count", "INTEGER DEFAULT 0"),
+        ("file_modified_at", "INTEGER"),
     ];
 
     for (col_name, col_def) in tracks_columns {
