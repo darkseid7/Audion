@@ -15,7 +15,11 @@ import {
   shuffle,
   repeat,
 } from "$lib/stores/player";
-import { getTrackByIdSync, incrementPlayCount, cacheTrack } from "$lib/stores/library";
+import {
+  getTrackByIdSync,
+  incrementPlayCount,
+  cacheTrack,
+} from "$lib/stores/library";
 import { recordTrackPlay } from "$lib/stores/activity";
 
 export const activeSqueezePlayer = writable<string | null>(null);
@@ -73,7 +77,9 @@ async function pollSqueezeState(mac: string) {
             cacheTrack(fetched);
             localTrack = fetched;
           }
-        } catch { /* non-critical */ }
+        } catch {
+          /* non-critical */
+        }
       }
 
       const canUpgradeFromLocal =
