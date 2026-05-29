@@ -14,7 +14,8 @@ import {
     shuffle,
     repeat,
 } from '$lib/stores/player';
-import { getTrackByIdSync } from '$lib/stores/library';
+import { getTrackByIdSync, incrementPlayCount } from '$lib/stores/library';
+import { recordTrackPlay } from '$lib/stores/activity';
 
 export const activeSqueezePlayer = writable<string | null>(null);
 export const squeezePlayerState = writable<SqueezePlayerInfo | null>(null);
@@ -50,6 +51,8 @@ async function pollSqueezeState(mac: string) {
         const playing = info.state === 'Playing';
         if (get(isPlaying) !== playing) isPlaying.set(playing);
 
+        const prevTrack = get(currentTrack);
+        const prevElapsed = get(currentTime);
         const elapsed = info.elapsed_ms / 1000;
         currentTime.set(elapsed);
 
@@ -58,14 +61,38 @@ async function pollSqueezeState(mac: string) {
             if (get(duration) !== trackDur) duration.set(trackDur);
 
             const currentObj = get(currentTrack);
-            if (!currentObj || currentObj.id !== info.current_track.id) {
-                const localTrack = getTrackByIdSync(info.current_track.id);
+            const localTrack = getTrackByIdSync(info.current_track.id);
+            const sameTrack = currentObj?.id === info.current_track.id;
+            const canUpgradeFromLocal =
+                sameTrack &&
+                !!localTrack &&
+                ((!currentObj?.track_cover_path && !!localTrack.track_cover_path) ||
+                    (!currentObj?.track_cover && !!localTrack.track_cover) ||
+                    (!currentObj?.cover_url && !!localTrack.cover_url) ||
+                    (!currentObj?.album_id && !!localTrack.album_id));
+
+            // Update when track changed, or when same track can be enriched with local metadata.
+            if (!sameTrack || canUpgradeFromLocal) {
+                // In squeeze mode, track transitions are driven by state polling, not native/html5 end events.
+                // Record the previous track play when we detect a real track-id change.
+                if (!sameTrack && prevTrack && prevTrack.id !== info.current_track.id) {
+                    const durationPlayed = Math.floor(prevElapsed);
+                    if (durationPlayed > 5) {
+                        void recordTrackPlay(
+                            prevTrack.id,
+                            prevTrack.album_id ?? null,
+                            durationPlayed,
+                        );
+                        incrementPlayCount(prevTrack.id);
+                    }
+                }
+
                 if (localTrack) {
                     currentTrack.set({
                         ...localTrack,
                         track_cover: getTrackCoverSrc(localTrack),
                     } as any);
-                } else {
+                } else if (!sameTrack) {
                     currentTrack.set({
                         id: info.current_track.id,
                         title: info.current_track.title,
