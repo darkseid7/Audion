@@ -1334,3 +1334,48 @@ pub async fn save_image_to_gallery(
 
     Ok(file_path.to_string_lossy().to_string())
 }
+
+// =============================================================================
+// FILE WATCHER COMMANDS (desktop only)
+// =============================================================================
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn start_watcher(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<(), String> {
+    let folders = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        queries::get_music_folders(&conn).map_err(|e| e.to_string())?
+    };
+
+    crate::scanner::watcher::start_watching(
+        &watcher_state,
+        folders,
+        Arc::clone(&db.conn),
+        app,
+    )?;
+
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn stop_watcher(
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<(), String> {
+    crate::scanner::watcher::stop_watching(&watcher_state);
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn get_watcher_status(
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<bool, String> {
+    Ok(watcher_state
+        .is_running
+        .load(std::sync::atomic::Ordering::SeqCst))
+}
