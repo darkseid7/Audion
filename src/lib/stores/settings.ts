@@ -1,244 +1,254 @@
 // App settings store - manages app-wide settings
-import { writable, get } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { writable, get } from "svelte/store";
+import { invoke } from "@tauri-apps/api/core";
 
 export interface AppSettings {
-    downloadLocation: string | null;
-    androidMusicFolder: string | null;
-    autoAddToLibrary: boolean;
-    developerMode: boolean;
-    showDiscord: boolean;
-    startMode: 'normal' | 'maximized' | 'minimized';
-    closeToTray: boolean;
-    minimizeToTray: boolean;
-    autoplay: boolean;
-    audioBackend: 'auto' | 'native' | 'html5';
-    listenBrainzEnabled: boolean;
-    /** True when a token file exists – refreshed at startup, not persisted in localStorage */
-    listenBrainzTokenSet: boolean;
-    listenBrainzUsername: string;
-    remoteControlEnabled: boolean;
-    showResonate: boolean;
-    autoScanLibrary: boolean;
+  downloadLocation: string | null;
+  androidMusicFolder: string | null;
+  autoAddToLibrary: boolean;
+  developerMode: boolean;
+  showDiscord: boolean;
+  startMode: "normal" | "maximized" | "minimized";
+  closeToTray: boolean;
+  minimizeToTray: boolean;
+  autoplay: boolean;
+  audioBackend: "auto" | "native" | "html5";
+  listenBrainzEnabled: boolean;
+  /** True when a token file exists – refreshed at startup, not persisted in localStorage */
+  listenBrainzTokenSet: boolean;
+  listenBrainzUsername: string;
+  remoteControlEnabled: boolean;
+  showResonate: boolean;
+  autoScanLibrary: boolean;
 }
 
-const SETTINGS_STORAGE_KEY = 'audion_settings';
+const SETTINGS_STORAGE_KEY = "audion_settings";
 
 // Default settings
 const defaultSettings: AppSettings = {
-    downloadLocation: null,
-    androidMusicFolder: null,
-    autoAddToLibrary: false,
-    developerMode: false,
-    showDiscord: true,
-    startMode: 'normal',
-    closeToTray: false,
-    minimizeToTray: false,
-    autoplay: false,
-    audioBackend: 'auto',
-    listenBrainzEnabled: false,
-    listenBrainzTokenSet: false,
-    listenBrainzUsername: '',
-    remoteControlEnabled: true,
-    showResonate: true,
-    autoScanLibrary: true,
+  downloadLocation: null,
+  androidMusicFolder: null,
+  autoAddToLibrary: false,
+  developerMode: false,
+  showDiscord: true,
+  startMode: "normal",
+  closeToTray: false,
+  minimizeToTray: false,
+  autoplay: false,
+  audioBackend: "auto",
+  listenBrainzEnabled: false,
+  listenBrainzTokenSet: false,
+  listenBrainzUsername: "",
+  remoteControlEnabled: true,
+  showResonate: true,
+  autoScanLibrary: true,
 };
 
 // Load settings from localStorage
 function loadSettings(): AppSettings {
-    if (typeof window === 'undefined') return defaultSettings;
+  if (typeof window === "undefined") return defaultSettings;
 
-    try {
-        const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
-        if (stored) {
-            return { ...defaultSettings, ...JSON.parse(stored) };
-        }
-    } catch (error) {
-        console.error('[Settings] Failed to load:', error);
+  try {
+    const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (stored) {
+      return { ...defaultSettings, ...JSON.parse(stored) };
     }
+  } catch (error) {
+    console.error("[Settings] Failed to load:", error);
+  }
 
-    return defaultSettings;
+  return defaultSettings;
 }
 
 // Save settings to localStorage
 function saveSettings(state: AppSettings): void {
-    if (typeof window === 'undefined') return;
+  if (typeof window === "undefined") return;
 
-    try {
-        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state));
-    } catch (error) {
-        console.error('[Settings] Failed to save:', error);
-    }
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error("[Settings] Failed to save:", error);
+  }
 }
 
 // Create settings store
 function createSettingsStore() {
-    const { subscribe, set, update } = writable<AppSettings>(loadSettings());
+  const { subscribe, set, update } = writable<AppSettings>(loadSettings());
 
-    return {
-        subscribe,
+  return {
+    subscribe,
 
-        setDownloadLocation(path: string | null) {
-            update(state => {
-                const newState = { ...state, downloadLocation: path };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setDownloadLocation(path: string | null) {
+      update((state) => {
+        const newState = { ...state, downloadLocation: path };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setAndroidMusicFolder(path: string | null) {
-            update(state => {
-                const newState = { ...state, androidMusicFolder: path };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setAndroidMusicFolder(path: string | null) {
+      update((state) => {
+        const newState = { ...state, androidMusicFolder: path };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setAutoAddToLibrary(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, autoAddToLibrary: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setAutoAddToLibrary(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, autoAddToLibrary: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setDeveloperMode(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, developerMode: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setDeveloperMode(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, developerMode: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setShowDiscord(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, showDiscord: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setShowDiscord(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, showDiscord: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setShowResonate(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, showResonate: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setShowResonate(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, showResonate: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setAutoplay(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, autoplay: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setAutoplay(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, autoplay: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setAudioBackend(backend: 'auto' | 'native' | 'html5') {
-            update(state => {
-                const newState = { ...state, audioBackend: backend };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setAudioBackend(backend: "auto" | "native" | "html5") {
+      update((state) => {
+        const newState = { ...state, audioBackend: backend };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setRemoteControlEnabled(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, remoteControlEnabled: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setRemoteControlEnabled(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, remoteControlEnabled: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setAutoScanLibrary(enabled: boolean) {
-            update(state => {
-                const newState = { ...state, autoScanLibrary: enabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    setAutoScanLibrary(enabled: boolean) {
+      update((state) => {
+        const newState = { ...state, autoScanLibrary: enabled };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        toggleListenBrainz() {
-            update(state => {
-                const newState = { ...state, listenBrainzEnabled: !state.listenBrainzEnabled };
-                saveSettings(newState);
-                return newState;
-            });
-        },
+    toggleListenBrainz() {
+      update((state) => {
+        const newState = {
+          ...state,
+          listenBrainzEnabled: !state.listenBrainzEnabled,
+        };
+        saveSettings(newState);
+        return newState;
+      });
+    },
 
-        setListenBrainzTokenSet(set: boolean, username = '') {
-            update(state => ({ ...state, listenBrainzTokenSet: set, listenBrainzUsername: username }));
-        },
+    setListenBrainzTokenSet(set: boolean, username = "") {
+      update((state) => ({
+        ...state,
+        listenBrainzTokenSet: set,
+        listenBrainzUsername: username,
+      }));
+    },
 
-        async initialize() {
-            const state = loadSettings();
+    async initialize() {
+      const state = loadSettings();
 
-            // Fetch backend-managed settings
-            try {
-                const startMode = await invoke('get_window_start_mode') as 'normal' | 'maximized' | 'minimized';
-                state.startMode = startMode;
-            } catch (error) {
-                console.error('[Settings] Failed to fetch start mode:', error);
-            }
+      // Fetch backend-managed settings
+      try {
+        const startMode = (await invoke("get_window_start_mode")) as
+          | "normal"
+          | "maximized"
+          | "minimized";
+        state.startMode = startMode;
+      } catch (error) {
+        console.error("[Settings] Failed to fetch start mode:", error);
+      }
 
-            // Fetch close-to-tray preference from backend
-            try {
-                const closeToTray = await invoke<boolean>('get_close_to_tray');
-                state.closeToTray = closeToTray;
-            } catch (error) {
-                console.error('[Settings] Failed to fetch close-to-tray:', error);
-            }
+      // Fetch close-to-tray preference from backend
+      try {
+        const closeToTray = await invoke<boolean>("get_close_to_tray");
+        state.closeToTray = closeToTray;
+      } catch (error) {
+        console.error("[Settings] Failed to fetch close-to-tray:", error);
+      }
 
-            // Fetch minimize-to-tray preference from backend
-            try {
-                const minimizeToTray = await invoke<boolean>('get_minimize_to_tray');
-                state.minimizeToTray = minimizeToTray;
-            } catch (error) {
-                console.error('[Settings] Failed to fetch minimize-to-tray:', error);
-            }
+      // Fetch minimize-to-tray preference from backend
+      try {
+        const minimizeToTray = await invoke<boolean>("get_minimize_to_tray");
+        state.minimizeToTray = minimizeToTray;
+      } catch (error) {
+        console.error("[Settings] Failed to fetch minimize-to-tray:", error);
+      }
 
-            // Check whether a ListenBrainz token is stored
-            try {
-                const tokenSet = await invoke<boolean>('get_listenbrainz_token_set');
-                state.listenBrainzTokenSet = tokenSet;
-            } catch (error) {
-                console.error('[Settings] Failed to check LB token:', error);
-            }
+      // Check whether a ListenBrainz token is stored
+      try {
+        const tokenSet = await invoke<boolean>("get_listenbrainz_token_set");
+        state.listenBrainzTokenSet = tokenSet;
+      } catch (error) {
+        console.error("[Settings] Failed to check LB token:", error);
+      }
 
-            set(state);
-        },
+      set(state);
+    },
 
-        async setStartMode(mode: 'normal' | 'maximized' | 'minimized') {
-            try {
-                await invoke('set_window_start_mode', { mode });
-                update(state => ({ ...state, startMode: mode }));
-            } catch (error) {
-                console.error('[Settings] Failed to set start mode:', error);
-            }
-        },
+    async setStartMode(mode: "normal" | "maximized" | "minimized") {
+      try {
+        await invoke("set_window_start_mode", { mode });
+        update((state) => ({ ...state, startMode: mode }));
+      } catch (error) {
+        console.error("[Settings] Failed to set start mode:", error);
+      }
+    },
 
-        async setCloseToTray(enabled: boolean) {
-            try {
-                await invoke('set_close_to_tray', { enabled });
-                update(state => ({ ...state, closeToTray: enabled }));
-            } catch (error) {
-                console.error('[Settings] Failed to set close-to-tray:', error);
-            }
-        },
+    async setCloseToTray(enabled: boolean) {
+      try {
+        await invoke("set_close_to_tray", { enabled });
+        update((state) => ({ ...state, closeToTray: enabled }));
+      } catch (error) {
+        console.error("[Settings] Failed to set close-to-tray:", error);
+      }
+    },
 
-        async setMinimizeToTray(enabled: boolean) {
-            try {
-                await invoke('set_minimize_to_tray', { enabled });
-                update(state => ({ ...state, minimizeToTray: enabled }));
-            } catch (error) {
-                console.error('[Settings] Failed to set minimize-to-tray:', error);
-            }
-        },
+    async setMinimizeToTray(enabled: boolean) {
+      try {
+        await invoke("set_minimize_to_tray", { enabled });
+        update((state) => ({ ...state, minimizeToTray: enabled }));
+      } catch (error) {
+        console.error("[Settings] Failed to set minimize-to-tray:", error);
+      }
+    },
 
-        getDownloadLocation(): string | null {
-            return get({ subscribe }).downloadLocation;
-        },
-    };
+    getDownloadLocation(): string | null {
+      return get({ subscribe }).downloadLocation;
+    },
+  };
 }
 
 export const appSettings = createSettingsStore();
