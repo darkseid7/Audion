@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme, presetAccents, type ThemeMode } from "$lib/stores/theme";
+  import { theme, presetAccents, themePresets, type ThemeMode } from "$lib/stores/theme";
   import { appSettings } from "$lib/stores/settings";
   import { equalizer, EQ_PRESETS } from "$lib/stores/equalizer";
   import { _, locale } from "svelte-i18n";
@@ -1124,6 +1124,31 @@
              </div>
            </div>
 
+           <div class="divider"></div>
+
+           <div class="inner-section">
+             <span class="setting-title">{$_('settings.themePresets', { default: 'Theme presets' })}</span>
+             <div class="theme-presets-grid" style="margin-top: 6px;">
+               {#each themePresets as preset}
+                 <button
+                   class="theme-preset-card"
+                   class:active={$theme.mode === preset.id}
+                   on:click={() => handleModeChange(preset.id)}
+                   title={preset.description}
+                 >
+                   <div class="preset-preview" style="background: {preset.preview.bg};">
+                     <span class="preset-icon" style="color: {preset.preview.accent}; text-shadow: 0 0 8px {preset.preview.accent};">{preset.icon}</span>
+                     <div class="preset-colors">
+                       <span class="preset-dot" style="background: {preset.preview.accent};"></span>
+                       <span class="preset-dot" style="background: {preset.preview.text};"></span>
+                     </div>
+                   </div>
+                   <span class="preset-name">{preset.name}</span>
+                 </button>
+               {/each}
+             </div>
+           </div>
+
            {#if !isAndroid()}
              <div class="divider"></div>
              <div class="inner-section">
@@ -1158,6 +1183,7 @@
 
            <div class="divider"></div>
 
+           {#if $theme.mode === 'dark' || $theme.mode === 'light' || $theme.mode === 'system'}
            <div class="inner-section">
              <span class="setting-title">Accent color</span>
              <div class="color-grid-compact" style="margin-top: 6px;">
@@ -1172,6 +1198,7 @@
                {/each}
              </div>
            </div>
+           {/if}
         </div>
       </section>
 
@@ -1871,6 +1898,73 @@
     gap: 8px;
     flex-wrap: wrap;
     padding: 4px 0;
+  }
+
+  /* Theme Presets Grid */
+  .theme-presets-grid {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 4px 0;
+  }
+
+  .theme-preset-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: none;
+    border: 2px solid transparent;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+
+  .theme-preset-card:hover {
+    transform: scale(1.05);
+  }
+
+  .theme-preset-card.active {
+    border-color: var(--accent-primary);
+  }
+
+  .preset-preview {
+    width: 80px;
+    height: 50px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    overflow: hidden;
+  }
+
+  .preset-icon {
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .preset-colors {
+    display: flex;
+    gap: 4px;
+  }
+
+  .preset-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .preset-name {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .theme-preset-card.active .preset-name {
+    color: var(--accent-primary);
   }
 
   .color-swatch-sm {
