@@ -1828,7 +1828,10 @@ export function nextTrack(): void {
     // End of queue — check if we should remove from listen-later
     const ctx = get(playbackContext);
     if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
-      console.log("[Player] Album finished, removing from listen-later:", ctx.albumId);
+      console.log(
+        "[Player] Album finished, removing from listen-later:",
+        ctx.albumId,
+      );
       void toggleListenLater(ctx.albumId);
     }
 
@@ -2091,7 +2094,9 @@ function handleTrackEnd(): void {
   if (track && playStartTime > 0) {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
-      console.log(`[Player] Recording play for "${track.title}" (${durationPlayed}s)`);
+      console.log(
+        `[Player] Recording play for "${track.title}" (${durationPlayed}s)`,
+      );
       recordTrackPlay(track.id, track.album_id ?? null, durationPlayed);
       incrementPlayCount(track.id);
       // ListenBrainz: scrobble if >= 50 % of duration or 4 minutes
@@ -2109,7 +2114,9 @@ function handleTrackEnd(): void {
         }
       }
     } else {
-      console.log(`[Player] Track "${track.title}" played only ${durationPlayed}s, not recording`);
+      console.log(
+        `[Player] Track "${track.title}" played only ${durationPlayed}s, not recording`,
+      );
     }
     playStartTime = 0;
   }
@@ -2133,7 +2140,9 @@ function handleGaplessAdvance(): void {
   if (prevTrack && playStartTime > 0) {
     const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
     if (durationPlayed > 5) {
-      console.log(`[Player] Gapless: recording play for "${prevTrack.title}" (${durationPlayed}s)`);
+      console.log(
+        `[Player] Gapless: recording play for "${prevTrack.title}" (${durationPlayed}s)`,
+      );
       recordTrackPlay(prevTrack.id, prevTrack.album_id ?? null, durationPlayed);
       incrementPlayCount(prevTrack.id);
       const trackDuration = prevTrack.duration ?? 0;
@@ -2150,7 +2159,9 @@ function handleGaplessAdvance(): void {
         }
       }
     } else {
-      console.log(`[Player] Gapless: track "${prevTrack.title}" played only ${durationPlayed}s, not recording`);
+      console.log(
+        `[Player] Gapless: track "${prevTrack.title}" played only ${durationPlayed}s, not recording`,
+      );
     }
   }
   playStartTime = Date.now();
@@ -2162,7 +2173,10 @@ function handleGaplessAdvance(): void {
     playStartTime = 0;
     const ctx = get(playbackContext);
     if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
-      console.log("[Player] Album finished (gapless), removing from listen-later:", ctx.albumId);
+      console.log(
+        "[Player] Album finished (gapless), removing from listen-later:",
+        ctx.albumId,
+      );
       void toggleListenLater(ctx.albumId);
     }
     const settings = get(appSettings);
