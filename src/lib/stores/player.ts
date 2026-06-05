@@ -1839,8 +1839,16 @@ export function nextTrack(): void {
     if (settings.autoplay) {
       playRandomFromLibrary();
     } else {
-      // Stop at end
+      // Stop playback completely
+      if (get(activeBackend) === "native") {
+        nativeAudioStop().catch(console.error);
+      } else if (get(activeBackend) === "html5" && html5Audio) {
+        html5Audio.pause();
+        html5Audio.currentTime = 0;
+      }
       isPlaying.set(false);
+      currentTime.set(0);
+      updateMediaSessionPlaybackState("paused");
     }
     return;
   }
@@ -2183,7 +2191,16 @@ function handleGaplessAdvance(): void {
     if (settings.autoplay) {
       playRandomFromLibrary();
     } else {
+      // Stop playback completely
+      if (get(activeBackend) === "native") {
+        nativeAudioStop().catch(console.error);
+      } else if (get(activeBackend) === "html5" && html5Audio) {
+        html5Audio.pause();
+        html5Audio.currentTime = 0;
+      }
       isPlaying.set(false);
+      currentTime.set(0);
+      updateMediaSessionPlaybackState("paused");
     }
     return;
   }

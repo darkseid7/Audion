@@ -698,18 +698,19 @@ async fn run_scan_and_import(
                         }
  
                         // Build Track struct for batch events
-                        let (album_id, date_added) = tx_db
+                        let (album_id, date_added, db_play_count) = tx_db
                             .query_row(
-                                "SELECT album_id, date_added FROM tracks WHERE id = ?1",
+                                "SELECT album_id, date_added, COALESCE(play_count, 0) FROM tracks WHERE id = ?1",
                                 [track_id],
                                 |row| {
                                     Ok((
                                         row.get::<_, Option<i64>>(0)?,
                                         row.get::<_, Option<String>>(1)?,
+                                        row.get::<_, Option<i64>>(2)?,
                                     ))
                                 },
                             )
-                            .unwrap_or((None, None));
+                            .unwrap_or((None, None, None));
 
                         batch_tracks.push(queries::Track {
                             id: track_id,
@@ -731,7 +732,7 @@ async fn run_scan_and_import(
                             disc_number: track_data.disc_number,
                             metadata_json: track_data.metadata_json.clone(),
                             date_added,
-                            play_count: None,
+                            play_count: db_play_count,
                         });
                     }
                     Ok(_) => {}

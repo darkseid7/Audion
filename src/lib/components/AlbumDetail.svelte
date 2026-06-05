@@ -266,6 +266,8 @@
         isPinned,
     } from "$lib/stores/pinned";
     import { setCustomArtwork } from "$lib/stores/customArtwork";
+
+    let showArtPopup = false;
     import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
     import { likedAlbumIds, toggleAlbumLike } from "$lib/stores/liked-albums";
     import { likedTrackIds } from "$lib/stores/liked";
@@ -434,6 +436,8 @@
                         src={getAlbumCoverFromTracks(album.id)}
                         alt={album.name}
                         decoding="async"
+                        on:click={() => (showArtPopup = true)}
+                        class="clickable"
                     />
                 {:else}
                     <div class="album-cover-placeholder">
@@ -667,6 +671,26 @@
     {/if}
 </div>
 
+{#if showArtPopup && album}
+    <div
+        class="art-popup-overlay"
+        on:click={() => (showArtPopup = false)}
+        on:keydown={(e) => e.key === 'Escape' && (showArtPopup = false)}
+        role="dialog"
+        aria-label="Album artwork"
+        tabindex="-1"
+    >
+        <div class="art-popup-content" on:click|stopPropagation>
+            <img
+                src={getAlbumCoverFromTracks(album.id)}
+                alt={album.name}
+                class="art-popup-img"
+            />
+            <button class="art-popup-close" on:click={() => (showArtPopup = false)}>Close</button>
+        </div>
+    </div>
+{/if}
+
 <style>
     .album-detail {
         display: flex;
@@ -744,6 +768,57 @@
         width: 100%;
         height: 100%;
         object-fit: cover;
+    }
+
+    .album-cover img.clickable {
+        cursor: pointer;
+    }
+
+    .art-popup-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.85);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        animation: fadeIn 0.15s ease;
+    }
+
+    .art-popup-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        max-width: 90vw;
+        max-height: 90vh;
+    }
+
+    .art-popup-img {
+        max-width: 80vmin;
+        max-height: 80vmin;
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+        object-fit: contain;
+    }
+
+    .art-popup-close {
+        background: none;
+        border: none;
+        color: var(--text-subdued);
+        font-size: 14px;
+        cursor: pointer;
+        padding: 8px 16px;
+    }
+
+    .art-popup-close:hover {
+        color: var(--text-primary);
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
     }
 
     .album-cover-placeholder {

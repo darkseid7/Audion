@@ -9,7 +9,6 @@
     isAndroid,
     isTauri,
     startWatcher,
-    rescanMusic,
     ensureAudioPermission,
     openAppSettings,
     initPlatformDetection,
@@ -109,14 +108,6 @@
     if (!isAndroid() && isTauri()) {
       const settings = get(appSettings);
       if (settings.autoScanLibrary) {
-        // Quick incremental rescan to catch changes made while app was closed
-        rescanMusic()
-          .then(() => {
-            console.log('[Layout] Startup rescan complete');
-            refreshLibrarySilently();
-          })
-          .catch((e: unknown) => console.warn('[Layout] Startup rescan failed:', e));
-
         startWatcher().catch((e: unknown) => console.warn('[Layout] Auto-start watcher failed:', e));
       }
 

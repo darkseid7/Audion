@@ -209,6 +209,12 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     );
 
+    // Backfill source_type for local tracks that were inserted with NULL
+    let _ = conn.execute(
+        "UPDATE tracks SET source_type = 'local' WHERE source_type IS NULL",
+        [],
+    );
+
     // Backfill play_count from play_history for tracks that have NULL or 0 play_count
     let _ = conn.execute(
         "UPDATE tracks SET play_count = (

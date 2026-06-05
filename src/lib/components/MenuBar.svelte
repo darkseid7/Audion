@@ -2,7 +2,6 @@
   import { selectMusicFolder, addFolder, rescanMusic } from "$lib/api/tauri";
   import {
     loadLibrary,
-    loadAlbumsAndArtists,
     loadPlaylists,
     clearLibrary,
   } from "$lib/stores/library";
@@ -38,9 +37,11 @@
       if (path) {
         isScanning = true;
 
-        // Start progressive scan (clearExisting = true to start fresh)
+        // Set up progressive loading listeners (don't clear existing tracks —
+        // incremental scan only processes changed files, so clearing would
+        // lose all unchanged tracks and their play_counts from the UI)
         const scanStart = performance.now();
-        await progressiveScan.startScan(true);
+        await progressiveScan.startScan(false);
         console.log(
           ` [TIMING] progressiveScan.startScan took ${(performance.now() - scanStart).toFixed(2)}ms`,
         );
@@ -66,19 +67,12 @@
           `Scan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
         );
 
-        // Load albums/artists after progressive track loading completes
-        // this was a huge pain point. i tried to load them simultaneously
-        // but the problems it created, are waaaay too big for minimal benifit
-        const albumsStart = performance.now();
-        await loadAlbumsAndArtists();
+        // Reload full library to ensure play_counts, sort metadata, and all
+        // unchanged tracks are present in the store
+        const reloadStart = performance.now();
+        await Promise.all([loadLibrary(), loadPlaylists()]);
         console.log(
-          ` [TIMING] loadAlbumsAndArtists took ${(performance.now() - albumsStart).toFixed(2)}ms`,
-        );
-
-        const playlistsStart = performance.now();
-        await loadPlaylists();
-        console.log(
-          ` [TIMING] loadPlaylists took ${(performance.now() - playlistsStart).toFixed(2)}ms`,
+          ` [TIMING] loadLibrary+loadPlaylists took ${(performance.now() - reloadStart).toFixed(2)}ms`,
         );
 
         console.log(
@@ -119,9 +113,10 @@
 
       isScanning = true;
 
-      // Clear existing tracks and set up progressive loading
+      // Set up progressive loading listeners (don't clear — incremental scan
+      // only touches changed files, clearing would lose play_counts)
       const scanStart = performance.now();
-      await progressiveScan.startScan(true); // true = clear existing tracks
+      await progressiveScan.startScan(false);
       console.log(
         ` [TIMING] progressiveScan.startScan took ${(performance.now() - scanStart).toFixed(2)}ms`,
       );
@@ -140,17 +135,12 @@
         `Rescan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
       );
 
-      // Load albums/artists after progressive track loading completes
-      const albumsStart = performance.now();
-      await loadAlbumsAndArtists();
+      // Reload full library so play_counts, sort metadata, and all tracks
+      // (including unchanged ones) are correct in the store
+      const reloadStart = performance.now();
+      await Promise.all([loadLibrary(), loadPlaylists()]);
       console.log(
-        ` [TIMING] loadAlbumsAndArtists took ${(performance.now() - albumsStart).toFixed(2)}ms`,
-      );
-
-      const playlistsStart = performance.now();
-      await loadPlaylists();
-      console.log(
-        ` [TIMING] loadPlaylists took ${(performance.now() - playlistsStart).toFixed(2)}ms`,
+        ` [TIMING] loadLibrary+loadPlaylists took ${(performance.now() - reloadStart).toFixed(2)}ms`,
       );
 
       console.log(

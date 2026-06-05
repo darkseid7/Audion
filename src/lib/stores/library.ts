@@ -665,13 +665,12 @@ export async function getFullTracks(
 // LOADING FUNCTIONS
 
 /**
- * Silently refresh the library after watcher events or startup rescan.
- * Loads ALL albums and tracks so sort metadata is always complete.
+ * Silently refresh the library after watcher events.
+ * Uses a single getLibrary() call (returns all data without cover blobs).
  * Does not flash isLoading, preserving scroll position and sort order.
  */
 export async function refreshLibrarySilently(): Promise<void> {
   try {
-    // First get total counts from the library metadata
     const library = await getLibrary();
 
     totalTrackCount = library.tracks.length;
@@ -681,15 +680,9 @@ export async function refreshLibrarySilently(): Promise<void> {
     albumCount.set(totalAlbumCount);
     artistCount.set(totalArtistCount);
 
-    // Load ALL albums and tracks so sort metadata covers everything
-    const [freshTracks, freshAlbums] = await Promise.all([
-      getTracksPaginated(totalTrackCount, 0),
-      getAlbumsPaginated(totalAlbumCount, 0),
-    ]);
-
     // Ingest and update stores (no isLoading flash)
-    const lightTracks = ingestTracks(freshTracks);
-    const lightAlbums = ingestAlbums(freshAlbums);
+    const lightTracks = ingestTracks(library.tracks);
+    const lightAlbums = ingestAlbums(library.albums);
 
     albums.set(lightAlbums);
     artists.set(library.artists);
@@ -702,41 +695,33 @@ export async function refreshLibrarySilently(): Promise<void> {
 }
 
 /**
- * Load library: artists in full, first paginated batch of tracks and albums.
- * Additional items arrive via loadMoreTracks() and loadMoreAlbums().
+ * Load library: all tracks, albums and artists in a single IPC call.
+ * Uses getLibrary() which returns everything without cover blobs (fast).
+ * This ensures sort metadata is always complete from the start.
  */
 export async function loadLibrary(): Promise<void> {
   isLoading.set(true);
   lastError.set(null);
 
   try {
-    console.time("[Library] IPC load initial");
+    console.time("[Library] IPC load");
 
-    // Parallel: library metadata, first track batch, first album batch
-    const [library, initialTracks, initialAlbums] = await Promise.all([
-      getLibrary(),
-      getTracksPaginated(CACHE_CONFIG.TRACK_BATCH_SIZE, 0),
-      getAlbumsPaginated(CACHE_CONFIG.TRACK_BATCH_SIZE, 0), // Paginated albums
-    ]);
+    const library = await getLibrary();
 
-    console.timeEnd("[Library] IPC load initial");
+    console.timeEnd("[Library] IPC load");
 
     // counts
-    // library.tracks.length is the TOTAL track count
-    // library.albums.length is the TOTAL album count
     totalTrackCount = library.tracks.length;
-    totalAlbumCount = library.albums.length; //this is the total, not loaded count
+    totalAlbumCount = library.albums.length;
     totalArtistCount = library.artists.length;
 
     trackCount.set(totalTrackCount);
     albumCount.set(totalAlbumCount);
     artistCount.set(totalArtistCount);
 
-    // tracks (first batch)
-    const lightTracks = ingestTracks(initialTracks);
-
-    // albums (first batch)
-    const lightAlbums = ingestAlbums(initialAlbums);
+    // ingest all tracks and albums
+    const lightTracks = ingestTracks(library.tracks);
+    const lightAlbums = ingestAlbums(library.albums);
 
     // commit to stores
     albums.set(lightAlbums);

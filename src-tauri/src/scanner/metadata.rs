@@ -179,7 +179,7 @@ fn extract_metadata_inner(path: &Path) -> Option<TrackInsert> {
                 track_cover,
                 format,
                 bitrate,
-                source_type: None, // Local file
+                source_type: Some("local".to_string()),
                 cover_url: None,
                 external_id: None,
                 content_hash,
@@ -280,7 +280,7 @@ fn create_fallback_metadata(path: &Path) -> TrackInsert {
         track_cover: None,
         format: None,
         bitrate: None,
-        source_type: None, // Local file
+        source_type: Some("local".to_string()),
         cover_url: None,
         external_id: None,
         content_hash: None, // Will be set later with duration
@@ -356,7 +356,7 @@ fn extract_flac_metadata_fallback(path: &Path, _duration_hint: Option<i32>) -> O
                 track_cover: album_art, // Use same art for track cover
                 format,
                 bitrate: None, // Hard to get bitrate without decoding
-                source_type: None,
+                source_type: Some("local".to_string()),
                 cover_url: None,
                 external_id: None,
                 content_hash: content_hash,
