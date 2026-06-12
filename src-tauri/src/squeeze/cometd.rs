@@ -9,13 +9,9 @@
 
 use crate::squeeze::codec::MacAddress;
 use crate::squeeze::player::{PlayerMap, PlayerState};
-use crate::squeeze::queue::QueueTrack;
 use crate::squeeze::streaming::StreamingState;
 use crate::squeeze::server::HTTP_PORT;
 use axum::extract::State as AxumState;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -978,8 +974,11 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
         crate::squeeze::queue::RepeatMode::All => 2,
     };
 
-    let cur_index = player.queue.current_position().unwrap_or(0);
-    let cur_track = player.queue.current();
+    let cur_track = player.display_track.as_ref().or_else(|| player.queue.current());
+    let cur_index = cur_track
+        .and_then(|track| player.queue.position_of_track_id(track.id))
+        .or_else(|| player.queue.current_position())
+        .unwrap_or(0);
     let duration = cur_track.map(|t| t.duration).unwrap_or(0.0);
     let elapsed = player.get_elapsed_ms() as f64 / 1000.0;
 
@@ -994,17 +993,21 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
             "id": track.id,
             "text": display_text,
             "icon-id": track.id.to_string(),
+            "icon": format!("/music/{}/cover.jpg", track.id),
             "track": track.title,
+            "title": track.title,
             "artist": track.artist,
             "album": track.album,
             "duration": track.duration,
             "trackType": "local",
+            "url": format!("/stream?player={}", player_id),
             "params": {
                 "track_id": track.id,
             },
             "style": "itemplay",
             "artwork_track_id": track.id.to_string(),
             "coverid": track.id.to_string(),
+            "artwork_url": format!("/music/{}/cover.jpg", track.id),
         }));
         // Also keep playlist_loop for explicit status requests
         playlist_loop.push(serde_json::json!({
@@ -1017,6 +1020,8 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
             "trackType": track.format,
             "artwork_track_id": track.id.to_string(),
             "coverid": track.id.to_string(),
+            "artwork_url": format!("/music/{}/cover.jpg", track.id),
+            "url": format!("/stream?player={}", player_id),
         }));
     }
 
@@ -1030,10 +1035,36 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
             "artwork_track_id": track.id.to_string(),
             "coverid": track.id.to_string(),
             "artwork_url": format!("/music/{}/cover.jpg", track.id),
+            "url": format!("/stream?player={}", player_id),
         })
     } else {
         serde_json::json!({})
     };
+
+    let (track_id, title, artist, album, track_type, artwork_url, stream_url) = cur_track
+        .map(|track| {
+            (
+                track.id,
+                track.title.clone(),
+                track.artist.clone(),
+                track.album.clone(),
+                track.format.clone(),
+                format!("/music/{}/cover.jpg", track.id),
+                format!("/stream?player={}", player_id),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        });
+    let coverid = if track_id != 0 { track_id.to_string() } else { String::new() };
 
     serde_json::json!({
         "player_name": player.name,
@@ -1045,6 +1076,18 @@ async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json
         "time": elapsed,
         "rate": 1,
         "duration": duration,
+        "id": track_id,
+        "track_id": track_id,
+        "title": title,
+        "track": title,
+        "artist": artist,
+        "album": album,
+        "current_title": title,
+        "trackType": track_type,
+        "url": stream_url,
+        "coverid": coverid,
+        "artwork_track_id": coverid,
+        "artwork_url": artwork_url,
         "mixer volume": player.volume,
         "playlist repeat": repeat,
         "playlist shuffle": if player.queue.shuffle { 1 } else { 0 },

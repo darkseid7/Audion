@@ -126,6 +126,16 @@ impl PlayQueue {
         self.position
     }
 
+    /// Find a track's current position in playback order.
+    pub fn position_of_track_id(&self, track_id: i64) -> Option<usize> {
+        self.order.iter().position(|&idx| {
+            self.tracks
+                .get(idx)
+                .map(|track| track.id == track_id)
+                .unwrap_or(false)
+        })
+    }
+
     /// Peek at the next track without advancing.
     pub fn peek_next(&self) -> Option<&QueueTrack> {
         let pos = self.position?;
