@@ -24,6 +24,8 @@
     type MergeCoverResult,
     startWatcher,
     stopWatcher,
+    enrichAllAlbumYears,
+    type BatchEnrichResult,
   } from "$lib/api/tauri";
   import { trackCount, playlists, loadLibrary } from "$lib/stores/library";
   import UpdatePopup from "./UpdatePopup.svelte";
@@ -467,6 +469,40 @@
     await deleteListenbrainzToken();
     appSettings.setListenBrainzTokenSet(false, "");
     if ($appSettings.listenBrainzEnabled) appSettings.toggleListenBrainz();
+  }
+
+  // ── MusicBrainz album year enrichment ──────────────────────────────────────
+  let mbEnrichRunning = false;
+  let mbEnrichDone = 0;
+  let mbEnrichTotal = 0;
+  let mbEnrichResult: BatchEnrichResult | null = null;
+  let mbEnrichUnlisten: UnlistenFn | null = null;
+
+  async function handleEnrichAlbumYears() {
+    mbEnrichRunning = true;
+    mbEnrichDone = 0;
+    mbEnrichTotal = 0;
+    mbEnrichResult = null;
+    try {
+      mbEnrichUnlisten = await listen<{ done: number; total: number }>(
+        "album-enrich-progress",
+        (event) => {
+          mbEnrichDone = event.payload.done;
+          mbEnrichTotal = event.payload.total;
+        },
+      );
+      mbEnrichResult = await enrichAllAlbumYears();
+      // Reload library to reflect updated years
+      await loadLibrary();
+    } catch (e) {
+      console.error("[Settings] Album year enrichment failed:", e);
+    } finally {
+      mbEnrichRunning = false;
+      if (mbEnrichUnlisten) {
+        mbEnrichUnlisten();
+        mbEnrichUnlisten = null;
+      }
+    }
   }
 
   function formatSupporterUntil(ts: number | null): string {
@@ -1128,6 +1164,35 @@
           <div class="button-group-row" style="margin-top: var(--spacing-sm); gap: var(--spacing-sm);">
             <a href="https://discord.gg/27XRVQsBd9" target="_blank" rel="noreferrer" class="btn-outline-compact" style="flex: 1; text-align: center;">{$_('settings.openDiscord', { default: 'Open Discord' })}</a>
             <a href="https://resonate.audionplayer.com?ref=audion" target="_blank" rel="noreferrer" class="btn-outline-compact" style="flex: 1; text-align: center;">{$_('settings.openResonate', { default: 'Open Resonate' })}</a>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.musicBrainzEnrich', { default: 'MusicBrainz Album Years' })}</span>
+            <span class="setting-description">{$_('settings.musicBrainzEnrichDesc', { default: 'Fetch missing album years (original & edition) from MusicBrainz' })}</span>
+            <button
+              class="btn-outline-compact btn-full-width"
+              style="margin-top: var(--spacing-sm);"
+              on:click={handleEnrichAlbumYears}
+              disabled={mbEnrichRunning}
+            >
+              {#if mbEnrichRunning}
+                {$_('settings.enriching', { default: 'Fetching...' })} {mbEnrichDone}/{mbEnrichTotal}
+              {:else}
+                {$_('settings.fetchMissingYears', { default: 'Fetch missing album years' })}
+              {/if}
+            </button>
+            {#if mbEnrichRunning && mbEnrichTotal > 0}
+              <div class="limit-bar-thick-wrap" style="margin-top: var(--spacing-xs);">
+                <div class="limit-bar-thick" style="width: {(mbEnrichDone / mbEnrichTotal * 100).toFixed(1)}%; transition: width 0.3s;"></div>
+              </div>
+            {/if}
+            {#if mbEnrichResult}
+              <p style="font-size: 0.75rem; margin-top: 4px; opacity: 0.7;">
+                {$_('settings.enrichResult', { default: '{enriched} enriched, {failed} not found, {total} total', values: { enriched: mbEnrichResult.enriched, failed: mbEnrichResult.failed, total: mbEnrichResult.total } })}
+              </p>
+            {/if}
           </div>
         </div>
       </section>

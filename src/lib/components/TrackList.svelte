@@ -86,6 +86,7 @@
   export let playlistId: number | null = null;
   export let multiSelectMode: boolean = false;
   export let queueTracks: Track[] | null = null; // New prop for unified queue context
+  export let disableVirtualScroll: boolean = false; // When true, render all tracks without virtual scrolling
 
   // Virtual scrolling configuration
   const TRACK_ROW_HEIGHT = 58; // pixels (matches desktop row height in CSS)
@@ -279,6 +280,16 @@
   };
 
   $: {
+    if (disableVirtualScroll) {
+      // No virtual scrolling: render all tracks
+      virtualScrollState = {
+        totalHeight: sortedTracks.length * TRACK_ROW_HEIGHT,
+        startIndex: 0,
+        endIndex: sortedTracks.length,
+        offsetY: 0,
+        visibleTracks: sortedTracks,
+      };
+    } else {
     const totalHeight = sortedTracks.length * TRACK_ROW_HEIGHT;
     const startIndex = Math.max(
       0,
@@ -298,6 +309,7 @@
       offsetY,
       visibleTracks,
     };
+    }
   }
 
   // Infinite scroll: when virtual scroll nears the bottom of loaded tracks,
@@ -949,7 +961,7 @@
   />
 {/if}
 
-<div class="track-list">
+<div class="track-list" class:no-scroll={disableVirtualScroll}>
   <!-- Header stays fixed -->
   <header
     class="list-header"
@@ -1036,6 +1048,7 @@
     <div
       class="list-body"
       class:no-album={!showAlbum}
+      class:no-scroll={disableVirtualScroll}
       class:with-drag={playlistId !== null && !multiSelectMode}
       class:multiselect={multiSelectMode}
       class:mobile-album={mobileViewMode === "album"}
@@ -1340,6 +1353,11 @@
     overflow: hidden;
   }
 
+  .track-list.no-scroll {
+    height: auto;
+    overflow: visible;
+  }
+
   .list-header {
     display: grid;
     grid-template-columns: 40px 1fr 1fr 80px 36px 100px;
@@ -1442,6 +1460,13 @@
     overflow-x: hidden;
     position: relative;
     overscroll-behavior-y: contain;
+  }
+
+  .list-body.no-scroll {
+    overflow-y: visible;
+    overflow-x: visible;
+    flex: none;
+    overscroll-behavior-y: auto;
   }
 
   /* Virtual scrolling structure */

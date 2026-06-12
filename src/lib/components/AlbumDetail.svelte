@@ -9,11 +9,12 @@
         getTrackCoverSrc,
         formatDuration,
         getReleaseMbInfo,
+        enrichAlbumYear,
         type MbReleaseInfo,
     } from "$lib/api/tauri";
     import { playTracks, currentTrack, isPlaying } from "$lib/stores/player";
     import { goToAlbums, goToArtistDetail, goBack } from "$lib/stores/view";
-    import { loadLibrary, getAlbumCoverFromTracks } from "$lib/stores/library";
+    import { loadLibrary, getAlbumCoverFromTracks, albums } from "$lib/stores/library";
     import TrackList from "./TrackList.svelte";
     import {
         downloadTracks,
@@ -151,6 +152,28 @@
         mbReleaseLoading = true;
         try {
             mbRelease = await getReleaseMbInfo(name, artist);
+            // Persist year to DB if album is missing it
+            if (album && mbRelease && (mbRelease.original_year || mbRelease.year)) {
+                if (album.original_year == null || album.year == null) {
+                    try {
+                        const result = await enrichAlbumYear(album.id, name, artist);
+                        if (result.original_year != null && album.original_year == null) {
+                            album.original_year = result.original_year;
+                        }
+                        if (result.year != null && album.year == null) {
+                            album.year = result.year;
+                        }
+                        // Update the albums store so the grid reflects the change
+                        albums.update(list => list.map(a =>
+                            a.id === album!.id
+                                ? { ...a, year: album!.year, original_year: album!.original_year }
+                                : a
+                        ));
+                    } catch (e) {
+                        console.warn("[AlbumDetail] Failed to persist MB year:", e);
+                    }
+                }
+            }
         } catch (e) {
             console.warn("[AlbumDetail] MB release fetch failed:", e);
         } finally {
@@ -277,6 +300,11 @@
     $: likedTracks = tracks.filter(t => $likedTrackIds.has(t.id));
     $: displayTracks = showOnlyLiked ? likedTracks : tracks;
     $: displayGroupedTracks = showOnlyLiked ? groupTracksByDisc(likedTracks) : groupedTracks;
+
+    // Computed years: prefer DB values, fallback to MB response
+    $: displayOriginalYear = album?.original_year ?? (mbRelease?.original_year ? parseInt(mbRelease.original_year) : null);
+    $: displayEditionYear = album?.year ?? (mbRelease?.year ? parseInt(mbRelease.year) : null);
+    $: displayYear = displayOriginalYear || displayEditionYear;
 
     function handleContextMenu(e: MouseEvent) {
         if (!album) return;
@@ -470,6 +498,13 @@
                     >
                         {album.artist || "Unknown Artist"}
                     </button>
+                    {#if displayYear}
+                        <span class="separator">•</span>
+                        <span class="album-year-display">{displayOriginalYear || displayEditionYear}</span>
+                        {#if displayEditionYear && displayOriginalYear && displayEditionYear !== displayOriginalYear}
+                            <span class="album-edition-display">({$_('album.edition', { default: 'Edition' })}: {displayEditionYear})</span>
+                        {/if}
+                    {/if}
                     <span class="separator">•</span>
                     <span>{$_('album.songs', { values: { count: tracks.length } })}</span>
                     <span class="separator">•</span>
@@ -584,15 +619,18 @@
                 <span class="mb-info-spinner"></span>
                 <span class="mb-info-hint">{$_('album.fetchingReleaseInfo')}</span>
             </div>
-        {:else if mbRelease && (mbRelease.year || mbRelease.label || mbRelease.country || mbRelease.release_type)}
+        {:else if mbRelease && (mbRelease.year || mbRelease.original_year || mbRelease.label || mbRelease.country || mbRelease.release_type)}
             <div class="mb-info-bar">
                 {#if mbRelease.release_type}
                     <span class="mb-chip type-chip"
                         >{mbRelease.release_type}</span
                     >
                 {/if}
-                {#if mbRelease.year}
-                    <span class="mb-chip">{mbRelease.year}</span>
+                {#if mbRelease.original_year}
+                    <span class="mb-chip">{mbRelease.original_year}</span>
+                {/if}
+                {#if mbRelease.year && mbRelease.year !== mbRelease.original_year}
+                    <span class="mb-chip">{$_('album.edition', { default: 'Edition' })}: {mbRelease.year}</span>
                 {/if}
                 {#if mbRelease.label}
                     <span class="mb-chip">
@@ -639,6 +677,7 @@
                         <TrackList
                             tracks={group.tracks}
                             showAlbum={false}
+                            disableVirtualScroll={true}
                             playbackContext={{
                                 type: "album",
                                 albumId,
@@ -908,6 +947,12 @@
 
     .separator {
         color: var(--text-subdued);
+    }
+
+    .album-edition-display {
+        color: var(--text-subdued);
+        font-size: 0.85em;
+        margin-left: 4px;
     }
 
     .album-actions {

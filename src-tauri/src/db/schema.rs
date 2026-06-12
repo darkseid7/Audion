@@ -254,6 +254,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         println!("[DB] Adding missing column 'year' to albums table...");
         let _ = conn.execute("ALTER TABLE albums ADD COLUMN year INTEGER", []);
     }
+    if !column_exists(conn, "albums", "original_year")? {
+        println!("[DB] Adding missing column 'original_year' to albums table...");
+        let _ = conn.execute("ALTER TABLE albums ADD COLUMN original_year INTEGER", []);
+    }
 
     // ─── Sync infrastructure tables ──────────────────────────────────────────
     conn.execute_batch(

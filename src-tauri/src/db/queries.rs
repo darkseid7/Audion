@@ -39,6 +39,7 @@ pub struct Album {
     pub art_data: Option<String>,
     pub art_path: Option<String>,
     pub year: Option<i32>,
+    pub original_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +265,7 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
             artist,
             track.album_art.as_deref(),
             album_year,
+            None, // original_year — populated later via MusicBrainz enrichment
         )?)
     } else {
         None
@@ -426,6 +428,7 @@ fn get_or_create_album(
     artist: Option<&str>,
     art_data: Option<&[u8]>,
     year: Option<i32>,
+    original_year: Option<i32>,
 ) -> Result<i64> {
     // Match by album name + artist to prevent collisions like
     // different artists sharing common titles (e.g. "Greatest Hits").
@@ -455,13 +458,20 @@ fn get_or_create_album(
                 params![y, id],
             )?;
         }
+        // Update original_year if not set yet
+        if let Some(y) = original_year {
+            conn.execute(
+                "UPDATE albums SET original_year = ?1 WHERE id = ?2 AND original_year IS NULL",
+                params![y, id],
+            )?;
+        }
         return Ok(id);
     }
 
     // Create new album
     conn.execute(
-        "INSERT INTO albums (name, artist, year) VALUES (?1, ?2, ?3)",
-        params![name.trim(), normalized_artist, year],
+        "INSERT INTO albums (name, artist, year, original_year) VALUES (?1, ?2, ?3, ?4)",
+        params![name.trim(), normalized_artist, year, original_year],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -818,7 +828,7 @@ pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.name, a.artist, a.art_data, a.art_path, a.year
+        "SELECT a.id, a.name, a.artist, a.art_data, a.art_path, a.year, a.original_year
          FROM albums a
          WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
          ORDER BY a.artist, a.name",
@@ -833,6 +843,7 @@ pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
                 year: row.get(5)?,
+                original_year: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -867,6 +878,7 @@ pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
                 art_data: None,
                 art_path: None,
                 year: None,
+                original_year: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -886,7 +898,7 @@ pub fn get_all_albums_with_paths(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.name, a.artist, a.art_path, a.year
+        "SELECT a.id, a.name, a.artist, a.art_path, a.year, a.original_year
          FROM albums a
          WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
          ORDER BY a.artist, a.name",
@@ -901,6 +913,7 @@ pub fn get_all_albums_with_paths(conn: &Connection) -> Result<Vec<Album>> {
                 art_data: None,
                 art_path: row.get(3)?,
                 year: row.get(4)?,
+                original_year: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -920,7 +933,7 @@ pub fn get_albums_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT a.id, a.name, a.artist, a.art_path, a.year
+        "SELECT a.id, a.name, a.artist, a.art_path, a.year, a.original_year
          FROM albums a
          WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
          ORDER BY a.artist, a.name
@@ -936,6 +949,7 @@ pub fn get_albums_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
                 art_data: None,
                 art_path: row.get(3)?,
                 year: row.get(4)?,
+                original_year: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1059,7 +1073,7 @@ pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track
 
 pub fn get_album_by_id(conn: &Connection, album_id: i64) -> Result<Option<Album>> {
     conn.query_row(
-        "SELECT id, name, artist, art_data, art_path, year FROM albums WHERE id = ?1",
+        "SELECT id, name, artist, art_data, art_path, year, original_year FROM albums WHERE id = ?1",
         [album_id],
         |row| {
             Ok(Album {
@@ -1069,10 +1083,60 @@ pub fn get_album_by_id(conn: &Connection, album_id: i64) -> Result<Option<Album>
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
                 year: row.get(5)?,
+                original_year: row.get(6)?,
             })
         },
     )
     .optional()
+}
+
+/// Update album year and/or original_year from MusicBrainz enrichment.
+pub fn update_album_years(
+    conn: &Connection,
+    album_id: i64,
+    year: Option<i32>,
+    original_year: Option<i32>,
+) -> Result<()> {
+    if let Some(y) = year {
+        conn.execute(
+            "UPDATE albums SET year = ?1 WHERE id = ?2 AND year IS NULL",
+            params![y, album_id],
+        )?;
+    }
+    if let Some(oy) = original_year {
+        conn.execute(
+            "UPDATE albums SET original_year = ?1 WHERE id = ?2 AND original_year IS NULL",
+            params![oy, album_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Get albums that are missing original_year (candidates for MB enrichment).
+pub fn get_albums_missing_original_year(conn: &Connection) -> Result<Vec<Album>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, NULL, a.art_path, a.year, a.original_year
+         FROM albums a
+         WHERE a.original_year IS NULL
+           AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
+
+    let albums = stmt
+        .query_map([], |row| {
+            Ok(Album {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                artist: row.get(2)?,
+                art_data: row.get(3)?,
+                art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(albums)
 }
 
 // Playlist operations
@@ -1606,6 +1670,7 @@ pub fn get_top_albums(conn: &Connection, limit: i32) -> Result<Vec<AlbumWithCoun
                     art_data: row.get(3)?,
                     art_path: row.get(4)?,
                     year: None,
+                    original_year: None,
                 },
                 play_count: row.get(5)?,
             })

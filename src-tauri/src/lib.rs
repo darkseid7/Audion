@@ -627,6 +627,8 @@ pub fn run() {
                     commands::search_releases_mb,
                     commands::get_release_group_tracks_mb,
                     commands::get_artist_top_tracks_mb,
+                    commands::enrich_album_year,
+                    commands::enrich_all_album_years,
                     // Window commands
                     commands::window::get_window_start_mode,
                     commands::window::set_window_start_mode,
@@ -830,6 +832,8 @@ pub fn run() {
                     commands::search_artists_mb,
                     commands::search_releases_mb,
                     commands::get_release_group_tracks_mb,
+                    commands::enrich_album_year,
+                    commands::enrich_all_album_years,
                     // =========================================================================
                     // SYNC COMMANDS
                     // =========================================================================

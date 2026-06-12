@@ -172,6 +172,7 @@ export interface Album {
   art_data: string | null; // old - base64 album art
   art_path?: string | null; // File path to album art
   year?: number | null;
+  original_year?: number | null;
 }
 
 export interface Artist {
@@ -1122,6 +1123,7 @@ export interface MbTrackEnrichment {
 export interface MbReleaseInfo {
   mbid: string | null;
   year: string | null;
+  original_year: string | null;
   country: string | null;
   label: string | null;
   /** e.g. "Album", "EP", "Single", "Live", "Compilation" */
@@ -1169,6 +1171,36 @@ export async function getReleaseMbInfo(
   artistName: string,
 ): Promise<MbReleaseInfo> {
   return await invoke("get_release_mb_info", { albumName, artistName });
+}
+
+export interface AlbumYearEnrichResult {
+  year: number | null;
+  original_year: number | null;
+}
+
+/**
+ * Enrich a single album's year data from MusicBrainz and persist to DB.
+ */
+export async function enrichAlbumYear(
+  albumId: number,
+  albumName: string,
+  artistName: string,
+): Promise<AlbumYearEnrichResult> {
+  return await invoke("enrich_album_year", { albumId, albumName, artistName });
+}
+
+export interface BatchEnrichResult {
+  enriched: number;
+  failed: number;
+  total: number;
+}
+
+/**
+ * Enrich all albums missing original_year from MusicBrainz.
+ * Emits `album-enrich-progress` events with `{ done, total }`.
+ */
+export async function enrichAllAlbumYears(): Promise<BatchEnrichResult> {
+  return await invoke("enrich_all_album_years");
 }
 
 /**

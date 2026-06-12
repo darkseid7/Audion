@@ -457,10 +457,16 @@
                 result = compareText(getAlbumArtistForSort(b), getAlbumArtistForSort(a));
                 break;
             case "year-desc":
-                result = compareNullableNumber(bMeta?.year ?? null, aMeta?.year ?? null);
+                result = compareNullableNumber(
+                    b.original_year ?? b.year ?? bMeta?.year ?? null,
+                    a.original_year ?? a.year ?? aMeta?.year ?? null,
+                );
                 break;
             case "year-asc":
-                result = compareNullableNumber(aMeta?.year ?? null, bMeta?.year ?? null);
+                result = compareNullableNumber(
+                    a.original_year ?? a.year ?? aMeta?.year ?? null,
+                    b.original_year ?? b.year ?? bMeta?.year ?? null,
+                );
                 break;
             case "added-desc":
                 result = compareNullableNumber(
@@ -788,7 +794,7 @@
                 pauseTooltip="Pause"
                 ariaLabel={album.name}
                 primaryText={album.name}
-                secondaryText={(album.artist || "Unknown Artist") + (album.year ? ` · ${album.year}` : '')}
+                secondaryText={(album.artist || "Unknown Artist") + ((album.original_year || album.year) ? ` · ${album.original_year || album.year}` : '')}
                 secondaryAction={album.artist
                     ? () => goToArtistDetail(album.artist!)
                     : null}

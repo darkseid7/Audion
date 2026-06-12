@@ -16,6 +16,7 @@ import {
   getAlbumsPaginated,
   searchLibrary,
   convertFileSrc,
+  enrichAlbumYear,
 } from "$lib/api/tauri";
 import { customArtworks, getCustomArtworkSync } from "./customArtwork";
 import { playlistCovers, getPlaylistCoverSync } from "./playlistCovers";
@@ -688,7 +689,9 @@ export async function refreshLibrarySilently(): Promise<void> {
     artists.set(library.artists);
     tracks.set(lightTracks);
 
-    console.log(`[Library] Silent refresh: ${lightAlbums.length} albums, ${lightTracks.length} tracks`);
+    console.log(
+      `[Library] Silent refresh: ${lightAlbums.length} albums, ${lightTracks.length} tracks`,
+    );
   } catch (error) {
     console.error("[Library] Silent refresh failed:", error);
   }
@@ -727,6 +730,9 @@ export async function loadLibrary(): Promise<void> {
     albums.set(lightAlbums);
     artists.set(library.artists);
     tracks.set(lightTracks);
+
+    // Background: enrich albums missing original_year from MusicBrainz
+    scheduleBackgroundYearEnrichment(lightAlbums);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     lastError.set(message);
@@ -734,6 +740,53 @@ export async function loadLibrary(): Promise<void> {
   } finally {
     isLoading.set(false);
   }
+}
+
+// ── Background year enrichment ──────────────────────────────────────────────
+let yearEnrichmentRunning = false;
+
+/**
+ * Silently enrich albums that are missing `original_year` via MusicBrainz.
+ * Processes up to 50 albums per session, with 1.5s gaps to respect rate limits.
+ * Updates the albums store reactively as each album is enriched.
+ */
+async function scheduleBackgroundYearEnrichment(currentAlbums: Album[]): Promise<void> {
+  if (yearEnrichmentRunning) return;
+
+  const missing = currentAlbums.filter(
+    (a) => a.original_year == null && a.name && a.artist
+  );
+  if (missing.length === 0) return;
+
+  yearEnrichmentRunning = true;
+  const batch = missing.slice(0, 50); // cap per session
+  console.log(`[Library] Background year enrichment: ${batch.length} albums to process`);
+
+  for (const album of batch) {
+    try {
+      const result = await enrichAlbumYear(album.id, album.name, album.artist || "");
+      if (result.original_year != null || result.year != null) {
+        albums.update((list) =>
+          list.map((a) =>
+            a.id === album.id
+              ? {
+                  ...a,
+                  original_year: result.original_year ?? a.original_year,
+                  year: result.year ?? a.year,
+                }
+              : a
+          )
+        );
+      }
+    } catch {
+      // silently skip failures
+    }
+    // 1.5s gap to stay well within MB rate limits
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  yearEnrichmentRunning = false;
+  console.log(`[Library] Background year enrichment complete`);
 }
 
 /**

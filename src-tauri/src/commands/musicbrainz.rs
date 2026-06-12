@@ -390,10 +390,13 @@ struct MbLabel {
 
 #[derive(Debug, Deserialize)]
 struct MbReleaseGroupPartial {
+    id: Option<String>,
     #[serde(rename = "primary-type")]
     primary_type: Option<String>,
     #[serde(rename = "secondary-types")]
     secondary_types: Option<Vec<String>>,
+    #[serde(rename = "first-release-date")]
+    first_release_date: Option<String>,
 }
 
 /// Artist detail response when fetching `inc=artist-rels`.
@@ -451,6 +454,7 @@ pub struct MbTrackEnrichment {
 pub struct MbReleaseInfo {
     pub mbid: Option<String>,
     pub year: Option<String>,
+    pub original_year: Option<String>,
     pub country: Option<String>,
     pub label: Option<String>,
     /// e.g. "Album", "EP", "Single", "Live", "Compilation"
@@ -496,6 +500,46 @@ fn release_type_label(primary: &Option<String>, secondary: &Option<Vec<String>>)
 /// Extract the 4-digit year from a date string like "2001-06-04", "2001", or "2001-06".
 fn year_from_date(date: &str) -> String {
     date.split('-').next().unwrap_or(date).to_string()
+}
+
+/// Strip common reissue/edition suffixes from album names for better MB matching.
+/// e.g. "...And Justice for All (Remastered)" → "...And Justice for All"
+fn clean_album_name(name: &str) -> String {
+    let patterns = [
+        "(remastered)",
+        "(remaster)",
+        "(deluxe edition)",
+        "(deluxe)",
+        "(expanded edition)",
+        "(special edition)",
+        "(bonus track version)",
+        "(bonus tracks)",
+        "(anniversary edition)",
+        "(super deluxe)",
+        "(super deluxe edition)",
+        "[remastered]",
+        "[remaster]",
+        "[deluxe edition]",
+        "[deluxe]",
+        "[expanded edition]",
+        "[special edition]",
+    ];
+    let lower = name.to_lowercase();
+    let mut result = name.to_string();
+    for pat in &patterns {
+        if let Some(pos) = lower.find(pat) {
+            result = result[..pos].trim().to_string();
+            break;
+        }
+    }
+    result
+}
+
+/// Response for a release-group lookup (to get first-release-date).
+#[derive(Debug, Deserialize)]
+struct MbReleaseGroupLookup {
+    #[serde(rename = "first-release-date")]
+    first_release_date: Option<String>,
 }
 
 // ── New Tauri commands ────────────────────────────────────────────────────────
@@ -577,7 +621,11 @@ pub async fn enrich_track_metadata_mb(
 /// Search MusicBrainz for a release matching the given album + artist name.
 /// Returns label, release year, country, and release type (Album/EP/Single/etc.).
 ///
-/// Uses 1 HTTP request: `/release?query=...&inc=labels+release-groups`.
+/// Uses 1-2 HTTP requests:
+/// 1. `/release?query=...&inc=labels+release-groups` to find the release.
+/// 2. `/release-group/{id}` to get `first-release-date` (the search API doesn't include it).
+///
+/// Album names are cleaned of common suffixes like "(Remastered)" before searching.
 #[tauri::command]
 pub async fn get_release_mb_info(
     album_name: String,
@@ -585,12 +633,14 @@ pub async fn get_release_mb_info(
 ) -> Result<MbReleaseInfo, String> {
     let client = mb_client()?;
 
+    let cleaned_name = clean_album_name(&album_name);
+
     let resp = client
         .get(format!("{}/release", MB_API_BASE))
         .query(&[
             (
                 "query",
-                format!("release:\"{}\" AND artist:\"{}\"", album_name, artist_name),
+                format!("release:\"{}\" AND artist:\"{}\"", cleaned_name, artist_name),
             ),
             ("limit", "1".into()),
             ("inc", "labels+release-groups".into()),
@@ -615,6 +665,7 @@ pub async fn get_release_mb_info(
             return Ok(MbReleaseInfo {
                 mbid: None,
                 year: None,
+                original_year: None,
                 country: None,
                 label: None,
                 release_type: None,
@@ -623,6 +674,40 @@ pub async fn get_release_mb_info(
     };
 
     let year = release.date.as_deref().map(year_from_date);
+
+    // The search API returns a partial release-group without first-release-date.
+    // Try to get it from the search response first; if missing, fetch the release-group directly.
+    let mut original_year = release
+        .release_group
+        .as_ref()
+        .and_then(|rg| rg.first_release_date.as_deref())
+        .filter(|d| !d.is_empty())
+        .map(year_from_date);
+
+    if original_year.is_none() {
+        if let Some(rg_id) = release.release_group.as_ref().and_then(|rg| rg.id.as_deref()) {
+            // Small delay to respect MB rate limit (1 req/sec)
+            sleep(Duration::from_millis(1100)).await;
+
+            if let Ok(rg_resp) = client
+                .get(format!("{}/release-group/{}", MB_API_BASE, rg_id))
+                .query(&[("fmt", "json")])
+                .send()
+                .await
+            {
+                if rg_resp.status().is_success() {
+                    if let Ok(rg_data) = rg_resp.json::<MbReleaseGroupLookup>().await {
+                        original_year = rg_data
+                            .first_release_date
+                            .as_deref()
+                            .filter(|d| !d.is_empty())
+                            .map(year_from_date);
+                    }
+                }
+            }
+        }
+    }
+
     let label = release
         .label_info
         .as_deref()
@@ -637,6 +722,7 @@ pub async fn get_release_mb_info(
     Ok(MbReleaseInfo {
         mbid: Some(release.id),
         year,
+        original_year,
         country: release.country,
         label,
         release_type,
@@ -817,6 +903,119 @@ pub async fn get_artist_discography_mb(
     });
 
     Ok(items)
+}
+
+// ── Album year enrichment ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumYearEnrichResult {
+    pub year: Option<i32>,
+    pub original_year: Option<i32>,
+}
+
+/// Parse a year string (e.g. "2001") into an i32.
+fn parse_year_str(s: &str) -> Option<i32> {
+    let y: i32 = s.parse().ok()?;
+    if (1900..=2100).contains(&y) {
+        Some(y)
+    } else {
+        None
+    }
+}
+
+/// Enrich a single album's year and original_year by querying MusicBrainz.
+/// Writes the results to the local database.
+#[tauri::command]
+pub async fn enrich_album_year(
+    album_id: i64,
+    album_name: String,
+    artist_name: String,
+    db: tauri::State<'_, crate::db::Database>,
+) -> Result<AlbumYearEnrichResult, String> {
+    let mb_info = get_release_mb_info(album_name, artist_name).await?;
+
+    let year = mb_info.year.as_deref().and_then(parse_year_str);
+    let original_year = mb_info.original_year.as_deref().and_then(parse_year_str);
+
+    if year.is_some() || original_year.is_some() {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::update_album_years(&conn, album_id, year, original_year)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(AlbumYearEnrichResult {
+        year,
+        original_year,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchEnrichResult {
+    pub enriched: u32,
+    pub failed: u32,
+    pub total: u32,
+}
+
+/// Enrich all albums that are missing `original_year` by querying MusicBrainz.
+/// Emits `album-enrich-progress` events with `{ done, total }` payloads.
+#[tauri::command]
+pub async fn enrich_all_album_years(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::db::Database>,
+) -> Result<BatchEnrichResult, String> {
+    use tauri::Emitter;
+
+    let albums = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::get_albums_missing_original_year(&conn).map_err(|e| e.to_string())?
+    };
+
+    let total = albums.len() as u32;
+    let mut enriched: u32 = 0;
+    let mut failed: u32 = 0;
+
+    for (i, album) in albums.iter().enumerate() {
+        let artist = album.artist.as_deref().unwrap_or("");
+        match get_release_mb_info(album.name.clone(), artist.to_string()).await {
+            Ok(mb_info) => {
+                let year = mb_info.year.as_deref().and_then(parse_year_str);
+                let original_year = mb_info.original_year.as_deref().and_then(parse_year_str);
+
+                if year.is_some() || original_year.is_some() {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    if crate::db::queries::update_album_years(
+                        &conn, album.id, year, original_year,
+                    )
+                    .is_ok()
+                    {
+                        enriched += 1;
+                    } else {
+                        failed += 1;
+                    }
+                } else {
+                    failed += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(album = %album.name, error = %e, "MB enrichment failed");
+                failed += 1;
+            }
+        }
+
+        let _ = app.emit(
+            "album-enrich-progress",
+            serde_json::json!({ "done": i + 1, "total": total }),
+        );
+
+        // Rate limit: 1.1s between requests (MusicBrainz policy)
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+
+    Ok(BatchEnrichResult {
+        enriched,
+        failed,
+        total,
+    })
 }
 // ── Discovery search types & commands ────────────────────────────────────────
 
