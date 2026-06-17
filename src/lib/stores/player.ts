@@ -80,6 +80,18 @@ import {
 // Interval for polling native playback state
 let nativeStatePoller: ReturnType<typeof setInterval> | null = null;
 
+// Watchdog: if the native backend reports the position stuck at/past the
+// track duration while still "playing", the TrackFinished event has been
+// lost (or never fired for this format) and we must manually advance the
+// queue. Reset on every new track and when an explicit end event arrives.
+let pendingForcedEnd: ReturnType<typeof setTimeout> | null = null;
+function clearPendingForcedEnd() {
+  if (pendingForcedEnd !== null) {
+    clearTimeout(pendingForcedEnd);
+    pendingForcedEnd = null;
+  }
+}
+
 // HTML5 Audio element for streaming (initialized lazily)
 let html5Audio: HTMLAudioElement | null = null;
 
@@ -870,10 +882,37 @@ function startStatePoller(): void {
 
       if (get(activeBackend) === "native") {
         const state = await nativeAudioGetState();
+        const uiDuration = get(duration);
 
-        currentTime.set(state.position);
+        // Only advance currentTime while the backend reports playback.
+        // Otherwise we can keep pushing the position past duration when the
+        // last track of an album has ended but the UI hasn't caught up yet,
+        // making the counter appear to run to infinity.
+        //
+        // Clamp to the UI duration (from the database) so the counter never
+        // runs past the displayed end. The Rust backend can fail to detect a
+        // file's duration (e.g. some VBR MP3s return n_frames=None), in
+        // which case position_secs() in audio.rs is unclamped and grows
+        // indefinitely — without this clamp the counter visibly counts to
+        // infinity on the last track of an album.
+        if (state.is_playing) {
+          currentTime.set(
+            uiDuration > 0 ? Math.min(state.position, uiDuration) : state.position,
+          );
+        } else if (
+          get(isPlaying) &&
+          ((state.duration > 0 && state.position >= state.duration) ||
+            (uiDuration > 0 && state.position >= uiDuration))
+        ) {
+          // Backend stopped at/past the end — snap UI to track end.
+          currentTime.set(state.duration > 0 ? state.duration : uiDuration);
+        }
         if (state.duration > 0) {
           duration.set(state.duration);
+        } else if (uiDuration > 0) {
+          // Backend has no duration but the DB does — keep the UI duration
+          // we already trust so the progress bar / counter remain stable.
+          duration.set(uiDuration);
         } else {
           console.warn(
             "[Poller] Native backend reported 0 duration for track at:",
@@ -881,17 +920,57 @@ function startStatePoller(): void {
           );
         }
 
+        // Watchdog: if the backend keeps reporting is_playing=true with the
+        // position stuck at/past the track end, the TrackFinished event has
+        // been lost (e.g. last track of an album where the rodio queue never
+        // completes for some formats). Schedule a forced end-of-track after a
+        // short delay so the counter doesn't run to infinity and the queue
+        // actually advances / stops.
+        //
+        // Fall back to the UI duration when the backend couldn't determine
+        // the file's duration — otherwise the watchdog never fires for those
+        // files and the counter is left running past the end.
+        const effectiveDuration =
+          state.duration > 0 ? state.duration : uiDuration;
+        if (
+          state.is_playing &&
+          effectiveDuration > 0 &&
+          state.position >= effectiveDuration - 0.05 // tiny tolerance
+        ) {
+          if (pendingForcedEnd === null) {
+            pendingForcedEnd = setTimeout(() => {
+              pendingForcedEnd = null;
+              if (get(activeBackend) !== "native") return;
+              const st = get(currentTime);
+              const du = get(duration);
+              if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
+                console.warn(
+                  "[Player] Forced track end via watchdog (backend missed TrackFinished event)",
+                );
+                // Make sure the native backend actually stops playing — if
+                // it's stuck emitting silence past the end, this is the only
+                // way to make the queue advance to the next track (or stop).
+                nativeAudioStop().catch(console.error);
+                handleTrackEnd();
+              }
+            }, 400);
+          }
+        } else {
+          clearPendingForcedEnd();
+        }
+
         // Poll for audio events
         const event = await nativeAudioPollEvent();
 
         if (event.type === "TrackFinished") {
           // Track ended naturally, nothing was preloaded.
-
+          clearPendingForcedEnd();
           handleTrackEnd();
         } else if (event.type === "TrackAdvanced") {
           // Gapless advance: audio backend already moved to the next track.
           // We must NOT call nativeAudioPlay() — that would restart it.
           // Just advance the UI queue index and update metadata.
+          clearPendingForcedEnd();
           handleGaplessAdvance();
         } else if (event.type === "StateChanged") {
           // Backend confirmed a seek or loop — update UI immediately
@@ -927,11 +1006,7 @@ function startStatePoller(): void {
       } else if (get(activeBackend) === "html5" && html5Audio) {
         const pos = html5Audio.currentTime;
         const dur = html5Audio.duration || 0;
-
-        currentTime.set(pos);
-        if (dur > 0 && !isNaN(dur)) {
-          duration.set(dur);
-        }
+        const uiDuration = get(duration);
 
         // Sync isPlaying state (HTML5 events should handle this, but poller is a good fallback)
         const playing = !html5Audio.paused && !html5Audio.ended;
@@ -941,6 +1016,53 @@ function startStatePoller(): void {
             isPlaying.set(playing);
             updateMediaSessionPlaybackState(playing ? "playing" : "paused");
           }
+        }
+
+        // Only advance currentTime while the audio is actually playing.
+        // If the track has ended (or stalled past duration) we MUST NOT keep
+        // pushing the position forward — that's what caused the "counter
+        // counts to infinity on the last track of an album" bug when the
+        // `ended` event was missed or delayed.
+        //
+        // Clamp to the UI duration (from the database) for live streams and
+        // formats where audio.duration is 0/Infinity — otherwise the counter
+        // runs past the displayed end.
+        if (playing) {
+          currentTime.set(uiDuration > 0 ? Math.min(pos, uiDuration) : pos);
+        } else if (get(isPlaying) && (html5Audio.ended || (dur > 0 && pos >= dur))) {
+          // Audio finished but UI still thinks we're playing — snap to end.
+          currentTime.set(dur > 0 ? dur : pos);
+        }
+        if (dur > 0 && !isNaN(dur)) {
+          duration.set(dur);
+        } else if (uiDuration > 0) {
+          duration.set(uiDuration);
+        }
+
+        // Watchdog: same as the native branch — if the browser hasn't fired
+        // `ended` but the position is stuck at/past duration, force the end.
+        // Fall back to the UI duration for streams/odd formats where
+        // audio.duration is 0.
+        const effectiveDuration = dur > 0 ? dur : uiDuration;
+        if (playing && effectiveDuration > 0 && pos >= effectiveDuration - 0.05) {
+          if (pendingForcedEnd === null) {
+            pendingForcedEnd = setTimeout(() => {
+              pendingForcedEnd = null;
+              if (get(activeBackend) !== "html5" || !html5Audio) return;
+              const st = get(currentTime);
+              const du = get(duration);
+              if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
+                console.warn(
+                  "[Player] Forced track end via watchdog (HTML5 missed `ended` event)",
+                );
+                html5Audio.pause();
+                html5Audio.currentTime = 0;
+                handleTrackEnd();
+              }
+            }, 400);
+          }
+        } else {
+          clearPendingForcedEnd();
         }
 
         // Emit time update for plugins
@@ -1273,6 +1395,7 @@ export async function playTrack(
   // Reset playStartTime — play counting only happens on natural track completion
   // (handleTrackEnd / handleGaplessAdvance), not on manual skip/play.
   playStartTime = Date.now();
+  clearPendingForcedEnd();
 
   // ListenBrainz: notify 'playing_now'
   if (get(appSettings).listenBrainzEnabled) {
