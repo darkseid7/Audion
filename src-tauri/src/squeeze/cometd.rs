@@ -949,7 +949,7 @@ async fn build_serverstatus(state: &CometdState) -> serde_json::Value {
     })
 }
 
-async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json::Value {
+pub async fn build_player_status(state: &CometdState, player_id: &str) -> serde_json::Value {
     let mac = parse_mac_address(player_id);
     let players = state.players.lock().await;
 
@@ -1332,7 +1332,7 @@ async fn cometd_start_current_track(state: &CometdState, player_id: &str, mac: &
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-fn parse_mac_address(mac_str: &str) -> MacAddress {
+pub fn parse_mac_address(mac_str: &str) -> MacAddress {
     let parts: Vec<&str> = mac_str.split(':').collect();
     if parts.len() != 6 {
         return MacAddress([0; 6]);

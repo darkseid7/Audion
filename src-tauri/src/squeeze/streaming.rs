@@ -61,7 +61,7 @@ impl StreamingState {
     }
 }
 
-/// Combined state for the HTTP server (streaming + cometd).
+/// Combined state for the HTTP server (streaming + cometd + webui).
 #[derive(Clone)]
 pub struct HttpState {
     pub streaming: StreamingState,
@@ -147,12 +147,9 @@ fn guess_content_type(path: &PathBuf) -> String {
     .to_string()
 }
 
-/// LMS-compatible root handler — players may probe this to verify the server is alive.
-async fn root_handler() -> impl IntoResponse {
-    axum::response::Html(
-        "<html><head><title>Audion</title></head><body><h1>Audion Squeeze Server</h1></body></html>"
-    )
-}
+// Note: the LMS-compatible root handler was replaced by the Now Playing
+// page in `crate::squeeze::webui` — it's served from the same port (9000)
+// and is what the Eversolo's "Squeeze" tab loads.
 
 /// LMS-compatible JSONRPC handler — returns minimal valid responses.
 /// Players (e.g. Eversolo) may call this to verify the server before connecting via SlimProto.
@@ -268,11 +265,39 @@ async fn cover_art_handler(
     }
 }
 
-/// Catch-all handler — log any unhandled requests for debugging.
-async fn fallback_handler(uri: axum::http::Uri, method: axum::http::Method, body: axum::body::Bytes) -> impl IntoResponse {
+/// Catch-all handler. The Eversolo's "Squeeze" tab and many other LMS
+/// clients probe a handful of legacy paths (e.g. `/index.html`,
+/// `/Default/index.html`, `/html/Default/index.html`) before/while
+/// looking for the LMS Default skin. We don't ship that skin (it would
+/// need a full JSON-RPC library implementation), so instead we serve
+/// the self-contained Now Playing page for any GET to an unknown path.
+/// Non-GET requests (which are almost always automation) still get the
+/// original "OK" response to keep backward compat with anything that
+/// depends on it.
+async fn fallback_handler(
+    State(state): State<HttpState>,
+    uri: axum::http::Uri,
+    method: axum::http::Method,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
     let body_str = String::from_utf8_lossy(&body);
-    tracing::info!("Squeeze HTTP: unhandled {} {} ({} bytes): {}", method, uri, body.len(), body_str);
-    (StatusCode::OK, "OK")
+    tracing::info!(
+        "Squeeze HTTP: unhandled {} {} ({} bytes): {}",
+        method,
+        uri,
+        body.len(),
+        body_str
+    );
+
+    if method == axum::http::Method::GET {
+        // The request is almost certainly a browser/WebView. Serve the
+        // Now Playing page so the Eversolo tab (and any other HTTP
+        // client pointed at us) shows a useful UI instead of "OK".
+        let _ = state; // state unused here, but kept in the signature for clarity
+        crate::squeeze::webui::now_playing_page().await.into_response()
+    } else {
+        (StatusCode::OK, "OK").into_response()
+    }
 }
 
 /// Cometd endpoint handler — delegates to the cometd module.
@@ -306,12 +331,12 @@ pub async fn start_streaming_server_with_listener(
         .route("/cometd/subscribe", axum::routing::post(cometd_route_handler))
         .route("/cometd/disconnect", axum::routing::post(cometd_route_handler))
         .route("/cometd/handshake", axum::routing::post(cometd_route_handler))
-        .route("/", axum::routing::get(root_handler))
         .route("/jsonrpc.js", axum::routing::post(jsonrpc_handler).get(server_status_handler))
         .route("/jsonrpc", axum::routing::post(jsonrpc_handler).get(server_status_handler))
         .route("/status", axum::routing::get(server_status_handler))
         .fallback(fallback_handler)
-        .with_state(http_state)
+        .with_state(http_state.clone())
+        .merge(crate::squeeze::webui::webui_router(http_state))
         .layer(axum::middleware::from_fn(http_logging_middleware));
 
     tracing::info!("Squeeze HTTP: listening on port {}", listener.local_addr().map(|a| a.port()).unwrap_or(0));

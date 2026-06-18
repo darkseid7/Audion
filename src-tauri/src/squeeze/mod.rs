@@ -8,6 +8,7 @@ pub mod player;
 pub mod queue;
 pub mod server;
 pub mod streaming;
+pub mod webui;
 
 use cometd::CometdState;
 use player::PlayerMap;

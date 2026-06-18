@@ -249,60 +249,12 @@ async fn handle_connection(
                     }
                     0x7689a05f | 0x7689e01f | 0x7689a25d => {
                         // Next track
-
-                        {
-                            let mut map = players.lock().await;
-                            if let Some(player) = map.get_mut(&mac) {
-                                player.display_track = None;
-                                let _ = player.stop().await;
-                                let _ = player.flush().await;
-                                player.suppress_track_finished = true;
-                            }
-                        }
-                        let has_next = {
-                            let mut map = players.lock().await;
-                            if let Some(player) = map.get_mut(&mac) {
-                                if player.prefetched_generation.is_some() {
-                                    player.prefetched_generation = None;
-                                    player.queue.current().is_some()
-                                } else {
-                                    player.queue.next().is_some()
-                                }
-                            } else {
-                                false
-                            }
-                        };
-                        if has_next {
-                            handle_butn_start_track(&mac, &players, &streaming).await;
-                        }
+                        control_next(&mac, &players, &streaming).await;
                         cometd.notify_player_status(&mac_str).await;
                     }
                     0x7689c03f | 0x7689d02f | 0x7689c23d => {
                         // Previous track
-
-                        {
-                            let mut map = players.lock().await;
-                            if let Some(player) = map.get_mut(&mac) {
-                                player.display_track = None;
-                                let _ = player.stop().await;
-                                let _ = player.flush().await;
-                                player.suppress_track_finished = true;
-                                if player.prefetched_generation.is_some() {
-                                    player.prefetched_generation = None;
-                                }
-                            }
-                        }
-                        let has_prev = {
-                            let mut map = players.lock().await;
-                            if let Some(player) = map.get_mut(&mac) {
-                                player.queue.previous().is_some()
-                            } else {
-                                false
-                            }
-                        };
-                        if has_prev {
-                            handle_butn_start_track(&mac, &players, &streaming).await;
-                        }
+                        control_previous(&mac, &players, &streaming).await;
                         cometd.notify_player_status(&mac_str).await;
                     }
                     _ => {
@@ -566,5 +518,67 @@ async fn handle_butn_start_track(
         if let Err(e) = player.start_stream(HTTP_PORT, 0).await {
             tracing::error!("Squeeze: BUTN start_stream failed: {}", e);
         }
+    }
+}
+
+/// Advance the queue to the next track and start streaming it.
+/// Shared between the IR BUTN handler and HTTP control endpoints.
+pub async fn control_next(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+) {
+    {
+        let mut map = players.lock().await;
+        if let Some(player) = map.get_mut(mac) {
+            player.display_track = None;
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+            player.suppress_track_finished = true;
+            if player.prefetched_generation.is_some() {
+                player.prefetched_generation = None;
+            }
+        }
+    }
+    let has_next = {
+        let mut map = players.lock().await;
+        match map.get_mut(mac) {
+            Some(player) => player.queue.next().is_some(),
+            None => false,
+        }
+    };
+    if has_next {
+        handle_butn_start_track(mac, players, streaming).await;
+    }
+}
+
+/// Rewind the queue to the previous track and start streaming it.
+/// Shared between the IR BUTN handler and HTTP control endpoints.
+pub async fn control_previous(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+) {
+    {
+        let mut map = players.lock().await;
+        if let Some(player) = map.get_mut(mac) {
+            player.display_track = None;
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+            player.suppress_track_finished = true;
+            if player.prefetched_generation.is_some() {
+                player.prefetched_generation = None;
+            }
+        }
+    }
+    let has_prev = {
+        let mut map = players.lock().await;
+        match map.get_mut(mac) {
+            Some(player) => player.queue.previous().is_some(),
+            None => false,
+        }
+    };
+    if has_prev {
+        handle_butn_start_track(mac, players, streaming).await;
     }
 }
