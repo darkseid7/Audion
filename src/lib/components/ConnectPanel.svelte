@@ -23,57 +23,38 @@
     squeezeStartServer,
     squeezeStopServer,
     squeezeIsRunning,
-    squeezeGetPlayers,
     squeezePlay,
     type SqueezePlayerInfo,
   } from "$lib/api/tauri";
   import { get } from "svelte/store";
-  import { createEventDispatcher, onMount, onDestroy } from "svelte";
-  import { activeSqueezePlayer, squeezePlayerState } from "$lib/stores/squeeze";
+  import { createEventDispatcher, onMount } from "svelte";
+  import {
+    activeSqueezePlayer,
+    squeezePlayerState,
+    discoveredSqueezePlayers,
+    startGlobalSqueezeDiscovery,
+    stopGlobalSqueezeDiscovery,
+  } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
 
   // ── Squeeze state ──────────────────────────────────────────────────────────
+  // Player list + auto-connect polling live in src/lib/stores/squeeze.ts
+  // (started from +page.svelte so the panel can be closed and the
+  // Eversolo still gets picked up the moment it appears on the network).
   let squeezeRunning = false;
-  let squeezePlayers: SqueezePlayerInfo[] = [];
-  let squeezePolling: ReturnType<typeof setInterval> | null = null;
   let squeezeStarting = false;
+
+  $: squeezePlayers = $discoveredSqueezePlayers;
 
   onMount(async () => {
     try {
       squeezeRunning = await squeezeIsRunning();
-      if (squeezeRunning) startSqueezePolling();
+      // Make sure the global discovery is alive even if the user reached
+      // this panel before +page.svelte finished booting.
+      if (squeezeRunning) await startGlobalSqueezeDiscovery();
     } catch {}
   });
-
-  onDestroy(() => {
-    if (squeezePolling) clearInterval(squeezePolling);
-  });
-
-  function startSqueezePolling() {
-    if (squeezePolling) return;
-    pollSqueezePlayers();
-    squeezePolling = setInterval(pollSqueezePlayers, 1000);
-  }
-
-  function stopSqueezePolling() {
-    if (squeezePolling) {
-      clearInterval(squeezePolling);
-      squeezePolling = null;
-    }
-  }
-
-  async function pollSqueezePlayers() {
-    try {
-      squeezePlayers = await squeezeGetPlayers();
-      // Auto-connect: select first player when detected and none active
-      if (squeezePlayers.length > 0 && !$activeSqueezePlayer) {
-        activeSqueezePlayer.set(squeezePlayers[0].mac);
-        activeBackend.set("squeeze");
-        activeRemoteDevice.set(null);
-      }
-    } catch {}
-  }
 
   async function toggleSqueezeServer() {
     squeezeStarting = true;
@@ -81,8 +62,7 @@
       if (squeezeRunning) {
         await squeezeStopServer();
         squeezeRunning = false;
-        squeezePlayers = [];
-        stopSqueezePolling();
+        stopGlobalSqueezeDiscovery();
         if ($activeSqueezePlayer) {
           activeSqueezePlayer.set(null);
           activeBackend.set("none");
@@ -90,7 +70,7 @@
       } else {
         await squeezeStartServer();
         squeezeRunning = true;
-        startSqueezePolling();
+        await startGlobalSqueezeDiscovery();
       }
     } catch (e) {
       console.error("Squeeze toggle error:", e);

@@ -1,7 +1,10 @@
 import { writable, get } from "svelte/store";
 import {
   squeezeGetPlayerState,
+  squeezeGetPlayers,
   squeezeStop,
+  squeezeStartServer,
+  squeezeIsRunning,
   getTrackCoverSrc,
   getTrackById,
   type SqueezePlayerInfo,
@@ -16,6 +19,7 @@ import {
   shuffle,
   repeat,
 } from "$lib/stores/player";
+import { activeRemoteDevice } from "$lib/stores/websocket";
 import {
   getTrackByIdSync,
   incrementPlayCount,
@@ -26,8 +30,77 @@ import { recordTrackPlay } from "$lib/stores/activity";
 export const activeSqueezePlayer = writable<string | null>(null);
 export const squeezePlayerState = writable<SqueezePlayerInfo | null>(null);
 
+/**
+ * Players currently visible on the network. Updated by the module-level
+ * discovery poll started in `startGlobalSqueezeDiscovery()` so every
+ * consumer (notably the ConnectPanel) sees the same list without having
+ * to mount and run its own setInterval.
+ */
+export const discoveredSqueezePlayers = writable<SqueezePlayerInfo[]>([]);
+
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let volumeCooldownUntil = 0;
+
+let discoveryInterval: ReturnType<typeof setInterval> | null = null;
+let discoveryStarting = false;
+
+/**
+ * Idempotent. Starts a 1 Hz poll that:
+ *   1. Keeps `discoveredSqueezePlayers` in sync with the backend.
+ *   2. Auto-selects the first discovered player when nothing is active,
+ *      so an Eversolo (or any Squeeze player) that comes online is
+ *      picked up immediately without the user having to open the
+ *      Connect panel.
+ *
+ * The poll keeps running as long as the Squeeze server is up; it stops
+ * when `stopGlobalSqueezeDiscovery()` is called (e.g. when the user
+ * hits the Stop button in the Connect panel).
+ */
+export async function startGlobalSqueezeDiscovery(): Promise<void> {
+  if (discoveryInterval || discoveryStarting) return;
+  discoveryStarting = true;
+  try {
+    // Make sure the server is up before we start polling. If it's already
+    // running this resolves immediately; otherwise it boots it.
+    if (!(await squeezeIsRunning().catch(() => false))) {
+      await squeezeStartServer().catch((e) =>
+        console.warn("[SQUEEZE] Auto-start failed:", e),
+      );
+    }
+    // First tick immediately so the UI doesn't have to wait a full
+    // second for the initial state.
+    await pollSqueezePlayersOnce();
+    discoveryInterval = setInterval(pollSqueezePlayersOnce, 1000);
+  } finally {
+    discoveryStarting = false;
+  }
+}
+
+export function stopGlobalSqueezeDiscovery(): void {
+  if (discoveryInterval) {
+    clearInterval(discoveryInterval);
+    discoveryInterval = null;
+  }
+  discoveredSqueezePlayers.set([]);
+}
+
+async function pollSqueezePlayersOnce(): Promise<void> {
+  try {
+    const players = await squeezeGetPlayers();
+    discoveredSqueezePlayers.set(players ?? []);
+    // Auto-connect: pick the first available player when no squeeze
+    // player is currently selected. Mirrors the previous in-panel logic
+    // so the experience is identical whether the user opens the Connect
+    // panel or just lets the Eversolo come online on its own.
+    if (players && players.length > 0 && !get(activeSqueezePlayer)) {
+      activeSqueezePlayer.set(players[0].mac);
+      activeBackend.set("squeeze");
+      activeRemoteDevice.set(null);
+    }
+  } catch {
+    // Server may have been stopped mid-tick; ignore.
+  }
+}
 
 // Watchdog: some LMS hardware players (e.g. Eversolo) don't transition to
 // "Stopped" after the last track of an album finishes — they keep reporting
