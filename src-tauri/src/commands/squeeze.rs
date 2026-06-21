@@ -484,7 +484,7 @@ pub async fn squeeze_get_queue(
 pub async fn squeeze_insert_queue(
     mac: String,
     track_ids: Vec<i64>,
-    position: usize,
+    position: i64,
     state: State<'_, SqueezeState>,
     db: State<'_, Database>,
 ) -> Result<(), String> {
@@ -515,6 +515,13 @@ pub async fn squeeze_insert_queue(
     let server = state.0.lock().await;
     let mut map = server.players.lock().await;
     let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
+    // -1 means "append to end". Anything ≥ 0 is a real position, clamped
+    // to the queue length inside insert_tracks.
+    let position: usize = if position < 0 {
+        player.queue.len()
+    } else {
+        position as usize
+    };
     player.queue.insert_tracks(tracks, position);
 
     Ok(())

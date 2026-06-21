@@ -13,6 +13,7 @@ export type ViewType =
   | "playlist-detail"
   | "liked-songs"
   | "listen-later"
+  | "recently-played"
   | "plugins"
   | "settings"
   | "listenbrainz"
@@ -153,6 +154,10 @@ export function goToLikedSongs(): void {
 
 export function goToListenLater(): void {
   currentView.set({ type: "listen-later" });
+}
+
+export function goToRecentlyPlayed(): void {
+  currentView.set({ type: "recently-played" });
 }
 
 export function goToListenBrainz(): void {

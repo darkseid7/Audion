@@ -997,6 +997,7 @@
         <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
+    <span class="col-header col-cover" aria-hidden="true"></span>
     <button
       class="col-header col-artist sortable"
       on:click={() => toggleSort("title")}
@@ -1167,44 +1168,45 @@
                 {/if}
               </span>
 
-              {#if $isMobile}
-                <span class="col-cover">
-                  <div class="cover-wrapper">
-                    {#if albumArt && !failedImages.has(albumArt)}
-                      <img
-                        src={albumArt}
-                        alt="Album cover"
-                        class="cover-image"
-                        loading="lazy"
-                        decoding="async"
-                        on:error={() => handleImageError(albumArt)}
-                      />
-                    {:else}
-                      <div class="cover-placeholder">
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          width="16"
-                          height="16"
-                        >
-                          <path
-                            d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                          />
-                        </svg>
-                      </div>
-                    {/if}
-                    <div class="cover-play-overlay">
+              <span class="col-cover">
+                <div class="cover-wrapper">
+                  {#if albumArt && !failedImages.has(albumArt)}
+                    <img
+                      src={albumArt}
+                      alt="Album cover"
+                      class="cover-image"
+                      loading="lazy"
+                      decoding="async"
+                      on:error={() => handleImageError(albumArt)}
+                    />
+                  {:else}
+                    <div class="cover-placeholder">
                       <svg
                         viewBox="0 0 24 24"
                         fill="currentColor"
-                        width="18"
-                        height="18"
+                        width="16"
+                        height="16"
                       >
-                        <path d="M8 5v14l11-7z" />
+                        <path
+                          d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
+                        />
                       </svg>
                     </div>
+                  {/if}
+                  <div class="cover-play-overlay">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      width="18"
+                      height="18"
+                    >
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
                   </div>
-                </span>
+                </div>
+              </span>
+
+              {#if $isMobile}
                 <div class="col-title">
                   <div class="title-row">
                     <span class="track-name truncate"
@@ -1360,7 +1362,7 @@
 
   .list-header {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 40px 56px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-md);
     padding-right: calc(var(--spacing-md) + var(--scrollbar-width, 0px));
@@ -1379,15 +1381,15 @@
   }
 
   .list-header.with-drag {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 32px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.no-album {
-    grid-template-columns: 40px 1fr 80px 36px 100px;
+    grid-template-columns: 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-header.no-album.with-drag {
-    grid-template-columns: 32px 40px 1fr 80px 36px 100px;
+    grid-template-columns: 32px 40px 56px 1fr 80px 36px 100px;
   }
 
   .col-header {
@@ -1429,7 +1431,6 @@
 
   .col-header.col-artist {
     justify-content: flex-start;
-    padding-left: 36px;
   }
 
   .col-header.col-album {
@@ -1485,7 +1486,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 40px 56px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: 6px var(--spacing-md);
     padding-left: var(--spacing-lg);
@@ -1500,23 +1501,23 @@
   }
 
   .list-body.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 32px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.no-album .track-row {
-    grid-template-columns: 40px 1fr 80px 36px 100px;
+    grid-template-columns: 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-body.no-album.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 80px 36px 100px;
+    grid-template-columns: 32px 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect .track-row {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 40px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect.no-album .track-row {
-    grid-template-columns: 40px 40px 1fr 80px 36px 100px;
+    grid-template-columns: 40px 40px 56px 1fr 80px 36px 100px;
   }
 
   .track-row.selected {
@@ -1968,11 +1969,11 @@
   }
 
   .list-header.multiselect {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 36px 100px;
+    grid-template-columns: 40px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.multiselect.no-album {
-    grid-template-columns: 40px 40px 1fr 80px 36px 100px;
+    grid-template-columns: 40px 40px 56px 1fr 80px 36px 100px;
   }
 
   /* â”€â”€ Equalizer bars (hidden by default, shown on mobile album view) â”€â”€ */

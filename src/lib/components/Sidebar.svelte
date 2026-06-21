@@ -25,6 +25,7 @@
         goToListenLater,
         goToListenBrainz,
         goToDiscover,
+        goToRecentlyPlayed,
     } from "$lib/stores/view";
     import {
         isSettingsOpen as isSettingsOpenUI,
@@ -487,6 +488,25 @@
                         </svg>
                         <span>{$_('sidebar.listenLater', { default: 'Escuchar más tarde' })}</span>
                         <span class="nav-count">{$listenLaterCount}</span>
+                    </button>
+                </li>
+                <li>
+                    <button
+                        class="nav-item"
+                        class:active={isActive("recently-played")}
+                        on:click={() => navigateAndClose(goToRecentlyPlayed)}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="24"
+                            height="24"
+                        >
+                            <path
+                                d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"
+                            />
+                        </svg>
+                        <span>{$_('sidebar.thisWeek', { default: 'This Week' })}</span>
                     </button>
                 </li>
                 <li>

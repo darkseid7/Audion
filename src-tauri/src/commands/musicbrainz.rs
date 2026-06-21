@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 const MB_API_BASE: &str = "https://musicbrainz.org/ws/2";
@@ -380,11 +382,11 @@ struct MbReleaseResult {
 
 #[derive(Debug, Deserialize)]
 struct MbLabelInfo {
-    label: Option<MbLabel>,
+    label: Option<MbLabelNameOnly>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MbLabel {
+struct MbLabelNameOnly {
     name: String,
 }
 
@@ -1058,13 +1060,13 @@ struct MbReleaseGroupSearchRaw {
     #[serde(rename = "first-release-date")]
     first_release_date: Option<String>,
     #[serde(rename = "artist-credit")]
-    artist_credit: Option<Vec<MbArtistCredit>>,
+    artist_credit: Option<Vec<MbArtistCreditLight>>,
     tags: Option<Vec<MbTag>>,
     releases: Option<Vec<MbReleaseInGroup>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MbArtistCredit {
+struct MbArtistCreditLight {
     name: Option<String>,
     artist: Option<MbArtistCreditArtist>,
 }
@@ -1281,7 +1283,7 @@ struct MbArtistRecording {
     title: String,
     length: Option<u32>,
     #[serde(rename = "artist-credit")]
-    artist_credit: Option<Vec<MbArtistCredit>>,
+    artist_credit: Option<Vec<MbArtistCreditLight>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1299,7 +1301,7 @@ struct MbReleaseInGroupDetail {
 }
 
 #[derive(Debug, Deserialize)]
-struct MbReleaseDetail {
+struct MbReleaseMediaDetail {
     media: Option<Vec<MbMedia>>,
 }
 
@@ -1321,7 +1323,7 @@ struct MbTrackRaw {
 struct MbRecordingPartial {
     id: String,
     #[serde(rename = "artist-credit")]
-    artist_credit: Option<Vec<MbArtistCredit>>,
+    artist_credit: Option<Vec<MbArtistCreditLight>>,
 }
 
 /// Fetch all tracks for a given release-group MBID.
@@ -1384,7 +1386,7 @@ pub async fn get_release_group_tracks_mb(rg_mbid: String) -> Result<Vec<MbTrack>
         return Err(format!("MB returned {}", rel_resp.status()));
     }
 
-    let rel_data: MbReleaseDetail = rel_resp
+    let rel_data: MbReleaseMediaDetail = rel_resp
         .json()
         .await
         .map_err(|e| format!("Parse error: {}", e))?;
@@ -1478,4 +1480,910 @@ pub async fn get_artist_top_tracks_mb(artist_mbid: String) -> Result<Vec<MbTrack
         .collect();
 
     Ok(tracks)
+}
+
+// =============================================================================
+// ALBUM INFO MODAL � rich release detail with tracklist + Cover Art Archive
+// =============================================================================
+//
+// `MbReleaseInfo` above is intentionally small � just enough to enrich the
+// album year in the database. The "Info" modal opened from AlbumDetail
+// needs a much richer payload (tracklist with MBIDs, barcode, packaging,
+// format, CAA cover URLs, optional Wikipedia summary). That's what these
+// types and commands provide.
+//
+// We also cache the full release detail in memory so opening the modal a
+// second time for the same album is instant and doesn't hit the MB
+// 1-req/sec rate limit.
+// =============================================================================
+
+const CAA_BASE: &str = "https://coverartarchive.org";
+const RELEASE_DETAIL_TTL_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+/// Rich release metadata for the Album Info modal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MbReleaseDetail {
+    /// MusicBrainz Release ID (the specific pressing, not the release-group).
+    pub mbid: String,
+    /// MusicBrainz Release Group ID (the abstract "album").
+    pub release_group_mbid: String,
+    pub title: String,
+    pub artist: String,
+    pub artist_mbid: Option<String>,
+    pub year: Option<String>,
+    /// Year of the *first* release of this release-group (often differs
+    /// from `year` for reissues / remasters).
+    pub original_year: Option<String>,
+    pub country: Option<String>,
+    pub label: Option<String>,
+    pub catalog_number: Option<String>,
+    pub barcode: Option<String>,
+    pub packaging: Option<String>,
+    pub format: Option<String>,
+    pub language: Option<String>,
+    pub script: Option<String>,
+    pub release_type: Option<String>,
+    pub track_count: u32,
+    pub total_duration_ms: Option<u64>,
+    /// Cover Art Archive front cover URLs (None if no cover is uploaded).
+    pub cover_url_250: Option<String>,
+    pub cover_url_500: Option<String>,
+    pub cover_url_1200: Option<String>,
+    pub wikipedia_url: Option<String>,
+    pub wiki_extract: Option<String>,
+    pub tracks: Vec<MbReleaseTrack>,
+}
+
+/// One track in a release's tracklist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MbReleaseTrack {
+    /// MusicBrainz Recording ID � links to the canonical recording page.
+    pub mbid: String,
+    pub position: u32,
+    pub disc_number: u32,
+    pub title: String,
+    pub length_ms: Option<u64>,
+    pub artist_credit: Option<String>,
+}
+
+// -- Cache -------------------------------------------------------------------
+
+#[derive(Clone)]
+struct CachedReleaseDetail {
+    detail: MbReleaseDetail,
+    fetched_at: std::time::Instant,
+}
+
+fn release_detail_cache() -> &'static Mutex<HashMap<String, CachedReleaseDetail>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedReleaseDetail>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key(album: &str, artist: &str) -> String {
+    format!(
+        "{}|{}",
+        clean_album_name(album).to_lowercase(),
+        artist.to_lowercase()
+    )
+}
+
+// -- MB JSON shapes used only by the release-detail flow ---------------------
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseSearchResponse2 {
+    releases: Option<Vec<MbReleaseSearchEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseSearchEntry {
+    id: String,
+    title: String,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    barcode: Option<String>,
+    #[serde(default)]
+    packaging: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    script: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    media: Option<Vec<MbReleaseMedia>>,
+    #[serde(default)]
+    label_info: Option<Vec<MbReleaseLabelInfo>>,
+    #[serde(default)]
+    artist_credit: Option<Vec<MbArtistCredit>>,
+    #[serde(default)]
+    relations: Option<Vec<MbRelation>>,
+    #[serde(default, rename = "release-group")]
+    release_group: Option<MbReleaseGroupSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseMedia {
+    format: Option<String>,
+    #[serde(default)]
+    tracks: Option<Vec<MbMediaTrack>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbMediaTrack {
+    id: String,
+    position: Option<u32>,
+    number: Option<String>,
+    title: String,
+    length: Option<u64>,
+    #[serde(default)]
+    artist_credit: Option<Vec<MbArtistCredit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseLabelInfo {
+    label: Option<MbLabel>,
+    #[serde(default)]
+    catalog_number: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbLabel {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbArtistCredit {
+    name: String,
+    artist: Option<MbArtistBrief>,
+    joinphrase: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbArtistBrief {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseGroupSummary {
+    id: String,
+    #[serde(default)]
+    primary_type: Option<String>,
+    #[serde(default)]
+    secondary_types: Option<Vec<String>>,
+    #[serde(default)]
+    first_release_date: Option<String>,
+    /// When the search endpoint returns the release-group inline.
+    #[serde(default)]
+    relations: Option<Vec<MbRelation>>,
+}
+
+/// Release-group lookup (with ?inc=releases+url-rels). Used to enumerate
+/// the releases of a release-group so we can pick the canonical one.
+#[derive(Debug, Deserialize)]
+struct MbReleaseGroupLookup2 {
+    id: String,
+    #[serde(default)]
+    primary_type: Option<String>,
+    #[serde(default)]
+    secondary_types: Option<Vec<String>>,
+    #[serde(default)]
+    first_release_date: Option<String>,
+    #[serde(default)]
+    relations: Option<Vec<MbRelation>>,
+    #[serde(default)]
+    releases: Option<Vec<MbReleaseGroupRelease>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MbReleaseGroupRelease {
+    id: String,
+    title: String,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    packaging: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    media: Option<Vec<MbReleaseMedia>>,
+    #[serde(default)]
+    label_info: Option<Vec<MbReleaseLabelInfo>>,
+}
+
+// -- Helpers -----------------------------------------------------------------
+
+/// Pick the canonical release of a release-group.
+///
+/// Preference order:
+///   1. status == "Official"  (skip Promotion / Bootleg / Pseudo-Release)
+///   2. earliest release date
+///   3. format matches the release-group's primary type (CD for Album, etc.)
+fn pick_canonical_release(releases: &[MbReleaseGroupRelease]) -> Option<&MbReleaseGroupRelease> {
+    // First pass: Official + earliest date.
+    let mut best_official: Option<&MbReleaseGroupRelease> = None;
+    for r in releases {
+        if r.status.as_deref() != Some("Official") {
+            continue;
+        }
+        match best_official {
+            None => best_official = Some(r),
+            Some(cur) => {
+                let cur_date = cur.date.as_deref().unwrap_or("9999");
+                let new_date = r.date.as_deref().unwrap_or("9999");
+                if new_date < cur_date {
+                    best_official = Some(r);
+                }
+            }
+        }
+    }
+    if let Some(r) = best_official {
+        return Some(r);
+    }
+    // Fallback: anything (e.g. only Bootlegs exist).
+    releases.first()
+}
+
+/// Convert MediaTrack.position/number to a numeric position.
+/// MediaTrack format from MB is usually { position: 1, number: "1" } or just { number: "1.2" } for discs.
+fn parse_track_position(number: Option<&str>, position: Option<u32>) -> (u32, u32) {
+    // The "position" field is 1-based index in the release.
+    if let Some(pos) = position {
+        // Disc numbers look like "1.05" � extract disc from number if present.
+        if let Some(n) = number {
+            if let Some((disc, _)) = n.split_once('.') {
+                if let Ok(d) = disc.parse::<u32>() {
+                    return (d, pos);
+                }
+            }
+        }
+        return (1, pos);
+    }
+    if let Some(n) = number {
+        if let Some((disc_str, track_str)) = n.split_once('.') {
+            let disc = disc_str.parse::<u32>().unwrap_or(1);
+            let track = track_str.parse::<u32>().unwrap_or(1);
+            return (disc, track);
+        }
+        if let Ok(t) = n.parse::<u32>() {
+            return (1, t);
+        }
+    }
+    (1, 1)
+}
+
+/// Fetch the Wikipedia summary for a Wikipedia URL. Used by both the
+/// direct-MB-URL path and the Wikidata-resolved path.
+async fn fetch_wiki_summary_for_url_simple(wiki_url: &str) -> Option<(String, String)> {
+    // URL shape: https://en.wikipedia.org/wiki/Radiohead
+    // or https://es.wikipedia.org/wiki/Radiohead
+    let (lang, title) = if let Some(rest) = wiki_url.strip_prefix("https://") {
+        let mut parts = rest.splitn(3, '/');
+        let host = parts.next()?;
+        let lang = host.split('.').next()?;
+        let title = parts.next()?.strip_prefix("wiki/")?;
+        (lang.to_string(), title.to_string())
+    } else {
+        return None;
+    };
+    let client = mb_client().ok()?;
+    let summary_url = format!("https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}");
+    let resp = client.get(&summary_url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: WikiSummaryResponse = resp.json().await.ok()?;
+    Some((wiki_url.to_string(), data.extract?))
+}
+
+/// Build a Wikipedia URL from release-group relations, preferring English.
+fn wikipedia_from_release_group(rg: &MbReleaseGroupLookup2) -> Option<String> {
+    rg.relations
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|r| r.url.as_ref())
+        .map(|u| u.resource.clone())
+        .find(|u| u.contains("en.wikipedia.org"))
+}
+
+/// Extract the Wikidata Q-identifier from a MusicBrainz URL-relation
+/// pointing to wikidata.org. Returns the bare ID (e.g. "Q12345").
+/// MB stores Wikidata links as `https://www.wikidata.org/wiki/Q12345`.
+fn wikidata_id_from_relations(relations: &[MbRelation]) -> Option<String> {
+    relations
+        .iter()
+        .filter_map(|r| r.url.as_ref())
+        .map(|u| u.resource.as_str())
+        .find(|u| u.contains("wikidata.org/wiki/"))
+        .and_then(|u| u.rsplit('/').next().map(|s| s.to_string()))
+        .filter(|id| id.starts_with('Q') && id[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Resolve a Wikidata Q-id to its English Wikipedia article title via
+/// the Wikidata API. Returns `Some("Article Title")` or `None`.
+async fn fetch_enwiki_title_from_wikidata(qid: &str) -> Option<String> {
+    let client = mb_client().ok()?;
+    let url = "https://www.wikidata.org/w/api.php";
+    let resp = client
+        .get(url)
+        .query(&[
+            ("action", "wbgetentities"),
+            ("ids", qid),
+            ("props", "sitelinks"),
+            ("sitefilter", "enwiki"),
+            ("format", "json"),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: WikidataEntityResponse = resp.json().await.ok()?;
+    let title = data
+        .entities?
+        .remove(qid)?
+        .sitelinks?
+        .remove("enwiki")?
+        .title?;
+    if title.is_empty() {
+        return None;
+    }
+    Some(title)
+}
+
+/// Resolve Wikidata Q-id all the way to a Wikipedia (URL, extract) pair.
+async fn fetch_album_wiki_via_wikidata(qid: &str) -> Option<(String, String)> {
+    let title = fetch_enwiki_title_from_wikidata(qid).await?;
+    let url_path = title.replace(' ', "_");
+    let client = mb_client().ok()?;
+    let summary: WikiSummaryResponse = client
+        .get(format!(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/{url_path}"
+        ))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let extract = summary.extract?;
+    let url = format!("https://en.wikipedia.org/wiki/{url_path}");
+    Some((url, extract))
+}
+
+#[derive(Debug, Deserialize)]
+struct WikidataEntityResponse {
+    entities: Option<std::collections::HashMap<String, WikidataEntity>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikidataEntity {
+    sitelinks: Option<std::collections::HashMap<String, WikidataSitelink>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikidataSitelink {
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikipediaSearchResponse {
+    pages: Option<Vec<WikipediaSearchPage>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WikipediaSearchPage {
+    title: Option<String>,
+    /// Short text snippet used for relevance scoring. Includes the
+    /// matched terms in bold — we use this to verify that the article
+    /// actually mentions the artist name.
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    excerpt: Option<String>,
+}
+
+/// Tokenize an artist name into meaningful words (lowercased, length ≥ 3,
+/// alphanumeric only). "DJ OK" → ["ok"], "French 79" → ["french"], "U2" → []
+/// (drops too-short tokens to avoid false matches).
+fn artist_tokens(artist: &str) -> Vec<String> {
+    artist
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 3)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Check that the artist's tokens appear in `blob` (HTML stripped).
+/// Returns true if every token is found — i.e. the blob plausibly
+/// describes this artist. Used by all Wikipedia lookup paths (search,
+/// Wikidata, direct URL) to reject same-named but unrelated entities.
+fn blob_mentions_artist(blob: &str, artist: &str) -> bool {
+    if artist.trim().is_empty() {
+        return true;
+    }
+    let tokens = artist_tokens(artist);
+    // If the artist name is too short to tokenize (e.g. "U2"), we
+    // accept the match — there's no way to disambiguate anyway.
+    if tokens.is_empty() {
+        return true;
+    }
+    let blob = blob
+        .replace('<', " ")
+        .replace('>', " ")
+        .to_lowercase();
+    tokens.iter().all(|t| blob.contains(t))
+}
+
+/// Wrapper kept for the search-result path which has separate fields.
+fn search_result_matches_artist(page: &WikipediaSearchPage, artist: &str) -> bool {
+    let blob = format!(
+        "{} {}",
+        page.description.as_deref().unwrap_or(""),
+        page.excerpt.as_deref().unwrap_or("")
+    );
+    blob_mentions_artist(&blob, artist)
+}
+
+/// Fallback: search Wikipedia directly for an album when MusicBrainz
+/// doesn't have a Wikidata entry. To avoid the wrong-entity problem
+/// (e.g. "Joshua" → biblical character) we (a) add the artist name to
+/// the query and (b) reject the top hit unless its description/excerpt
+/// actually mentions the artist.
+async fn search_wikipedia_album_summary(
+    album: &str,
+    artist: &str,
+) -> Option<(String, String)> {
+    let client = mb_client().ok()?;
+
+    // Try up to two queries: album + artist, then album alone with
+    // artist-name validation against the result.
+    let queries: [&str; 2] = [
+        // First try: disambiguated. Quoting the album name forces exact match.
+        // The "album" suffix nudges the ranking toward music-related pages.
+        // We don't use this exact string as a query param; build below.
+        // Placeholder; real queries are constructed below.
+        "",
+        "",
+    ];
+    // Real query strings (allocated to satisfy lifetime of &str refs).
+    let q1 = format!("\"{album}\" {artist} album");
+    let q2 = format!("\"{album}\" album");
+    let queries: [&str; 2] = [&q1, &q2];
+
+    for query in queries.iter() {
+        let search: WikipediaSearchResponse = client
+            .get("https://en.wikipedia.org/w/rest.php/v1/search/page")
+            .query(&[
+                ("q", query.to_string()),
+                ("limit", "3".to_string()), // fetch a few so we can validate
+            ])
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        let pages = search.pages.unwrap_or_default();
+        // ONLY accept pages that actually mention the artist. Returning
+        // an unvalidated top hit is exactly the wrong-article problem
+        // ("Joshua French 79" → "The Joshua Tree" by U2).
+        let Some(page) = pages
+            .iter()
+            .find(|p| {
+                p.title.is_some()
+                    && search_result_matches_artist(p, artist)
+            })
+        else {
+            continue;
+        };
+        let Some(title) = page.title.as_deref() else { continue };
+        if title.is_empty() {
+            continue;
+        }
+
+        let url_path = title.replace(' ', "_");
+        let summary: WikiSummaryResponse = client
+            .get(format!(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/{url_path}"
+            ))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        if let Some(extract) = summary.extract {
+            let url = format!("https://en.wikipedia.org/wiki/{url_path}");
+            return Some((url, extract));
+        }
+    }
+
+    None
+}
+
+/// Convert an MBIS barcode string ("-barcode-") into a plain digits string.
+fn normalize_barcode(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+// -- Internal fetcher (shared by cached + refresh commands) ------------------
+
+async fn fetch_release_detail_internal(
+    album_name: &str,
+    artist_name: &str,
+) -> Result<MbReleaseDetail, String> {
+    let client = mb_client()?;
+    let cleaned = clean_album_name(album_name);
+
+    // 1) Find the release-group via release search. We need the rg_mbid
+    //    so we can enumerate releases and pick the canonical one.
+    let search_resp = client
+        .get(format!("{}/release", MB_API_BASE))
+        .query(&[
+            (
+                "query",
+                format!("release:\"{}\" AND artist:\"{}\"", cleaned, artist_name),
+            ),
+            ("limit", "1".into()),
+            ("inc", "labels+release-groups+artist-credits+media+recordings".into()),
+            ("fmt", "json".into()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("MusicBrainz release search error: {}", e))?;
+
+    if !search_resp.status().is_success() {
+        return Err(format!("MusicBrainz returned {}", search_resp.status()));
+    }
+
+    let search: MbReleaseSearchResponse2 = search_resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    let first = match search.releases.and_then(|v| v.into_iter().next()) {
+        Some(r) => r,
+        None => return Err("No release found on MusicBrainz".into()),
+    };
+
+    let release_group_mbid = first
+        .release_group
+        .as_ref()
+        .map(|rg| rg.id.clone())
+        .ok_or_else(|| "Release has no release-group".to_string())?;
+
+    // 2) Enumerate releases of the release-group so we can pick the
+    //    canonical one (Official + earliest).
+    sleep(Duration::from_millis(1100)).await;
+    let rg_resp = client
+        .get(format!("{}/release-group/{}", MB_API_BASE, release_group_mbid))
+        .query(&[("inc", "releases+url-rels"), ("fmt", "json")])
+        .send()
+        .await
+        .map_err(|e| format!("MusicBrainz release-group error: {}", e))?;
+
+    if !rg_resp.status().is_success() {
+        return Err(format!("MusicBrainz returned {}", rg_resp.status()));
+    }
+    let rg_data: MbReleaseGroupLookup2 = rg_resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    let chosen = rg_data
+        .releases
+        .as_deref()
+        .and_then(|r| pick_canonical_release(r))
+        .ok_or_else(|| "Release-group has no releases".to_string())?;
+
+    // 3) Fetch full release detail (tracklist, label-info, packaging, etc.)
+    let chosen_id = chosen.id.clone();
+    sleep(Duration::from_millis(1100)).await;
+    let detail_resp = client
+        .get(format!("{}/release/{}", MB_API_BASE, chosen_id))
+        .query(&[
+            ("inc", "recordings+artist-credits+labels+release-rels+url-rels+media"),
+            ("fmt", "json"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("MusicBrainz release detail error: {}", e))?;
+
+    if !detail_resp.status().is_success() {
+        return Err(format!("MusicBrainz returned {}", detail_resp.status()));
+    }
+    let detail: MbReleaseSearchEntry = detail_resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+// 4) Wikipedia URL: prefer the release's own relations, fall back to the
+    //    release-group relations. `mut` because the Wikidata path below
+    //    may discover a URL and want to expose it.
+    let mut wiki_url = wikipedia_from_relations(detail.relations.as_deref().unwrap_or(&[]))
+        .or_else(|| wikipedia_from_release_group(&rg_data));
+
+    // 5) Wiki summary. Try three paths in order; every path validates
+    //    that the returned Wikipedia article actually mentions the artist
+    //    (else we fall through to the next path). Without validation,
+    //    "Joshua" by French 79 returns the biblical character or U2's
+    //    "The Joshua Tree" depending on popularity, neither of which
+    //    mentions French 79.
+    let mut wiki_extract: Option<String> = None;
+
+    // Path A: direct Wikipedia URL from MB.
+    if let Some(url) = wiki_url.as_deref() {
+        sleep(Duration::from_millis(1100)).await;
+        if let Some((resolved_url, extract)) = fetch_wiki_summary_for_url_simple(url).await {
+            if blob_mentions_artist(&extract, artist_name) {
+                wiki_extract = Some(extract);
+                wiki_url = Some(resolved_url);
+            } else {
+                tracing::info!(
+                    "Rejecting direct-MB Wikipedia match for {} — extract doesn't mention artist",
+                    album_name
+                );
+                wiki_url = None; // force fall-through to next path
+            }
+        }
+    }
+
+    // Path B: Wikidata Q-id from MB relations → enwiki sitelink.
+    if wiki_extract.is_none() {
+        let qid = wikidata_id_from_relations(
+            detail.relations.as_deref().unwrap_or(&[]),
+        )
+        .or_else(|| {
+            rg_data
+                .relations
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|r| r.url.as_ref())
+                .map(|u| u.resource.as_str())
+                .find(|u| u.contains("wikidata.org/wiki/"))
+                .and_then(|u| u.rsplit('/').next().map(|s| s.to_string()))
+                .filter(|id| id.starts_with('Q') && id[1..].chars().all(|c| c.is_ascii_digit()))
+        });
+        if let Some(qid) = qid {
+            sleep(Duration::from_millis(1100)).await;
+            if let Some((url, extract)) = fetch_album_wiki_via_wikidata(&qid).await {
+                if blob_mentions_artist(&extract, artist_name) {
+                    wiki_extract = Some(extract);
+                    wiki_url = Some(url);
+                } else {
+                    tracing::info!(
+                        "Rejecting Wikidata-resolved Wikipedia match for {} (Q={}) — extract doesn't mention artist",
+                        album_name, qid
+                    );
+                }
+            }
+        }
+    }
+
+    // Path C: Wikipedia search with artist-name validation (last resort).
+    if wiki_extract.is_none() {
+        sleep(Duration::from_millis(1100)).await;
+        if let Some((url, extract)) =
+            search_wikipedia_album_summary(album_name, artist_name).await
+        {
+            wiki_extract = Some(extract);
+            wiki_url = Some(url);
+        }
+    }
+
+    // 6) Flatten tracklist from `media[].tracks[]`.
+    let mut tracks: Vec<MbReleaseTrack> = Vec::new();
+    let mut total_ms: u64 = 0;
+    if let Some(media) = detail.media.as_deref() {
+        for m in media {
+            if let Some(track_list) = m.tracks.as_deref() {
+                for t in track_list {
+                    let (disc, pos) = parse_track_position(t.number.as_deref(), t.position);
+                    if let Some(len) = t.length {
+                        total_ms = total_ms.saturating_add(len);
+                    }
+                    let credit = t
+                        .artist_credit
+                        .as_deref()
+                        .map(|c| {
+                            c.iter()
+                                .map(|a| {
+                                    a.joinphrase
+                                        .as_deref()
+                                        .map(|j| format!("{}{}", a.name, j))
+                                        .unwrap_or_else(|| a.name.clone())
+                                })
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .filter(|s| !s.is_empty());
+                    tracks.push(MbReleaseTrack {
+                        mbid: t.id.clone(),
+                        position: pos,
+                        disc_number: disc,
+                        title: t.title.clone(),
+                        length_ms: t.length,
+                        artist_credit: credit,
+                    });
+                }
+            }
+        }
+    }
+
+    // 7) Build the public struct.
+    let label = detail
+        .label_info
+        .as_deref()
+        .and_then(|infos| infos.first())
+        .and_then(|li| li.label.as_ref())
+        .map(|l| l.name.clone());
+    let catalog = detail
+        .label_info
+        .as_deref()
+        .and_then(|infos| infos.first())
+        .and_then(|li| li.catalog_number.clone())
+        .filter(|s| !s.is_empty());
+    let format = detail
+        .media
+        .as_deref()
+        .and_then(|m| m.first())
+        .and_then(|m| m.format.clone());
+    let year = detail.date.as_deref().map(year_from_date);
+    let original_year = rg_data
+        .first_release_date
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .map(year_from_date);
+    let release_type = release_type_label(&rg_data.primary_type, &rg_data.secondary_types);
+    let artist_credit = detail
+        .artist_credit
+        .as_deref()
+        .map(|c| {
+            c.iter()
+                .map(|a| {
+                    a.joinphrase
+                        .as_deref()
+                        .map(|j| format!("{}{}", a.name, j))
+                        .unwrap_or_else(|| a.name.clone())
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .filter(|s: &String| !s.is_empty())
+        .unwrap_or_else(|| artist_name.to_string());
+    let artist_mbid = detail
+        .artist_credit
+        .as_deref()
+        .and_then(|c| c.first())
+        .and_then(|a| a.artist.as_ref())
+        .map(|a| a.id.clone());
+
+    // 8) Cover Art Archive URLs � we don't pre-verify existence; the
+    //    browser will hit a 404 if the cover isn't uploaded.
+    let cover_500 = Some(format!("{}/release/{}/front-500", CAA_BASE, detail.id));
+    let cover_250 = Some(format!("{}/release/{}/front-250", CAA_BASE, detail.id));
+    let cover_1200 = Some(format!("{}/release/{}/front-1200", CAA_BASE, detail.id));
+
+    Ok(MbReleaseDetail {
+        mbid: detail.id,
+        release_group_mbid,
+        title: detail.title,
+        artist: artist_credit,
+        artist_mbid,
+        year,
+        original_year,
+        country: detail.country,
+        label,
+        catalog_number: catalog,
+        barcode: normalize_barcode(detail.barcode.as_deref()),
+        packaging: detail.packaging,
+        format,
+        language: detail.language,
+        script: detail.script,
+        release_type: Some(release_type),
+        track_count: tracks.len() as u32,
+        total_duration_ms: if total_ms > 0 { Some(total_ms) } else { None },
+        cover_url_250: cover_250,
+        cover_url_500: cover_500,
+        cover_url_1200: cover_1200,
+        wikipedia_url: wiki_url,
+        wiki_extract,
+        tracks,
+    })
+}
+
+// -- Tauri commands ----------------------------------------------------------
+
+/// Fetch rich MusicBrainz release detail (tracklist, barcode, packaging,
+/// format, cover art, optional Wikipedia summary) for the modal opened
+/// from AlbumDetail. Uses an in-memory cache (30-day TTL) keyed by
+/// `(album, artist)` to avoid hammering MusicBrainz when the user reopens
+/// the modal for the same album.
+#[tauri::command]
+pub async fn get_release_detail_mb(
+    album_name: String,
+    artist_name: String,
+) -> Result<MbReleaseDetail, String> {
+    let key = cache_key(&album_name, &artist_name);
+
+    // Cache check
+    {
+        let cache = release_detail_cache().lock().await;
+        if let Some(entry) = cache.get(&key) {
+            if entry.fetched_at.elapsed().as_secs() < RELEASE_DETAIL_TTL_SECS {
+                return Ok(entry.detail.clone());
+            }
+        }
+    }
+
+    let detail = fetch_release_detail_internal(&album_name, &artist_name).await?;
+
+    let mut cache = release_detail_cache().lock().await;
+    cache.insert(
+        key,
+        CachedReleaseDetail {
+            detail: detail.clone(),
+            fetched_at: std::time::Instant::now(),
+        },
+    );
+
+    Ok(detail)
+}
+
+/// Bypasses the cache and re-fetches from MusicBrainz. Used by the
+/// "refresh" button in the modal.
+#[tauri::command]
+pub async fn refresh_release_detail_mb(
+    album_name: String,
+    artist_name: String,
+) -> Result<MbReleaseDetail, String> {
+    let detail = fetch_release_detail_internal(&album_name, &artist_name).await?;
+    let mut cache = release_detail_cache().lock().await;
+    cache.insert(
+        cache_key(&album_name, &artist_name),
+        CachedReleaseDetail {
+            detail: detail.clone(),
+            fetched_at: std::time::Instant::now(),
+        },
+    );
+    Ok(detail)
+}
+
+/// Returns the Cover Art Archive URL for a release at the requested size
+/// (250, 500, or 1200). Returns `Ok(None)` if the size is invalid.
+/// Existence of the cover is NOT pre-verified � the URL may 404 if no
+/// cover has been uploaded for this release; the modal handles that with
+/// an `<img onerror>` fallback to the local album cover.
+#[tauri::command]
+pub async fn get_release_cover_art(
+    release_id: String,
+    size: Option<u32>,
+) -> Result<Option<String>, String> {
+    let size = size.unwrap_or(500);
+    let suffix = match size {
+        250 | 500 | 1200 => size.to_string(),
+        _ => return Ok(None),
+    };
+    Ok(Some(format!(
+        "{}/release/{}/front-{}",
+        CAA_BASE, release_id, suffix
+    )))
 }

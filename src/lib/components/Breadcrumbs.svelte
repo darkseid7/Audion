@@ -42,6 +42,8 @@
                     },
                 ];
             }
+            case "recently-played":
+                return [...base, { label: "This Week", path: null }];
             case "plugins":
                 return [
                     { label: "Settings", path: null },

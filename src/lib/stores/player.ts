@@ -2512,6 +2512,61 @@ export function addToQueue(tracks: Track[]): void {
   }
 }
 
+// Append tracks to the END of the queue (after all existing tracks).
+// Unlike `addToQueue` (which inserts "up next"), this preserves whatever
+// is already playing and whatever is queued — the new tracks play last.
+export function appendToQueueEnd(tracks: Track[]): void {
+  if (tracks.length === 0) return;
+  const currentIdx = get(queueIndex);
+  const addedCount = tracks.length;
+  const insertPosition = currentIdx + 1 + get(userQueueCount);
+
+  queue.update((q) => {
+    const newQueue = [...q, ...tracks];
+
+    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
+    return newQueue;
+  });
+
+  // These tracks go to the end, so they're "user-added" but only after
+  // whatever user tracks are already pending. Bump userQueueCount by
+  // the new count.
+  userQueueCount.update((c) => c + addedCount);
+
+  // Sync to Squeeze backend (it has its own queue model).
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        // -1 means "append" in squeezeInsertQueue.
+        -1,
+      ).catch((e) =>
+        console.error("[Player] Failed to append to squeeze queue:", e),
+      );
+    }
+  } else {
+    _schedulePreload();
+  }
+
+  // Shuffle: append the new indices at the tail of the shuffled list
+  // so they play after everything else.
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => {
+      const start = indices.length > 0
+        ? Math.max(...indices) + 1
+        : currentIdx + 1;
+      const newIndices = Array.from(
+        { length: addedCount },
+        (_, i) => start + i,
+      );
+      return [...indices, ...newIndices];
+    });
+  }
+  void insertPosition;
+}
+
 // Remove track from queue by index
 export function removeFromQueue(index: number): void {
   const currentIdx = get(queueIndex);

@@ -19,9 +19,17 @@
         topTracks,
         topAlbums,
         recentlyPlayed,
+        recentlyPlayedAlbums,
+        thisWeekPlayed,
+        dedupeTracksToAlbums,
         loadActivityData,
     } from "$lib/stores/activity";
-    import { goToAlbumDetail, goToArtistDetail, goToListenLater } from "$lib/stores/view";
+    import {
+        goToAlbumDetail,
+        goToArtistDetail,
+        goToListenLater,
+        goToRecentlyPlayed,
+    } from "$lib/stores/view";
     import { isStatsWrappedOpen } from "$lib/stores/ui";
     import { getTracksByAlbum } from "$lib/api/tauri";
     import MediaCard from "./MediaCard.svelte";
@@ -90,6 +98,11 @@
             return aIdx - bIdx;
         })
         .slice(0, 6);
+
+    // Dedupe this week's plays to unique albums, keeping the most-recent
+    // play order. Same dedupe is shared with the dedicated page so both
+    // views stay consistent.
+    $: thisWeekAlbums = dedupeTracksToAlbums($thisWeekPlayed, 12);
 
     $: topTrackList = $topTracks.map((t) => t.track);
 
@@ -559,46 +572,111 @@
         </section>
     {/if}
 
-    <!-- Recently Played -->
-    {#if $recentlyPlayed.length > 0}
+    <!-- Jump Back In — recently played ALBUMS (deduped) -->
+    {#if $recentlyPlayedAlbums.length > 0}
         <section class="home-section">
             <h2 class="section-title">{$_('home.jumpBackIn')}</h2>
             <div class="carousel-row">
-                {#each $recentlyPlayed.slice(0, 10) as track, i}
-                    {@const isNowPlaying =
-                        playingTrackId === track.id && playing}
-                    {@const isPaused = pausedTrackId === track.id}
+                {#each $recentlyPlayedAlbums.slice(0, 12) as album, i}
+                    {@const isNowPlaying = playingAlbumId === album.id && playing}
+                    {@const isPaused = pausedAlbumId === album.id}
                     <div
                         class="carousel-card-wrapper"
                         role="listitem"
-                        on:contextmenu={(e) =>
-                            trackContextMenu(
-                                track,
-                                i,
-                                $recentlyPlayed.slice(0, 10),
-                                e,
-                            )}
+                        tabindex="0"
+                        on:click={() => goToAlbumDetail(album.id)}
+                        on:keydown={(e) =>
+                            handleKeyActivate(e, () => goToAlbumDetail(album.id))}
+                        on:contextmenu={(e) => albumContextMenu(album, e)}
                     >
                         <MediaCard
                             {isNowPlaying}
                             {isPaused}
-                            playTooltip="Play"
-                            resumeTooltip="Resume"
+                            playTooltip="Play album"
+                            resumeTooltip="Resume album"
                             pauseTooltip="Pause"
-                            primaryText={track.title || "Unknown"}
-                            secondaryText={track.artist || "Unknown"}
-                            secondaryAction={track.artist
-                                ? () => goToArtistDetail(track.artist!)
+                            primaryText={album.name}
+                            secondaryText={album.artist || "Unknown Artist"}
+                            secondaryAction={album.artist
+                                ? () => goToArtistDetail(album.artist!)
                                 : null}
-                            ariaLabel={track.title || "Unknown"}
-                            on:play={() => playRecentTrack(track, i)}
+                            ariaLabel={album.name}
+                            on:play={() => playAlbum(album)}
                             on:pause={togglePlay}
                         >
                             <svelte:fragment slot="cover">
-                                {#if getTrackAlbumCover(track.id)}
+                                {#if getAlbumCoverFromTracks(album.id)}
                                     <img
-                                        src={getTrackAlbumCover(track.id)}
-                                        alt={track.title}
+                                        src={getAlbumCoverFromTracks(album.id)}
+                                        alt={album.name}
+                                        loading="lazy"
+                                        decoding="async"
+                                    />
+                                {:else}
+                                    <div class="cover-placeholder">
+                                        <svg
+                                            viewBox="0 0 24 24"
+                                            fill="currentColor"
+                                            width="24"
+                                            height="24"
+                                            aria-hidden="true"
+                                        >
+                                            <path
+                                                d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
+                                            />
+                                        </svg>
+                                    </div>
+                                {/if}
+                            </svelte:fragment>
+                        </MediaCard>
+                    </div>
+                {/each}
+            </div>
+        </section>
+    {/if}
+
+    <!-- This Week — recently played albums since Monday -->
+    {#if thisWeekAlbums.length > 0}
+        <section class="home-section">
+            <div class="section-header">
+                <h2 class="section-title">{$_('home.thisWeek')}</h2>
+                <button class="view-all-link" on:click={goToRecentlyPlayed}
+                    >{$_('home.viewAll')}</button
+                >
+            </div>
+            <div class="carousel-row">
+                {#each thisWeekAlbums as album}
+                    {@const isNowPlaying = playingAlbumId === album.id && playing}
+                    {@const isPaused = pausedAlbumId === album.id}
+                    <div
+                        class="carousel-card-wrapper"
+                        role="listitem"
+                        tabindex="0"
+                        on:click={() => goToAlbumDetail(album.id)}
+                        on:keydown={(e) =>
+                            handleKeyActivate(e, () => goToAlbumDetail(album.id))}
+                        on:contextmenu={(e) => albumContextMenu(album, e)}
+                    >
+                        <MediaCard
+                            {isNowPlaying}
+                            {isPaused}
+                            playTooltip="Play album"
+                            resumeTooltip="Resume album"
+                            pauseTooltip="Pause"
+                            primaryText={album.name}
+                            secondaryText={album.artist || "Unknown Artist"}
+                            secondaryAction={album.artist
+                                ? () => goToArtistDetail(album.artist!)
+                                : null}
+                            ariaLabel={album.name}
+                            on:play={() => playAlbum(album)}
+                            on:pause={togglePlay}
+                        >
+                            <svelte:fragment slot="cover">
+                                {#if getAlbumCoverFromTracks(album.id)}
+                                    <img
+                                        src={getAlbumCoverFromTracks(album.id)}
+                                        alt={album.name}
                                         loading="lazy"
                                         decoding="async"
                                     />

@@ -18,6 +18,11 @@
     "listenLater": "Listen Later",
     "removeFromListenLater": "Remove from Listen Later"
   },
+  "queue": {
+    "albumAddedToEnd": "Added {count} tracks from \"{name}\" to end of queue",
+    "noTracksToAdd": "No tracks found for this album",
+    "addToQueueFailed": "Failed to add album to queue"
+  },
   "trackList": {
     "title": "Title",
     "album": "Album",
@@ -37,7 +42,38 @@
     "viaMusicBrainz": "via MusicBrainz",
     "disc": "Disc {number}",
     "notFound": "Album not found",
-    "backToAlbums": "Back to Albums"
+    "backToAlbums": "Back to Albums",
+    "unknownAlbum": "Unknown Album",
+    "unknownArtist": "Unknown Artist",
+    "infoButton": "Info",
+    "infoTitle": "Album information",
+    "infoRefresh": "Refresh from MusicBrainz",
+    "infoRefreshed": "Refreshed",
+    "closeInfo": "Close",
+    "loadingInfo": "Loading album info…",
+    "tabArtist": "Artist",
+    "tabAlbum": "Album",
+    "metaYear": "Year",
+    "originalYear": "original",
+    "metaLabel": "Label",
+    "metaCatalog": "Catalog #",
+    "metaCountry": "Country",
+    "metaFormat": "Format",
+    "metaPackaging": "Packaging",
+    "metaBarcode": "Barcode",
+    "metaLanguage": "Language",
+    "metaType": "Type",
+    "metaTrackCount": "Tracks",
+    "tracklist": "Tracklist",
+    "colTitle": "Title",
+    "colLength": "Length",
+    "story": "Album Story",
+    "noStory": "No background info found for this album on Wikipedia yet.",
+    "viewOnMusicBrainz": "View on MusicBrainz",
+    "viewReleaseOnMusicBrainz": "View full release on MusicBrainz",
+    "dataFromMusicBrainz": "Data from MusicBrainz",
+    "noInfoFound": "No information found for this album.",
+    "about": "About"
   },
   "artist": {
     "loading": "Loading artist...",
@@ -72,7 +108,11 @@
     "jumpBackIn": "Jump Back In",
     "yourTopSongs": "Your Top Songs",
     "mostPlayedAlbums": "Most Played Albums",
-    "viewAll": "View all"
+    "viewAll": "View all",
+    "showLess": "Show less",
+    "thisWeek": "This Week",
+    "tabAlbums": "Albums",
+    "tabTracks": "Tracks"
   },
   "listenLater": {
     "title": "Listen Later",
@@ -82,11 +122,21 @@
     "addedToast": "Album added to Listen Later",
     "removedToast": "Album removed from Listen Later"
   },
+  "recentlyPlayed": {
+    "title": "This Week",
+    "albums": "albums",
+    "tracks": "tracks",
+    "breadcrumb": "This Week",
+    "emptyAlbums": "No albums played this week",
+    "emptyTracks": "No tracks played this week",
+    "emptyDescription": "Start playing tracks and they'll appear here."
+  },
   "sidebar": {
     "library": "Library",
     "home": "Home",
     "likedSongs": "Liked Songs",
     "listenLater": "Listen Later",
+    "thisWeek": "This Week",
     "discover": "Discover",
     "recommendations": "Recommendations",
     "allTracks": "All Tracks",

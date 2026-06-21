@@ -12,10 +12,11 @@
         enrichAlbumYear,
         type MbReleaseInfo,
     } from "$lib/api/tauri";
-    import { playTracks, currentTrack, isPlaying } from "$lib/stores/player";
+    import { playTracks, currentTrack, isPlaying, appendToQueueEnd } from "$lib/stores/player";
     import { goToAlbums, goToArtistDetail, goBack } from "$lib/stores/view";
     import { loadLibrary, getAlbumCoverFromTracks, albums } from "$lib/stores/library";
     import TrackList from "./TrackList.svelte";
+    import AlbumInfoModal from "./AlbumInfoModal.svelte";
     import {
         downloadTracks,
         hasDownloadableTracks,
@@ -38,6 +39,9 @@
     // MusicBrainz release info
     let mbRelease: MbReleaseInfo | null = null;
     let mbReleaseLoading = false;
+
+    // Album Info modal
+    let infoOpen = false;
 
     $: totalDuration = tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
     type AlbumAudioInfo = {
@@ -317,6 +321,36 @@
             y: e.clientY,
             items: [
                 {
+                    label: $_('contextMenu.addToQueue'),
+                    icon: `<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h12v2H3v-2zM17 13v6h6v-6h-6zm3 4.5L18 15l1.5-1.5L22 16l-2 2z"/></svg>`,
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album!.id);
+                            if (tracks.length === 0) {
+                                addToast(
+                                    $_('queue.noTracksToAdd', { default: 'No tracks found for this album' }),
+                                    'warning',
+                                );
+                                return;
+                            }
+                            appendToQueueEnd(tracks);
+                            addToast(
+                                $_('queue.albumAddedToEnd', {
+                                    values: { count: tracks.length, name: album!.name },
+                                    default: `Added ${tracks.length} tracks from "${album!.name}" to end of queue`,
+                                }),
+                                'success',
+                            );
+                        } catch (err) {
+                            console.error('Failed to add album to queue:', err);
+                            addToast(
+                                $_('queue.addToQueueFailed', { default: 'Failed to add album to queue' }),
+                                'error',
+                            );
+                        }
+                    },
+                },
+                {
                     label: pinned ? $_('contextMenu.unpinFromTop') : $_('contextMenu.pinToTop'),
                     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 2L4.5 9L9 9L9 22L15 22L15 9L19.5 9L12 2Z"/></svg>`,
                     action: () => {
@@ -541,6 +575,26 @@
                     </button>
 
                     <button
+                        class="btn-info"
+                        type="button"
+                        on:click={() => (infoOpen = true)}
+                        title={$_('album.infoTitle')}
+                        aria-label={$_('album.infoTitle')}
+                    >
+                        <svg viewBox="0 0 24 24" width="22" height="22"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="16" x2="12" y2="12"/>
+                            <line x1="12" y1="8" x2="12.01" y2="8"/>
+                        </svg>
+                    </button>
+
+                    <button
                         class="btn-like-album"
                         class:liked={$likedAlbumIds.has(albumId)}
                         on:click={() => toggleAlbumLike(albumId)}
@@ -728,6 +782,14 @@
             <button class="art-popup-close" on:click={() => (showArtPopup = false)}>Close</button>
         </div>
     </div>
+{/if}
+
+{#if album && infoOpen}
+    <AlbumInfoModal
+        {album}
+        bind:open={infoOpen}
+        on:close={() => (infoOpen = false)}
+    />
 {/if}
 
 <style>
@@ -960,6 +1022,26 @@
         gap: var(--spacing-md);
         align-items: center;
     }
+
+    .btn-info {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--bg-surface, #282828);
+        color: var(--text-secondary, #b3b3b3);
+        border: 0;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, transform 0.1s;
+        flex-shrink: 0;
+    }
+    .btn-info:hover {
+        background: var(--bg-highlight, #3e3e3e);
+        color: var(--accent-primary, #1DB954);
+    }
+    .btn-info:active { transform: scale(0.92); }
 
     .btn-like-album {
         display: flex;

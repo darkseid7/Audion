@@ -676,6 +676,24 @@ export async function getRecentlyPlayed(limit: number): Promise<Track[]> {
   return await invoke("get_recently_played", { limit });
 }
 
+/**
+ * Recently played albums (deduped), ordered by most recent play.
+ * Used by the "Jump Back In" section on the home screen.
+ */
+export async function getRecentlyPlayedAlbums(limit: number): Promise<Album[]> {
+  return await invoke("get_recently_played_albums", { limit });
+}
+
+/**
+ * Tracks played since the start of the current calendar week (Monday 00:00
+ * UTC), ordered by most recent play. Used by the "This Week" section on
+ * the home screen. Returns up to `limit` tracks — the frontend should
+ * also fetch a higher limit to determine whether to show a "View all" link.
+ */
+export async function getPlayedThisWeek(limit: number): Promise<Track[]> {
+  return await invoke("get_played_this_week", { limit });
+}
+
 export async function getTopArtists(limit: number): Promise<ArtistWithCount[]> {
   return await invoke("get_top_artists", { limit });
 }
@@ -1171,6 +1189,83 @@ export async function getReleaseMbInfo(
   artistName: string,
 ): Promise<MbReleaseInfo> {
   return await invoke("get_release_mb_info", { albumName, artistName });
+}
+
+/**
+ * One track in a release's full tracklist (returned by `getReleaseDetailMb`).
+ */
+export interface MbReleaseTrack {
+  mbid: string;
+  position: number;
+  disc_number: number;
+  title: string;
+  length_ms: number | null;
+  artist_credit: string | null;
+}
+
+/**
+ * Rich release metadata for the Album Info modal: full tracklist with
+ * MBIDs, barcode, packaging, format, language, Cover Art Archive URLs,
+ * and an optional Wikipedia summary.
+ */
+export interface MbReleaseDetail {
+  mbid: string;
+  release_group_mbid: string;
+  title: string;
+  artist: string;
+  artist_mbid: string | null;
+  year: string | null;
+  original_year: string | null;
+  country: string | null;
+  label: string | null;
+  catalog_number: string | null;
+  barcode: string | null;
+  packaging: string | null;
+  format: string | null;
+  language: string | null;
+  script: string | null;
+  release_type: string | null;
+  track_count: number;
+  total_duration_ms: number | null;
+  cover_url_250: string | null;
+  cover_url_500: string | null;
+  cover_url_1200: string | null;
+  wikipedia_url: string | null;
+  wiki_extract: string | null;
+  tracks: MbReleaseTrack[];
+}
+
+/**
+ * Fetch rich release detail for the Album Info modal. Uses an in-memory
+ * cache (30-day TTL) on the Rust side, keyed by (album, artist).
+ */
+export async function getReleaseDetailMb(
+  albumName: string,
+  artistName: string,
+): Promise<MbReleaseDetail> {
+  return await invoke("get_release_detail_mb", { albumName, artistName });
+}
+
+/**
+ * Bypass the cache and re-fetch the release detail from MusicBrainz.
+ */
+export async function refreshReleaseDetailMb(
+  albumName: string,
+  artistName: string,
+): Promise<MbReleaseDetail> {
+  return await invoke("refresh_release_detail_mb", { albumName, artistName });
+}
+
+/**
+ * Returns the Cover Art Archive URL for a release at the requested size
+ * (250, 500, or 1200). Returns null for invalid sizes. Existence of the
+ * cover is not pre-verified — the URL may 404 if no cover is uploaded.
+ */
+export async function getReleaseCoverArt(
+  releaseId: string,
+  size?: number,
+): Promise<string | null> {
+  return await invoke("get_release_cover_art", { releaseId, size });
 }
 
 export interface AlbumYearEnrichResult {

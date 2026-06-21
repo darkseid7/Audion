@@ -19,6 +19,7 @@
         currentAlbumId,
         isPlaying,
         togglePlay,
+        appendToQueueEnd,
     } from "$lib/stores/player";
     import VirtualizedGrid from "./Virtualizedgrid.svelte";
     import MediaCard from "./MediaCard.svelte";
@@ -561,6 +562,40 @@
                 {
                     label: "Play",
                     action: () => playAlbum(album),
+                },
+                {
+                    label: $_("contextMenu.addToQueue"),
+                    icon: `<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h12v2H3v-2zM17 13v6h6v-6h-6zm3 4.5L18 15l1.5-1.5L22 16l-2 2z"/></svg>`,
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album.id);
+                            if (tracks.length === 0) {
+                                addToast(
+                                    $_("queue.noTracksToAdd", {
+                                        default: "No tracks found for this album",
+                                    }),
+                                    "warning",
+                                );
+                                return;
+                            }
+                            appendToQueueEnd(tracks);
+                            addToast(
+                                $_("queue.albumAddedToEnd", {
+                                    values: { count: tracks.length, name: album.name },
+                                    default: `Added ${tracks.length} tracks from "${album.name}" to end of queue`,
+                                }),
+                                "success",
+                            );
+                        } catch (err) {
+                            console.error("Failed to add album to queue:", err);
+                            addToast(
+                                $_("queue.addToQueueFailed", {
+                                    default: "Failed to add album to queue",
+                                }),
+                                "error",
+                            );
+                        }
+                    },
                 },
                 {
                     label: savedForLater

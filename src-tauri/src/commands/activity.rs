@@ -1,5 +1,6 @@
 // Activity-related Tauri commands (liked tracks + play history)
 use crate::db::{queries, Database};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Utc, Weekday};
 use tauri::State;
 
 // ============================================================================
@@ -225,6 +226,53 @@ pub async fn get_recently_played(
 ) -> Result<Vec<queries::Track>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     queries::get_recently_played(&conn, limit).map_err(|e| e.to_string())
+}
+
+/// Returns the most-recently-played albums (deduped), used by the
+/// "Jump Back In" section on the home screen.
+#[tauri::command]
+pub async fn get_recently_played_albums(
+    limit: i32,
+    db: State<'_, Database>,
+) -> Result<Vec<queries::Album>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::get_recently_played_albums(&conn, limit).map_err(|e| e.to_string())
+}
+
+/// Returns tracks played since the start of the current calendar week
+/// (Monday 00:00 UTC). Used by the "This Week" section on the home
+/// screen. The count returned tells the frontend whether to show the
+/// "View all" link.
+#[tauri::command]
+pub async fn get_played_this_week(
+    limit: i32,
+    db: State<'_, Database>,
+) -> Result<Vec<queries::Track>, String> {
+    let now = Utc::now();
+    let weekday = now.weekday();
+    // weekday() returns Mon=0 .. Sun=6. Days since Monday:
+    let days_since_monday = match weekday {
+        Weekday::Mon => 0,
+        Weekday::Tue => 1,
+        Weekday::Wed => 2,
+        Weekday::Thu => 3,
+        Weekday::Fri => 4,
+        Weekday::Sat => 5,
+        Weekday::Sun => 6,
+    };
+    let monday = now - Duration::days(days_since_monday);
+    // Floor to 00:00:00 UTC of that Monday.
+    let monday_midnight = Utc
+        .with_ymd_and_hms(monday.year(), monday.month(), monday.day(), 0, 0, 0)
+        .single()
+        .unwrap_or(now);
+    let since_iso = DateTime::<Utc>::from(monday_midnight)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::get_recently_played_since(&conn, &since_iso, limit)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

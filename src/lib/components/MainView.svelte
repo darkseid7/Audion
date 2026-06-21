@@ -25,6 +25,7 @@
     import DesktopHome from "./DesktopHome.svelte";
     import LikedSongs from "./LikedSongs.svelte";
     import ListenLaterAlbums from "./ListenLaterAlbums.svelte";
+    import RecentlyPlayed from "./RecentlyPlayed.svelte";
 
     import TrackList from "./TrackList.svelte";
     import AlbumGrid from "./AlbumGrid.svelte";
@@ -753,6 +754,10 @@
     {:else if $currentView.type === "listen-later"}
         <div class="view-container no-padding">
             <ListenLaterAlbums />
+        </div>
+    {:else if $currentView.type === "recently-played"}
+        <div class="view-container no-padding">
+            <RecentlyPlayed />
         </div>
     {:else if $currentView.type === "listenbrainz"}
         <div class="view-container no-padding">
