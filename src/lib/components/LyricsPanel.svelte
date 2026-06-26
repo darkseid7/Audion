@@ -583,14 +583,16 @@
     /* Panel shell                                                          */
     /* ------------------------------------------------------------------ */
     .lyrics-panel {
-        /* Theme-aware lyrics colors - light theme default */
-        --lyrics-inactive: rgba(0, 0, 0, 0.4);
-        --lyrics-near: rgba(0, 0, 0, 0.5);
-        --lyrics-mid: rgba(0, 0, 0, 0.35);
-        --lyrics-far: rgba(0, 0, 0, 0.25);
-        --lyrics-past-near: rgba(0, 0, 0, 0.45);
-        --lyrics-past-mid: rgba(0, 0, 0, 0.3);
-        --lyrics-past-far: rgba(0, 0, 0, 0.2);
+        /* Theme-aware lyrics colors - light theme default.
+           Keep base alphas high; the .near/.mid/.far state selectors
+           further down dim the inactive lines for visual hierarchy. */
+        --lyrics-inactive: rgba(0, 0, 0, 0.85);
+        --lyrics-near: rgba(0, 0, 0, 0.9);
+        --lyrics-mid: rgba(0, 0, 0, 0.7);
+        --lyrics-far: rgba(0, 0, 0, 0.55);
+        --lyrics-past-near: rgba(0, 0, 0, 0.7);
+        --lyrics-past-mid: rgba(0, 0, 0, 0.5);
+        --lyrics-past-far: rgba(0, 0, 0, 0.35);
 
         width: 350px;
         min-width: 300px;
@@ -608,15 +610,19 @@
         animation: slideIn 0.3s ease;
     }
 
-    /* Dark theme overrides */
+    /* Dark theme overrides — use high-opacity white so the lyrics are
+       actually readable. The state selectors (.near/.mid/.far and the
+       past variants) already dim and blur the inactive lines, so we
+       start close to full opacity here and let those selectors do the
+       visual hierarchy work. */
     :global([data-theme="dark"]) .lyrics-panel {
-        --lyrics-inactive: rgba(255, 255, 255, 0.4);
-        --lyrics-near: rgba(255, 255, 255, 0.5);
-        --lyrics-mid: rgba(255, 255, 255, 0.35);
-        --lyrics-far: rgba(255, 255, 255, 0.25);
-        --lyrics-past-near: rgba(255, 255, 255, 0.45);
-        --lyrics-past-mid: rgba(255, 255, 255, 0.3);
-        --lyrics-past-far: rgba(255, 255, 255, 0.2);
+        --lyrics-inactive: rgba(255, 255, 255, 0.85);
+        --lyrics-near: rgba(255, 255, 255, 0.9);
+        --lyrics-mid: rgba(255, 255, 255, 0.7);
+        --lyrics-far: rgba(255, 255, 255, 0.55);
+        --lyrics-past-near: rgba(255, 255, 255, 0.7);
+        --lyrics-past-mid: rgba(255, 255, 255, 0.5);
+        --lyrics-past-far: rgba(255, 255, 255, 0.35);
     }
 
     @keyframes slideIn {

@@ -3,9 +3,12 @@
 // Players broadcast a single byte 'e' (TLV) or 'd' (legacy) to UDP port 3483.
 // We respond with our server IP so they can initiate a TCP SlimProto connection.
 
+use crate::squeeze::player::PlayerMap;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 /// Stable UUID for this Audion Squeeze server instance.
@@ -110,4 +113,95 @@ pub fn start_discovery_with_socket(
     });
 
     (handle, shutdown)
+}
+
+/// Periodically broadcast the TLV discovery response to 255.255.255.255:3483
+/// for a short window after the squeeze server starts. This is a proactive
+/// "I'm here" beacon — it lets any Squeeze player on the LAN that lost its
+/// TCP connection (e.g. the user closed and reopened Audion while their
+/// Eversolo was still on) rediscover us without having to manually trigger
+/// a rescan from the device.
+///
+/// Players normally only probe the network when they boot or when the user
+/// explicitly asks for a rescan. Many of them, however, accept unsolicited
+/// TLV 'E' responses as a fresh announcement and initiate a reconnect on
+/// their own. Sending the same 'E' TLV we use for unicast replies keeps
+/// the protocol consistent.
+///
+/// Stops early if a player connects (so we don't spam the network) or
+/// after `BROADCAST_DURATION` elapses. Uses a separate UDP socket from the
+/// listener so it can have SO_BROADCAST set without affecting normal
+/// recv behavior.
+const BROADCAST_INTERVAL: Duration = Duration::from_secs(3);
+const BROADCAST_DURATION: Duration = Duration::from_secs(60);
+
+pub fn start_discovery_broadcaster(
+    http_port: u16,
+    server_name: String,
+    players: PlayerMap,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::task::spawn(async move {
+        // Use a separate socket so SO_BROADCAST doesn't leak into the
+        // listener, and so the broadcaster doesn't tie up port 3483.
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "Squeeze discovery broadcaster: bind failed: {} (auto-reconnect beacon disabled)",
+                    e
+                );
+                return;
+            }
+        };
+        if let Err(e) = socket.set_broadcast(true) {
+            tracing::warn!(
+                "Squeeze discovery broadcaster: SO_BROADCAST failed: {} (auto-reconnect beacon disabled)",
+                e
+            );
+            return;
+        }
+
+        let broadcast_addr: SocketAddr = "255.255.255.255:3483".parse().unwrap();
+        let response = build_tlv_response(&server_name, http_port);
+        let started = Instant::now();
+
+        // Fire the first beacon immediately so a player that's listening
+        // at this exact moment doesn't have to wait for the next tick.
+        match socket.send_to(&response, &broadcast_addr) {
+            Ok(_) => tracing::info!(
+                "Squeeze discovery: broadcast beacon sent to {} (auto-reconnect beacon enabled for {}s)",
+                broadcast_addr,
+                BROADCAST_DURATION.as_secs()
+            ),
+            Err(e) => tracing::warn!("Squeeze discovery: initial broadcast failed: {}", e),
+        }
+
+        loop {
+            tokio::time::sleep(BROADCAST_INTERVAL).await;
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            if started.elapsed() > BROADCAST_DURATION {
+                tracing::info!("Squeeze discovery: broadcaster stopped after timeout");
+                break;
+            }
+            // Stop early once a player is registered — no need to keep
+            // announcing ourselves.
+            {
+                let map = players.lock().await;
+                if !map.is_empty() {
+                    tracing::info!(
+                        "Squeeze discovery: player connected, stopping broadcaster"
+                    );
+                    break;
+                }
+            }
+            if let Err(e) = socket.send_to(&response, &broadcast_addr) {
+                tracing::debug!("Squeeze discovery: broadcast failed: {}", e);
+            }
+        }
+
+        tracing::info!("Squeeze discovery: broadcaster stopped");
+    })
 }

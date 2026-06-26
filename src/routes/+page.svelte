@@ -17,7 +17,10 @@
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import { isTauri } from "$lib/api/tauri";
   import { squeezeStartServer } from "$lib/api/tauri";
-  import { startGlobalSqueezeDiscovery } from "$lib/stores/squeeze";
+  import {
+    startGlobalSqueezeDiscovery,
+    initSqueezeSessionPersistence,
+  } from "$lib/stores/squeeze";
   import {
     initializeFromPersistedState,
     setupAutoSave,
@@ -102,6 +105,11 @@
       squeezeStartServer()
         .then(() => startGlobalSqueezeDiscovery())
         .catch((e) => console.warn("[SQUEEZE] Auto-start failed:", e));
+
+      // Wire up session save/restore subscribers. Done here (not at
+      // module-load) to avoid a circular-import crash between
+      // squeeze.ts and player.ts — both must finish evaluating first.
+      initSqueezeSessionPersistence();
 
       // Lazy load plugins- reduce startup time
       requestIdleCallback(() => {

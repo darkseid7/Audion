@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, Notify};
 
@@ -111,6 +112,12 @@ pub struct CometdClient {
     pub push_queue: Vec<serde_json::Value>,
     /// Notify when there's data to push.
     pub notify: Arc<Notify>,
+    /// Last time we received any HTTP request from this client. Updated
+    /// on every cometd_handler call so a background watchdog can evict
+    /// sessions whose long-poll just timed out without ever sending a
+    /// proper /meta/disconnect (e.g. the user closed the Eversolo WebUI
+    /// tab or the network dropped).
+    pub last_seen: Instant,
 }
 
 /// Shared Cometd state.
@@ -191,6 +198,20 @@ pub async fn cometd_handler(
 
     for msg in &messages {
         tracing::info!("Cometd: channel={} id={:?} clientId={:?}", msg.channel, msg.id, msg.client_id);
+
+        // Refresh liveness for any clientId we can identify — this is
+        // what the watchdog uses to evict sessions that vanished without
+        // sending a /meta/disconnect (closed tab, dropped network, etc).
+        // Skip the handshake itself: a brand-new clientId isn't in the
+        // map yet, and the handshake handler sets last_seen itself.
+        if msg.channel != "/meta/handshake" {
+            if let Some(cid) = msg.client_id.as_deref() {
+                let mut clients = state.clients.lock().await;
+                if let Some(c) = clients.get_mut(cid) {
+                    c.last_seen = Instant::now();
+                }
+            }
+        }
 
         match msg.channel.as_str() {
             "/meta/handshake" => {
@@ -283,6 +304,7 @@ async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
         status_channels: HashMap::new(),
         push_queue: Vec::new(),
         notify: Arc::new(Notify::new()),
+        last_seen: Instant::now(),
     };
 
     {
@@ -875,20 +897,38 @@ async fn handle_disconnect(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRe
     tracing::info!("Cometd: disconnect clientId={}", client_id);
 
     // Remove client and MAC mapping
-    let mac_str = {
+    let removed_client = {
         let mut clients = state.clients.lock().await;
-        if let Some(client) = clients.remove(&client_id) {
-            // Wake up any pending long-poll
-            client.notify.notify_one();
-            Some(client.mac.to_string())
-        } else {
-            None
-        }
+        clients.remove(&client_id)
     };
 
-    if let Some(mac_str) = mac_str {
+    if let Some(client) = removed_client {
+        // Wake up any pending long-poll
+        client.notify.notify_one();
+
+        // Remove MAC mapping
         let mut mac_map = state.mac_to_client.lock().await;
-        mac_map.remove(&mac_str);
+        mac_map.remove(&client.mac.to_string());
+        drop(mac_map);
+
+        // If this was a CometD-only registration (no TCP writer), drop
+        // the player entry too. Otherwise leave it for the TCP path to
+        // manage — when both transports share the same MAC the TCP
+        // disconnect handler will do the cleanup.
+        let mut players = state.players.lock().await;
+        let is_cometd_only = players
+            .get(&client.mac)
+            .map(|p| !p.has_tcp_writer())
+            .unwrap_or(false);
+        if is_cometd_only {
+            if let Some(p) = players.remove(&client.mac) {
+                tracing::info!(
+                    "Cometd: removed CometD-only player {} (\"{}\") on disconnect",
+                    client.mac,
+                    p.name
+                );
+            }
+        }
     }
 
     BayeuxResponse {
@@ -1342,4 +1382,79 @@ pub fn parse_mac_address(mac_str: &str) -> MacAddress {
         bytes[i] = u8::from_str_radix(part, 16).unwrap_or(0);
     }
     MacAddress(bytes)
+}
+
+// ── Watchdog ─────────────────────────────────────────────────────────────────
+
+/// How often the watchdog scans for stale clients.
+const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A CometD client that hasn't been seen for longer than this is
+/// considered dead. Must be > the longest expected long-poll timeout
+/// (currently 30 s) plus some slack so a slow client doesn't get
+/// evicted during a normal idle period.
+const WATCHDOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Background task that periodically evicts CometD clients whose HTTP
+/// connection has died without sending a /meta/disconnect, and removes
+/// their (CometD-only) player entries from the shared player map. This
+/// is what stops "zombie" Player entries from accumulating forever when
+/// the Eversolo's WebUI tab is closed abruptly or the network drops.
+pub async fn run_watchdog(state: CometdState, shutdown: Arc<AtomicBool>) {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(WATCHDOG_INTERVAL).await;
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let now = Instant::now();
+        // Snapshot stale clientIds while only holding the clients lock.
+        let stale: Vec<(String, MacAddress)> = {
+            let clients = state.clients.lock().await;
+            clients
+                .iter()
+                .filter(|(_, c)| now.duration_since(c.last_seen) > WATCHDOG_TIMEOUT)
+                .map(|(id, c)| (id.clone(), c.mac))
+                .collect()
+        };
+
+        if stale.is_empty() {
+            continue;
+        }
+
+        let mut clients = state.clients.lock().await;
+        let mut mac_map = state.mac_to_client.lock().await;
+        let mut players = state.players.lock().await;
+
+        for (client_id, mac) in stale {
+            if let Some(client) = clients.remove(&client_id) {
+                mac_map.remove(&client.mac.to_string());
+                // Only drop the player entry if it's a CometD-only
+                // registration (no TCP writer). If TCP is also active
+                // for this MAC, the TCP path owns the player lifecycle.
+                let is_cometd_only = players
+                    .get(&mac)
+                    .map(|p| !p.has_tcp_writer())
+                    .unwrap_or(false);
+                if is_cometd_only {
+                    if let Some(p) = players.remove(&mac) {
+                        tracing::info!(
+                            "Cometd watchdog: evicted stale player {} (\"{}\")",
+                            mac,
+                            p.name
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        "Cometd watchdog: evicted stale client {} for {}, kept player (has TCP writer)",
+                        client_id,
+                        mac
+                    );
+                }
+            }
+        }
+    }
+    tracing::info!("Cometd watchdog stopped");
 }

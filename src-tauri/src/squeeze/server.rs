@@ -268,10 +268,36 @@ async fn handle_connection(
         }
     }
 
-    // Cleanup
-    let mut map = players.lock().await;
-    map.remove(&mac);
-    tracing::info!("Squeeze TCP: player {} removed", mac);
+    // Cleanup. Only drop the player entry if no CometD session is
+    // currently bound to the same MAC — otherwise the WebUI control
+    // plane would lose its registration just because the hardware
+    // player disconnected.
+    let cometd_mac_str = mac.to_string();
+    {
+        let players_lock = players.clone();
+        let cometd_for_check = cometd.clone();
+        let mac_for_check = cometd_mac_str.clone();
+        let has_cometd = {
+            let mac_map = cometd_for_check.mac_to_client.lock().await;
+            mac_map.contains_key(&mac_for_check)
+        };
+        let mut map = players_lock.lock().await;
+        if has_cometd {
+            // Keep the player entry; just clear the TCP writer so the
+            // CometD path takes over (state polling now relies solely
+            // on the long-poll updates pushed from the Eversolo WebUI).
+            if let Some(p) = map.get_mut(&mac) {
+                p.clear_writer();
+            }
+            tracing::info!(
+                "Squeeze TCP: player {} TCP closed; kept registration (CometD still active)",
+                mac
+            );
+        } else {
+            map.remove(&mac);
+            tracing::info!("Squeeze TCP: player {} removed", mac);
+        }
+    }
 }
 
 /// Read the initial HELO message and register the player.

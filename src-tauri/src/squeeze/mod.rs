@@ -83,6 +83,22 @@ impl SqueezeServer {
             }
         }));
 
+        // 1b. Active re-announce broadcaster — for 60s after each server
+        // start, periodically broadcast a TLV 'E' response to
+        // 255.255.255.255:3483 so any player on the LAN that lost its
+        // TCP connection (e.g. when the user closes+reopens Audion while
+        // the Eversolo was still on) rediscover us without the user
+        // having to manually trigger a rescan from the device.
+        let bc_shutdown = self.shutdown_flag.clone();
+        let bc_players = self.players.clone();
+        let broadcaster_handle = discovery::start_discovery_broadcaster(
+            server::HTTP_PORT,
+            "Audion".to_string(),
+            bc_players,
+            bc_shutdown,
+        );
+        self.handles.push(broadcaster_handle);
+
         // 2. TCP SlimProto server (pass pre-bound listener)
         let tcp_handle = server::start_slimproto_server_with_listener(
             tcp_listener,
@@ -141,6 +157,18 @@ impl SqueezeServer {
             }
         });
         self.handles.push(cli_handle);
+
+        // 5. CometD watchdog — evicts sessions whose HTTP connection
+        // vanished without sending /meta/disconnect (closed tab, dropped
+        // network, etc) and removes their (CometD-only) player entries.
+        // Without this, stale "Player" entries accumulate in the
+        // player map and surface as ghost devices in the Connect panel.
+        let wd_shutdown = self.shutdown_flag.clone();
+        let wd_state = self.cometd.clone();
+        let watchdog_handle = tokio::spawn(async move {
+            cometd::run_watchdog(wd_state, wd_shutdown).await;
+        });
+        self.handles.push(watchdog_handle);
 
         self.running.store(true, Ordering::Relaxed);
         tracing::info!("Squeeze server started (UDP 3483, TCP 3483, HTTP {}, CLI 9090)", server::HTTP_PORT);

@@ -141,6 +141,22 @@ impl SqueezePlayer {
         self.server_ip = server_ip;
     }
 
+    /// Returns true if this player has an active TCP writer (i.e., the
+    /// hardware player is currently connected via SlimProto). Used by
+    /// the CometD disconnect / watchdog paths to know whether they are
+    /// the sole owner of the player entry, or whether the TCP path
+    /// should be left to manage cleanup.
+    pub fn has_tcp_writer(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    /// Clear the TCP writer without touching anything else. Used when
+    /// a TCP connection closes but a CometD session is still active
+    /// for the same MAC — we don't want to drop the player entry.
+    pub fn clear_writer(&mut self) {
+        self.writer = None;
+    }
+
     /// Get current elapsed time in milliseconds.
     /// Uses wall-clock time since playback started for smooth progress tracking.
     pub fn get_elapsed_ms(&self) -> u32 {
