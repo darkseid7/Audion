@@ -338,6 +338,18 @@
             dragOverIndex = null;
             dragOverPosition = null;
         }
+
+        // Edge drop zones
+        const topZone = elementsUnderPointer.find((el) =>
+            el.classList.contains("drop-zone-top"),
+        );
+        const bottomZone = elementsUnderPointer.find((el) =>
+            el.classList.contains("drop-zone-bottom"),
+        );
+        dragOverTopZone = !!topZone;
+        dragOverBottomZone = !!bottomZone;
+        if (topZone) dragOverIndex = 0;
+        if (bottomZone) dragOverIndex = upcomingTracks.length;
     }
 
     function handlePointerUp() {
@@ -482,6 +494,11 @@
                                 class="virtual-content"
                                 style="transform: translateY({upcomingVirtualState.offsetY}px);"
                             >
+                                <div
+                                    class="drop-zone-top"
+                                    class:active={dragOverTopZone && dragActivated}
+                                    style="height: 4px;"
+                                ></div>
                                 {#each upcomingVirtualState.visibleTracks as item, i (item.track.id + "-next-" + item.index)}
                                     <div
                                         class="queue-track"
@@ -573,9 +590,28 @@
                                         </button>
                                     </div>
                                 {/each}
+                                <div
+                                    class="drop-zone-bottom"
+                                    class:active={dragOverBottomZone && dragActivated}
+                                    style="height: 4px;"
+                                ></div>
                             </div>
                         </div>
                     </div>
+                </section>
+            {/if}
+
+            <!-- Empty upcoming list drop target: single zone during active drag -->
+            {#if upcomingTracks.length === 0 && dragActivated}
+                <section class="queue-section">
+                    <h4 class="section-title">
+                        Next Up
+                        <span class="count">0</span>
+                    </h4>
+                    <div
+                        class="drop-zone-empty"
+                        class:active={dragOverTopZone || dragOverBottomZone}
+                    ></div>
                 </section>
             {/if}
 
@@ -899,6 +935,45 @@
             animation: none;
             opacity: 0.8;
         }
+    }
+
+    /* Edge drop zones */
+    .drop-zone-top,
+    .drop-zone-bottom {
+        height: 4px;
+        transition: all 0.15s ease;
+        opacity: 0;
+        flex-shrink: 0;
+    }
+
+    .drop-zone-top.active,
+    .drop-zone-bottom.active {
+        opacity: 1;
+        background: linear-gradient(
+            90deg,
+            transparent,
+            var(--accent-primary),
+            transparent
+        );
+        border-radius: 2px;
+    }
+
+    /* Empty upcoming list drop target */
+    .drop-zone-empty {
+        min-height: 40px;
+        border-radius: var(--radius-md);
+        background: var(--bg-base);
+        transition: all 0.15s ease;
+    }
+
+    .drop-zone-empty.active {
+        background: linear-gradient(
+            90deg,
+            transparent,
+            var(--accent-primary),
+            transparent
+        );
+        opacity: 0.3;
     }
 
     /* Drag ghost clone — body-level floating element */
