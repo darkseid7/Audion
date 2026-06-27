@@ -18,14 +18,20 @@ pub struct WindowConfig {
     pub close_to_tray: bool,
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Schema version for one-time migrations.
+    /// v0 (missing): close_to_tray was false by default
+    /// v1:            close_to_tray defaults to true
+    #[serde(default)]
+    pub config_version: u32,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             start_mode: WindowStartMode::Normal,
-            close_to_tray: false,
+            close_to_tray: true,
             minimize_to_tray: false,
+            config_version: 1,
         }
     }
 }
@@ -41,8 +47,18 @@ fn get_config_path(app_handle: &AppHandle) -> Option<PathBuf> {
 pub fn load_window_config(app_handle: &AppHandle) -> WindowConfig {
     if let Some(config_path) = get_config_path(app_handle) {
         if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(config_path) {
-                if let Ok(config) = serde_json::from_str(&content) {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if let Ok(config) = serde_json::from_str::<WindowConfig>(&content) {
+                    // One-time migration: v0 → v1 enables close_to_tray by default
+                    if config.config_version == 0 {
+                        let migrated = WindowConfig {
+                            close_to_tray: true,
+                            config_version: 1,
+                            ..config
+                        };
+                        save_window_config(app_handle, &migrated).ok();
+                        return migrated;
+                    }
                     return config;
                 }
             }

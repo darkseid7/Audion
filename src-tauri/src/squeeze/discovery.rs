@@ -4,18 +4,22 @@
 // We respond with our server IP so they can initiate a TCP SlimProto connection.
 
 use crate::squeeze::player::PlayerMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 
 /// Stable UUID for this Audion Squeeze server instance.
 const SERVER_UUID: &str = "audion-squeeze-server-0001";
 
+/// Version string advertised in the VERS TLV tag. Matches LMS convention
+/// so players that check server version for compatibility don't reject us.
+const SERVER_VERSION: &str = "8.4.0";
+
 /// Build a TLV 'E' response matching the LMS format.
-/// Tags: NAME (server name), JSON (HTTP port), UUID (server id).
+/// Tags: NAME (server name), JSON (HTTP port), UUID (server id), VERS (version).
 /// The player uses the UDP source IP to determine the server address.
 fn build_tlv_response(server_name: &str, http_port: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
@@ -39,6 +43,13 @@ fn build_tlv_response(server_name: &str, http_port: u16) -> Vec<u8> {
     buf.extend_from_slice(b"UUID");
     buf.push(uuid_bytes.len() as u8);
     buf.extend_from_slice(uuid_bytes);
+
+    // VERS tag — server version string (LMS sends this; some players use it
+    // for compatibility checks, so we include it to match the LMS response format)
+    let vers_bytes = SERVER_VERSION.as_bytes();
+    buf.extend_from_slice(b"VERS");
+    buf.push(vers_bytes.len() as u8);
+    buf.extend_from_slice(vers_bytes);
 
     buf
 }
@@ -115,12 +126,18 @@ pub fn start_discovery_with_socket(
     (handle, shutdown)
 }
 
-/// Periodically broadcast the TLV discovery response to 255.255.255.255:3483
-/// for a short window after the squeeze server starts. This is a proactive
-/// "I'm here" beacon — it lets any Squeeze player on the LAN that lost its
-/// TCP connection (e.g. the user closed and reopened Audion while their
-/// Eversolo was still on) rediscover us without having to manually trigger
-/// a rescan from the device.
+/// Continuously broadcast the TLV discovery response to 255.255.255.255:3483.
+///
+/// This is the proactive "I'm here" beacon. Unlike a one-shot broadcast, this
+/// runs **for the lifetime of the server** so that any Squeeze player on the LAN
+/// can rediscover us without manual intervention.
+///
+/// This mirrors LMS (Lyrion Music Server) behavior: LMS broadcasts its presence
+/// permanently via `Slim::Networking::Discovery::Server` with a re-scheduled
+/// timer that never stops, regardless of whether players are already connected.
+/// The rationale: if a player drops its TCP connection (network blip, device
+/// reboot, server restart) it needs a fresh beacon to find the server again.
+/// Stopping the beacon once a player connects breaks that recovery path.
 ///
 /// Players normally only probe the network when they boot or when the user
 /// explicitly asks for a rescan. Many of them, however, accept unsolicited
@@ -128,17 +145,15 @@ pub fn start_discovery_with_socket(
 /// their own. Sending the same 'E' TLV we use for unicast replies keeps
 /// the protocol consistent.
 ///
-/// Stops early if a player connects (so we don't spam the network) or
-/// after `BROADCAST_DURATION` elapses. Uses a separate UDP socket from the
-/// listener so it can have SO_BROADCAST set without affecting normal
-/// recv behavior.
-const BROADCAST_INTERVAL: Duration = Duration::from_secs(3);
-const BROADCAST_DURATION: Duration = Duration::from_secs(60);
+/// Uses a separate UDP socket from the listener so it can have SO_BROADCAST
+/// set without affecting normal recv behavior. Stops only when the server
+/// shuts down (via the shared shutdown flag).
+const BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn start_discovery_broadcaster(
     http_port: u16,
     server_name: String,
-    players: PlayerMap,
+    _players: PlayerMap,
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::task::spawn(async move {
@@ -164,17 +179,17 @@ pub fn start_discovery_broadcaster(
 
         let broadcast_addr: SocketAddr = "255.255.255.255:3483".parse().unwrap();
         let response = build_tlv_response(&server_name, http_port);
-        let started = Instant::now();
+
+        tracing::info!(
+            "Squeeze discovery: permanent broadcast beacon started (every {}s to {})",
+            BROADCAST_INTERVAL.as_secs(),
+            broadcast_addr,
+        );
 
         // Fire the first beacon immediately so a player that's listening
         // at this exact moment doesn't have to wait for the next tick.
-        match socket.send_to(&response, &broadcast_addr) {
-            Ok(_) => tracing::info!(
-                "Squeeze discovery: broadcast beacon sent to {} (auto-reconnect beacon enabled for {}s)",
-                broadcast_addr,
-                BROADCAST_DURATION.as_secs()
-            ),
-            Err(e) => tracing::warn!("Squeeze discovery: initial broadcast failed: {}", e),
+        if let Err(e) = socket.send_to(&response, &broadcast_addr) {
+            tracing::warn!("Squeeze discovery: initial broadcast failed: {}", e);
         }
 
         loop {
@@ -182,26 +197,11 @@ pub fn start_discovery_broadcaster(
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            if started.elapsed() > BROADCAST_DURATION {
-                tracing::info!("Squeeze discovery: broadcaster stopped after timeout");
-                break;
-            }
-            // Stop early once a player is registered — no need to keep
-            // announcing ourselves.
-            {
-                let map = players.lock().await;
-                if !map.is_empty() {
-                    tracing::info!(
-                        "Squeeze discovery: player connected, stopping broadcaster"
-                    );
-                    break;
-                }
-            }
             if let Err(e) = socket.send_to(&response, &broadcast_addr) {
                 tracing::debug!("Squeeze discovery: broadcast failed: {}", e);
             }
         }
 
-        tracing::info!("Squeeze discovery: broadcaster stopped");
+        tracing::info!("Squeeze discovery: broadcaster stopped (server shutdown)");
     })
 }

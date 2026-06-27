@@ -408,6 +408,31 @@ async fn handle_connect(state: &CometdState, msg: &BayeuxRequest) -> Vec<serde_j
         }
     };
 
+    // Unknown clientId — the server restarted (or the session expired).
+    // Per the Bayeux protocol, return successful:false with
+    // advice.reconnect:"handshake" so the client re-handshakes and
+    // gets a fresh clientId. Without this, the client thinks it's
+    // connected but never receives push messages, causing it to
+    // silently drop after a few seconds.
+    if notify.is_none() {
+        tracing::info!(
+            "Cometd: connect with unknown clientId={} — requesting re-handshake",
+            client_id
+        );
+        responses.push(serde_json::json!({
+            "channel": "/meta/connect",
+            "id": msg.id,
+            "clientId": client_id,
+            "successful": false,
+            "advice": {
+                "reconnect": "handshake",
+                "interval": 0,
+                "timeout": 30000
+            }
+        }));
+        return responses;
+    }
+
     // If client requests timeout:0, return immediately (don't block other messages in batch)
     if client_timeout == 0 {
         tracing::info!("Cometd: connect with timeout:0 for clientId={}, returning immediately", client_id);
@@ -451,19 +476,40 @@ async fn handle_subscribe(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
         if !client.subscriptions.contains(&subscription) {
             client.subscriptions.push(subscription.clone());
         }
-    }
-
-    BayeuxResponse {
-        channel: "/meta/subscribe".to_string(),
-        id: msg.id.clone(),
-        version: None,
-        client_id: Some(client_id),
-        successful: true,
-        supported_connection_types: None,
-        advice: None,
-        data: None,
-        ext: None,
-        subscription: Some(subscription),
+        BayeuxResponse {
+            channel: "/meta/subscribe".to_string(),
+            id: msg.id.clone(),
+            version: None,
+            client_id: Some(client_id),
+            successful: true,
+            supported_connection_types: None,
+            advice: None,
+            data: None,
+            ext: None,
+            subscription: Some(subscription),
+        }
+    } else {
+        // Unknown clientId — request re-handshake
+        tracing::info!(
+            "Cometd: subscribe with unknown clientId={} — requesting re-handshake",
+            client_id
+        );
+        BayeuxResponse {
+            channel: "/meta/subscribe".to_string(),
+            id: msg.id.clone(),
+            version: None,
+            client_id: Some(client_id),
+            successful: false,
+            supported_connection_types: None,
+            advice: Some(BayeuxAdvice {
+                reconnect: "handshake".to_string(),
+                interval: 0,
+                timeout: 30000,
+            }),
+            data: None,
+            ext: None,
+            subscription: Some(subscription),
+        }
     }
 }
 
@@ -474,6 +520,29 @@ async fn handle_slim_subscribe(state: &CometdState, msg: &BayeuxRequest) -> Vec<
     let mut result = Vec::new();
 
     tracing::info!("Cometd: slim/subscribe clientId={} data={:?}", client_id, msg.data);
+
+    // Validate clientId — if unknown, request re-handshake
+    {
+        let clients = state.clients.lock().await;
+        if !clients.contains_key(&client_id) {
+            tracing::info!(
+                "Cometd: slim/subscribe with unknown clientId={} — requesting re-handshake",
+                client_id
+            );
+            result.push(serde_json::json!({
+                "channel": "/slim/subscribe",
+                "id": msg.id,
+                "clientId": client_id,
+                "successful": false,
+                "advice": {
+                    "reconnect": "handshake",
+                    "interval": 0,
+                    "timeout": 30000
+                }
+            }));
+            return result;
+        }
+    }
 
     if let Some(data) = &msg.data {
         let response_channel = data.get("response").and_then(|v| v.as_str()).unwrap_or("");
