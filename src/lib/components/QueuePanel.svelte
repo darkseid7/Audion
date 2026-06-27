@@ -350,6 +350,9 @@
         dragOverBottomZone = !!bottomZone;
         if (topZone) dragOverIndex = 0;
         if (bottomZone) dragOverIndex = upcomingTracks.length;
+
+        // Auto-scroll near viewport edges
+        manageAutoScroll(e);
     }
 
     function handlePointerUp() {
@@ -416,6 +419,44 @@
         dragOverPosition = null;
         dragOverTopZone = false;
         dragOverBottomZone = false;
+    }
+
+    function manageAutoScroll(e: PointerEvent) {
+        const container = upcomingContainerElement;
+        if (!container) return;
+        const rect = container.getBoundingClientRect();
+        const inTopZone = e.clientY - rect.top < 40;
+        const inBottomZone = rect.bottom - e.clientY < 40;
+
+        if (autoScrollRaf !== null && !inTopZone && !inBottomZone) {
+            cancelAnimationFrame(autoScrollRaf);
+            autoScrollRaf = null;
+            return;
+        }
+
+        if ((inTopZone || inBottomZone) && autoScrollRaf === null) {
+            autoScrollRaf = requestAnimationFrame(() =>
+                autoScrollLoop(container, inTopZone),
+            );
+        }
+    }
+
+    function autoScrollLoop(container: HTMLElement, scrollingUp: boolean) {
+        const delta = scrollingUp ? -8 : 8;
+        container.scrollTop = Math.max(
+            0,
+            Math.min(
+                container.scrollTop + delta,
+                container.scrollHeight - container.clientHeight,
+            ),
+        );
+        upcomingScrollTop = container.scrollTop;
+
+        if (dragActivated) {
+            autoScrollRaf = requestAnimationFrame(() =>
+                autoScrollLoop(container, scrollingUp),
+            );
+        }
     }
 
     function cleanupDrag() {
