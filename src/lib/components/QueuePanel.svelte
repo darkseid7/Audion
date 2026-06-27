@@ -250,7 +250,6 @@
     let dragGhost: HTMLElement | null = null;
     let dragActivated = false;
     let dragStartPos: { x: number; y: number } | null = null;
-    let dragPointer: { x: number; y: number } | null = null;
     let dragOverPosition: "before" | "after" | null = null;
     let autoScrollRaf: number | null = null;
     let dragOverTopZone = false;
@@ -290,8 +289,6 @@
 
     function handlePointerMove(e: PointerEvent) {
         if (!isDragging || draggedIndex === null) return;
-
-        dragPointer = { x: e.clientX, y: e.clientY };
 
         // Activation threshold (4px Euclidean distance)
         if (!dragActivated && dragStartPos) {
@@ -415,7 +412,6 @@
         dragOverIndex = null;
         dragActivated = false;
         dragStartPos = null;
-        dragPointer = null;
         dragOverPosition = null;
         dragOverTopZone = false;
         dragOverBottomZone = false;
