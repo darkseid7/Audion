@@ -400,7 +400,6 @@
             draggedIndex !== dragOverIndex &&
             dragActivated
         ) {
-            console.log("Reorder:", draggedIndex, "->", dragOverIndex);
             reorderQueue(draggedIndex, dragOverIndex);
         }
 
@@ -776,20 +775,6 @@
                 </section>
             {/if}
 
-            <!-- Empty upcoming list drop target: single zone during active drag -->
-            {#if upcomingTracks.length === 0 && dragActivated}
-                <section class="queue-section">
-                    <h4 class="section-title">
-                        Next Up
-                        <span class="count">0</span>
-                    </h4>
-                    <div
-                        class="drop-zone-empty"
-                        class:active={dragOverTopZone || dragOverBottomZone}
-                    ></div>
-                </section>
-            {/if}
-
             {#if historyTracks.length > 0}
                 <section class="queue-section history">
                     <h4 class="section-title">
@@ -994,6 +979,10 @@
     }
 
     /* Live reorder — full list during drag, items animate via FLIP transforms */
+    .queue-list.drag-active .queue-track {
+        will-change: transform;
+    }
+
     .queue-list.drag-active {
         max-height: min(400px, 40vh);
         overflow-y: auto;
