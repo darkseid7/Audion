@@ -293,11 +293,24 @@
 
         dragPointer = { x: e.clientX, y: e.clientY };
 
-        // Phase 2+: activation threshold + ghost positioning will go here
-        // Phase 3+: half-row detection + drop zones will go here
-        // Phase 5+: auto-scroll will go here
+        // Activation threshold (4px Euclidean distance)
+        if (!dragActivated && dragStartPos) {
+            const dx = e.clientX - dragStartPos.x;
+            const dy = e.clientY - dragStartPos.y;
+            if (Math.hypot(dx, dy) < 4) return;
+        }
 
-        // Find element under pointer
+        if (!dragActivated) {
+            dragActivated = true;
+            createGhost(e);
+        }
+
+        // Position ghost to follow cursor
+        if (dragGhost) {
+            dragGhost.style.transform = `translate3d(${e.clientX - 8}px, ${e.clientY - 8}px, 0)`;
+        }
+
+        // Find element under pointer for drop target detection
         const elementsUnderPointer = document.elementsFromPoint(
             e.clientX,
             e.clientY,
@@ -326,9 +339,9 @@
             isDragging &&
             draggedIndex !== null &&
             dragOverIndex !== null &&
-            draggedIndex !== dragOverIndex
+            draggedIndex !== dragOverIndex &&
+            dragActivated
         ) {
-            // Phase 2+: dragActivated gate will be added when threshold is implemented
             console.log("Reorder:", draggedIndex, "->", dragOverIndex);
             reorderQueue(draggedIndex, dragOverIndex);
         }
@@ -346,8 +359,32 @@
         }
     }
 
+    function createGhost(e: PointerEvent) {
+        const row = document.querySelector(`[data-index="${draggedIndex}"]`);
+        if (!row) return;
+        const ghost = row.cloneNode(true) as HTMLElement;
+        ghost.className = "drag-ghost";
+        ghost.style.cssText = `
+            position: fixed;
+            z-index: 5000;
+            pointer-events: none;
+            transform: translate3d(${e.clientX - 8}px, ${e.clientY - 8}px, 0);
+            width: ${row.getBoundingClientRect().width}px;
+            opacity: 0.9;
+            background: var(--bg-elevated);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-xs);
+            will-change: transform;
+        `;
+        document.body.appendChild(ghost);
+        dragGhost = ghost;
+    }
+
     function destroyGhost() {
-        // Phase 2: will remove ghost from DOM
+        if (dragGhost && dragGhost.parentNode) {
+            dragGhost.parentNode.removeChild(dragGhost);
+        }
         dragGhost = null;
     }
 
@@ -789,6 +826,18 @@
     .queue-track.drag-over {
         border-top: 2px solid var(--accent-primary);
         margin-top: -2px;
+    }
+
+    /* Drag ghost clone — body-level floating element */
+    .drag-ghost {
+        position: fixed;
+        z-index: 5000;
+        pointer-events: none;
+        opacity: 0.9;
+        background: var(--bg-elevated);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        border-radius: var(--radius-md);
+        will-change: transform;
     }
 
     .drag-handle {
