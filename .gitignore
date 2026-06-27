@@ -59,3 +59,8 @@ plugin-examples/
 
 #Implementation Plan
 implementation_plan.md
+
+# SDD artifacts (engram-backed, single-dev repo)
+openspec/
+.atl/
+.opencode/
