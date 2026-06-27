@@ -20,6 +20,7 @@
         isPlaying,
         togglePlay,
         appendToQueueEnd,
+        playNext,
     } from "$lib/stores/player";
     import VirtualizedGrid from "./Virtualizedgrid.svelte";
     import MediaCard from "./MediaCard.svelte";
@@ -562,6 +563,28 @@
                 {
                     label: "Play",
                     action: () => playAlbum(album),
+                },
+                {
+                    label: $_('contextMenu.playAlbumNext'),
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album.id);
+                            if (tracks.length === 0) {
+                                addToast(
+                                    $_("queue.noTracksToAdd", {
+                                        default: "No tracks found for this album",
+                                    }),
+                                    "warning",
+                                );
+                                return;
+                            }
+                            playNext(tracks);
+                            addToast(`Playing "${album.name}" next`, "success");
+                        } catch (err) {
+                            console.error("Failed to play album next:", err);
+                            addToast("Failed to play album next", "error");
+                        }
+                    },
                 },
                 {
                     label: $_("contextMenu.addToQueue"),

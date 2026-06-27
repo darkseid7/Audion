@@ -13,7 +13,8 @@
         goToArtistDetail,
         goToPlaylistDetail,
     } from "$lib/stores/view";
-    import { playTracks, addToQueue } from "$lib/stores/player";
+    import { _ } from "svelte-i18n";
+    import { playTracks, addToQueue, playNext } from "$lib/stores/player";
     import {
         getAlbumArtSrc,
         getTrackCoverSrc,
@@ -175,6 +176,10 @@
                     },
                 },
                 { type: "separator" },
+                {
+                    label: $_('contextMenu.playNext'),
+                    action: () => playNext([track]),
+                },
                 {
                     label: "Add to Queue",
                     action: () => addToQueue([track]),

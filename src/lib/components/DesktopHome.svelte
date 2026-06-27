@@ -4,6 +4,7 @@
     import {
         playTracks,
         addToQueue,
+        playNext,
         currentAlbumId,
         currentTrackId,
         isPlaying,
@@ -284,6 +285,7 @@
             y: e.clientY,
             items: [
                 { label: $_('contextMenu.play'), action: () => playTracks(trackList, index) },
+                { label: $_('contextMenu.playNext'), action: () => playNext([track]) },
                 { label: $_('contextMenu.addToQueue'), action: () => addToQueue([track]) },
                 { type: "separator" },
                 {

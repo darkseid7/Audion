@@ -44,6 +44,22 @@
     import WaveformSeekBar from "./WaveformSeekBar.svelte";
     import { wsStore } from "$lib/stores/websocket";
     import { activeSqueezePlayer, squeezePlayerState } from "$lib/stores/squeeze";
+    import {
+        startSleepTimer,
+        stopSleepTimer,
+        sleepTimerActive,
+        sleepTimerRemainingMs,
+        SLEEP_TIMER_PRESETS,
+        armTrackEndTimer,
+        armAlbumEndTimer,
+        sleepTimerTriggerMode,
+        sleepTimerArmedAlbumId,
+    } from "$lib/stores/sleepTimer";
+
+    let showSleepMenu = false;
+    $: sleepRemaining = $sleepTimerRemainingMs > 0
+        ? formatDuration($sleepTimerRemainingMs / 1000)
+        : "";
 
     $: isCurrentLiked = $currentTrack
         ? $likedTrackIds.has($currentTrack.id)
@@ -737,6 +753,88 @@
                         <span class="lyrics-dot"></span>
                     {/if}
                 </button>
+
+                <!-- Sleep Timer -->
+                <div class="sleep-timer">
+                    <button
+                        class="icon-btn"
+                        class:active={$sleepTimerActive || $sleepTimerTriggerMode !== 'time'}
+                        on:click={() => (showSleepMenu = !showSleepMenu)}
+                        title="Sleep Timer"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+                            <path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm1-8h4v2h-6V7h2v5z"/>
+                        </svg>
+                        {#if $sleepTimerActive}
+                            <span class="sleep-remaining">{sleepRemaining}</span>
+                        {/if}
+                    </button>
+
+                    {#if showSleepMenu}
+                        <!-- svelte-ignore a11y-click-events-have-key-events -->
+                        <!-- svelte-ignore a11y-no-static-element-interactions -->
+                        <div
+                            class="sleep-timer-menu"
+                            on:click|stopPropagation
+                            role="menu"
+                        >
+                            <div class="sleep-timer-header">
+                                <span class="sleep-timer-title">Sleep Timer</span>
+                                {#if sleepRemaining}
+                                    <span class="sleep-timer-remaining">{sleepRemaining}</span>
+                                {/if}
+                            </div>
+                            <div class="sleep-timer-presets">
+                                {#each SLEEP_TIMER_PRESETS as minutes}
+                                    <button
+                                        class="sleep-preset-btn"
+                                        on:click={() => {
+                                            startSleepTimer(minutes);
+                                            showSleepMenu = false;
+                                        }}
+                                    >
+                                        {minutes} min
+                                    </button>
+                                {/each}
+                                <button
+                                    class="sleep-preset-btn"
+                                    class:active={$sleepTimerTriggerMode === 'track_end'}
+                                    on:click={() => {
+                                        armTrackEndTimer();
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    End of Track
+                                </button>
+                                <button
+                                    class="sleep-preset-btn"
+                                    class:active={$sleepTimerTriggerMode === 'album_end'}
+                                    on:click={() => {
+                                        if ($currentTrack?.album_id != null) {
+                                            armAlbumEndTimer($currentTrack.album_id);
+                                        } else {
+                                            armAlbumEndTimer(null);
+                                        }
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    End of Album
+                                </button>
+                            </div>
+                            {#if $sleepTimerActive || $sleepTimerTriggerMode !== 'time'}
+                                <button
+                                    class="sleep-cancel-btn"
+                                    on:click={() => {
+                                        stopSleepTimer(true);
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    Cancel Timer
+                                </button>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
             </div>
 
             <div class="volume-controls-main">
@@ -1399,6 +1497,21 @@
         font-size: 0.72rem;
         color: var(--accent-primary, #1db954);
         font-weight: 600;
+    }
+
+    .sleep-remaining {
+        position: absolute;
+        top: -2px;
+        right: -4px;
+        font-size: 0.55rem;
+        font-weight: 700;
+        color: var(--accent-primary, #1db954);
+        background: var(--bg-elevated);
+        border-radius: 4px;
+        padding: 0 3px;
+        line-height: 1.2;
+        white-space: nowrap;
+        pointer-events: none;
     }
 
     .sleep-timer-presets {

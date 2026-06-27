@@ -15,7 +15,8 @@
         isPinned,
     } from "$lib/stores/pinned";
     import { contextMenu } from "$lib/stores/ui";
-    import { playTracks, addToQueue } from "$lib/stores/player";
+    import { _ } from "svelte-i18n";
+    import { playTracks, addToQueue, playNext } from "$lib/stores/player";
     import { goToPlaylists, goToTracksMultiSelect } from "$lib/stores/view";
     import { loadPlaylists, playlists, playlistPendingTracks, drainPendingTracks } from "$lib/stores/library";
     import TrackList from "./TrackList.svelte";
@@ -288,6 +289,13 @@
                 {
                     label: "Play",
                     action: handlePlayAll,
+                    disabled: tracks.length === 0,
+                },
+                {
+                    label: $_('contextMenu.playNext'),
+                    action: () => {
+                        if (tracks.length > 0) playNext(tracks);
+                    },
                     disabled: tracks.length === 0,
                 },
                 {

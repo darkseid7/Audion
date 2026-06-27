@@ -50,6 +50,7 @@
     import {
         playTracks,
         addToQueue,
+        playNext,
         currentTrack,
         isPlaying,
         queue,
@@ -241,6 +242,17 @@
         }
     }
 
+    async function handlePlayNext(id: number) {
+        try {
+            const tracks = await getPlaylistTracks(id);
+            if (tracks.length > 0) {
+                playNext(tracks);
+            }
+        } catch (error) {
+            console.error("Failed to play playlist next:", error);
+        }
+    }
+
     async function handleDeletePlaylist(id: number, name: string) {
         if (
             !(await confirm(`Delete playlist "${name}"?`, {
@@ -276,6 +288,10 @@
                 {
                     label: "Play",
                     action: () => handlePlayPlaylist(playlist.id),
+                },
+                {
+                    label: $_('contextMenu.playNext'),
+                    action: () => handlePlayNext(playlist.id),
                 },
                 {
                     label: "Add to Queue",

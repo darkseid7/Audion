@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { _ } from "svelte-i18n";
     import { playlists, loadPlaylists } from "$lib/stores/library";
     import { goToPlaylistDetail } from "$lib/stores/view";
     import {
@@ -17,6 +18,7 @@
     import {
         playTracks,
         addToQueue,
+        playNext,
         currentPlaylistId,
         isPlaying,
         togglePlay,
@@ -79,6 +81,15 @@
             if (tracks.length > 0) addToQueue(tracks);
         } catch (err) {
             console.error("Failed to add playlist to queue:", err);
+        }
+    }
+
+    async function handlePlayNext(id: number) {
+        try {
+            const tracks = await getPlaylistTracks(id);
+            if (tracks.length > 0) playNext(tracks);
+        } catch (err) {
+            console.error("Failed to play playlist next:", err);
         }
     }
 
@@ -156,6 +167,10 @@
                 {
                     label: "Play",
                     action: () => handlePlayPlaylist(playlist.id),
+                },
+                {
+                    label: $_('contextMenu.playNext'),
+                    action: () => handlePlayNext(playlist.id),
                 },
                 {
                     label: "Add to Queue",

@@ -15,6 +15,7 @@
     currentTrack,
     isPlaying,
     addToQueue,
+    playNext,
     type PlaybackContext,
   } from "$lib/stores/player";
   import { contextMenu } from "$lib/stores/ui";
@@ -543,6 +544,11 @@
         disabled: isUnavailable,
       },
       { type: "separator" },
+      {
+        label: $_('contextMenu.playNext'),
+        action: () => playNext([track]),
+        disabled: isUnavailable,
+      },
       {
         label: $_('contextMenu.addToQueue'),
         action: () => addToQueue([track]),

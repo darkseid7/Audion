@@ -1,6 +1,8 @@
 {
   "contextMenu": {
     "play": "Play",
+    "playNext": "Play Next",
+    "playAlbumNext": "Play Album Next",
     "addToQueue": "Add to Queue",
     "download": "Download",
     "addToPlaylist": "Add to Playlist",

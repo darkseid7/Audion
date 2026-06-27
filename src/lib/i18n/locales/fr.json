@@ -1,6 +1,8 @@
 {
   "contextMenu": {
     "play": "Lire",
+    "playNext": "Lire ensuite",
+    "playAlbumNext": "Lire l'album ensuite",
     "addToQueue": "Ajouter à la file",
     "download": "Télécharger",
     "addToPlaylist": "Ajouter à la playlist",

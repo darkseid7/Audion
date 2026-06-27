@@ -13,6 +13,12 @@ import {
 } from "$lib/api/tauri";
 import { invoke } from "@tauri-apps/api/core";
 import { addToast } from "$lib/stores/toast";
+import {
+  handleSleepTimerCheck,
+  isTimerModeTrackOrAlbumEnd,
+  isTimerModeAlbumEnd,
+  stopSleepTimer,
+} from "./sleepTimer";
 import { EventEmitter, type PluginEvents } from "$lib/plugins/event-emitter";
 import {
   tracks as libraryTracks,
@@ -2163,6 +2169,14 @@ export function toggleShuffle(): void {
     const newState = !s;
 
     if (newState) {
+      // Shuffle disables album-end mode (exploration R2).
+      // Shuffling would immediately change the next track's album,
+      // making album-end detection unreliable.
+      if (isTimerModeAlbumEnd()) {
+        stopSleepTimer(true);
+        addToast("Album-end mode disabled during shuffle", "info");
+      }
+
       // Turn ON: Generate shuffled order
       const q = get(queue);
       const currentIdx = get(queueIndex);
@@ -2252,6 +2266,27 @@ function handleTrackEnd(): void {
     playStartTime = 0;
   }
 
+  // Sleep timer check — MUST precede repeat-one (AD3).
+  // If the timer is in track_end/album_end mode, it may pause playback
+  // and we must return early without advancing the queue.
+  if (isTimerModeTrackOrAlbumEnd()) {
+    // Dry-run to peek at the next track's album_id for album_end detection
+    let nextAlbumId: number | null = null;
+    const nextIdx = _advanceQueueIndex(true);
+    if (nextIdx !== null) {
+      const q = get(queue);
+      const nextTrack = q[nextIdx];
+      if (nextTrack) {
+        nextAlbumId = nextTrack.album_id ?? null;
+      }
+    }
+    // nextAlbumId=null means: no next track (queue end) or next track has no album
+    if (handleSleepTimerCheck(track, nextAlbumId)) {
+      // Timer fired — stop here, don't advance or repeat-one
+      return;
+    }
+  }
+
   // Repeat one logic for backends that don't handle it internally (like HTML5)
   if (get(repeat) === "one" && track) {
     console.log("[Player] Repeat one: restarting current track");
@@ -2296,6 +2331,24 @@ function handleGaplessAdvance(): void {
     }
   }
   playStartTime = Date.now();
+
+  // Sleep timer check — same as handleTrackEnd but for gapless transitions.
+  // The backend has already started playing the next track. If the timer
+  // fires, pause() stops the just-started next track.
+  if (isTimerModeTrackOrAlbumEnd()) {
+    let nextAlbumId: number | null = null;
+    const nextIdx = _advanceQueueIndex(true);
+    if (nextIdx !== null) {
+      const q2 = get(queue);
+      const nextTrack = q2[nextIdx];
+      if (nextTrack) {
+        nextAlbumId = nextTrack.album_id ?? null;
+      }
+    }
+    if (handleSleepTimerCheck(prevTrack, nextAlbumId)) {
+      return;
+    }
+  }
 
   const idx = _advanceQueueIndex();
   if (idx === null) {
@@ -2565,6 +2618,80 @@ export function appendToQueueEnd(tracks: Track[]): void {
     });
   }
   void insertPosition;
+}
+
+// Insert tracks at currentIdx + 1 — plays immediately after the current track.
+// Does NOT increment userQueueCount (AD4). The track at currentIdx+1 is picked
+// up by normal sequential advancement (_advanceQueueIndex line 1925).
+//
+// Shuffle-aware: when shuffle is ON, indices are inserted at shuffledIndex+1
+// (not appended to end). The batch is internally shuffled so they are random
+// relative to each other while maintaining position.
+export function playNext(tracks: Track[]): void {
+  if (tracks.length === 0) return;
+  const currentIdx = get(queueIndex);
+  const addedCount = tracks.length;
+  // Insert at currentIdx+1 — directly after current track
+  const insertPosition = currentIdx + 1;
+
+  queue.update((q) => {
+    const newQueue = [...q];
+    newQueue.splice(insertPosition, 0, ...tracks);
+
+    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
+    return newQueue;
+  });
+
+  // Play Next does NOT increment userQueueCount.
+  // The inserted tracks sit at currentIdx+1 and are picked up by
+  // normal sequential advancement. Incrementing userQueueCount would
+  // shift _advanceQueueIndex into the user-queue decrement path (AD4).
+
+  // Sync to Squeeze backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ).catch((e) =>
+        console.error("[Player] Failed to insert into squeeze queue:", e),
+      );
+    }
+  } else {
+    _schedulePreload();
+  }
+
+  // Update shuffled indices — insert at shuffledIndex+1, NOT appended to end.
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => {
+      // 1. Shift existing indices at or after insertion point
+      const shifted = indices.map((i) =>
+        i >= insertPosition ? i + addedCount : i,
+      );
+
+      // 2. New indices for the inserted tracks
+      const newIndices = Array.from(
+        { length: addedCount },
+        (_, i) => insertPosition + i,
+      );
+
+      // 3. Shuffle the new batch internally so they are random relative
+      //    to each other while maintaining position
+      const shuffledNew = shuffleArray(newIndices);
+
+      // 4. Insert at shuffledIndex+1 (not append to end)
+      const shufIdx = get(shuffledIndex);
+      const insertAt = shufIdx + 1;
+
+      return [
+        ...shifted.slice(0, insertAt),
+        ...shuffledNew,
+        ...shifted.slice(insertAt),
+      ];
+    });
+  }
 }
 
 // Remove track from queue by index

@@ -1,6 +1,8 @@
 {
   "contextMenu": {
     "play": "Reproducir",
+    "playNext": "Reproducir siguiente",
+    "playAlbumNext": "Reproducir álbum siguiente",
     "addToQueue": "Añadir a la Cola",
     "download": "Descargar",
     "addToPlaylist": "Añadir a la Lista",
