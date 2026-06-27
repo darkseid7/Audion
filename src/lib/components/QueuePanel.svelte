@@ -246,11 +246,29 @@
     let isDragging = false;
     let cleanupDragListeners: (() => void) | null = null;
 
+    // New drag polish state (sdd/queue-drag-polish Phase 1)
+    let dragGhost: HTMLElement | null = null;
+    let dragActivated = false;
+    let dragStartPos: { x: number; y: number } | null = null;
+    let dragPointer: { x: number; y: number } | null = null;
+    let dragOverPosition: "before" | "after" | null = null;
+    let autoScrollRaf: number | null = null;
+    let dragOverTopZone = false;
+    let dragOverBottomZone = false;
+
     function handlePointerDown(e: PointerEvent, actualIndex: number) {
+        // Guard: current track row is not draggable
+        if (actualIndex === $queueIndex) return;
+
         e.preventDefault();
         e.stopPropagation();
         isDragging = true;
         draggedIndex = actualIndex;
+        dragActivated = false;
+        dragStartPos = { x: e.clientX, y: e.clientY };
+        dragOverPosition = null;
+        dragOverTopZone = false;
+        dragOverBottomZone = false;
 
         // Capture pointer events
         const target = e.currentTarget as HTMLElement;
@@ -259,15 +277,25 @@
         // Add global listeners
         window.addEventListener("pointermove", handlePointerMove);
         window.addEventListener("pointerup", handlePointerUp);
+        window.addEventListener("pointercancel", handlePointerCancel);
+        window.addEventListener("keydown", handleEscape);
 
         cleanupDragListeners = () => {
             window.removeEventListener("pointermove", handlePointerMove);
             window.removeEventListener("pointerup", handlePointerUp);
+            window.removeEventListener("pointercancel", handlePointerCancel);
+            window.removeEventListener("keydown", handleEscape);
         };
     }
 
     function handlePointerMove(e: PointerEvent) {
         if (!isDragging || draggedIndex === null) return;
+
+        dragPointer = { x: e.clientX, y: e.clientY };
+
+        // Phase 2+: activation threshold + ghost positioning will go here
+        // Phase 3+: half-row detection + drop zones will go here
+        // Phase 5+: auto-scroll will go here
 
         // Find element under pointer
         const elementsUnderPointer = document.elementsFromPoint(
@@ -300,19 +328,52 @@
             dragOverIndex !== null &&
             draggedIndex !== dragOverIndex
         ) {
+            // Phase 2+: dragActivated gate will be added when threshold is implemented
             console.log("Reorder:", draggedIndex, "->", dragOverIndex);
             reorderQueue(draggedIndex, dragOverIndex);
         }
 
-        // Cleanup
+        cleanupDrag();
+    }
+
+    function handlePointerCancel() {
+        cleanupDrag();
+    }
+
+    function handleEscape(e: KeyboardEvent) {
+        if (e.key === "Escape") {
+            cleanupDrag();
+        }
+    }
+
+    function destroyGhost() {
+        // Phase 2: will remove ghost from DOM
+        dragGhost = null;
+    }
+
+    function resetDragState() {
         isDragging = false;
         draggedIndex = null;
         dragOverIndex = null;
-        
+        dragActivated = false;
+        dragStartPos = null;
+        dragPointer = null;
+        dragOverPosition = null;
+        dragOverTopZone = false;
+        dragOverBottomZone = false;
+    }
+
+    function cleanupDrag() {
+        destroyGhost();
+        if (autoScrollRaf !== null) {
+            cancelAnimationFrame(autoScrollRaf);
+            autoScrollRaf = null;
+        }
         if (cleanupDragListeners) {
             cleanupDragListeners();
             cleanupDragListeners = null;
         }
+        resetDragState();
     }
 </script>
 
