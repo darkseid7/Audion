@@ -316,7 +316,7 @@
             e.clientY,
         );
         const queueTrack = elementsUnderPointer.find((el) =>
-            el.classList.contains("queue-track"),
+            el.classList.contains("queue-track") && !el.classList.contains("past"),
         );
 
         if (queueTrack) {
@@ -325,12 +325,18 @@
                 const overIndex = parseInt(indexAttr, 10);
                 if (overIndex !== draggedIndex) {
                     dragOverIndex = overIndex;
+                    // Half-row detection: above or below the row's midpoint
+                    const rect = queueTrack.getBoundingClientRect();
+                    const midY = rect.top + rect.height / 2;
+                    dragOverPosition = e.clientY < midY ? "before" : "after";
                 } else {
                     dragOverIndex = null;
+                    dragOverPosition = null;
                 }
             }
         } else {
             dragOverIndex = null;
+            dragOverPosition = null;
         }
     }
 
@@ -480,7 +486,8 @@
                                     <div
                                         class="queue-track"
                                         class:dragging={draggedIndex === item.index}
-                                        class:drag-over={dragOverIndex === item.index}
+                                        class:drag-over-before={dragOverIndex === item.index && dragOverPosition === 'before'}
+                                        class:drag-over-after={dragOverIndex === item.index && dragOverPosition === 'after'}
                                         class:priority={item.isPriority}
                                         data-index={item.index}
                                         role="listitem"
@@ -823,9 +830,75 @@
         background-color: var(--bg-highlight);
     }
 
-    .queue-track.drag-over {
-        border-top: 2px solid var(--accent-primary);
-        margin-top: -2px;
+    /* Animated drop indicators — bar + chevron per edge */
+    .queue-track.drag-over-before,
+    .queue-track.drag-over-after {
+        position: relative;
+    }
+
+    .queue-track.drag-over-before::before {
+        content: "";
+        position: absolute;
+        top: -3px;
+        left: 0;
+        right: 48px;
+        height: 3px;
+        background: var(--accent-primary);
+        border-radius: 2px;
+        animation: pulse-indicator 0.8s ease-in-out infinite;
+    }
+
+    .queue-track.drag-over-before::after {
+        content: "";
+        position: absolute;
+        top: -6px;
+        right: 48px;
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid var(--accent-primary);
+    }
+
+    .queue-track.drag-over-after::before {
+        content: "";
+        position: absolute;
+        bottom: -3px;
+        left: 0;
+        right: 48px;
+        height: 3px;
+        background: var(--accent-primary);
+        border-radius: 2px;
+        animation: pulse-indicator 0.8s ease-in-out infinite;
+    }
+
+    .queue-track.drag-over-after::after {
+        content: "";
+        position: absolute;
+        bottom: -1px;
+        right: 48px;
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-bottom: 5px solid var(--accent-primary);
+    }
+
+    @keyframes pulse-indicator {
+        0%, 100% {
+            opacity: 0.6;
+        }
+        50% {
+            opacity: 1;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .queue-track.drag-over-before::before,
+        .queue-track.drag-over-after::before {
+            animation: none;
+            opacity: 0.8;
+        }
     }
 
     /* Drag ghost clone — body-level floating element */
