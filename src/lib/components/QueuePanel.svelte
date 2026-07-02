@@ -579,7 +579,7 @@
                             bind:this={upcomingContainerElement}
                             on:scroll={handleUpcomingScroll}
                         >
-                            {#each visualOrder as item, i (item.track.id + '-drag-' + isReorderDrag)}
+                            {#each visualOrder as item, i (item.track.id + '-queue-track')}
                                 <div
                                     class="queue-track"
                                     class:dragging={item.index === draggedIndex}
@@ -685,7 +685,7 @@
                                         class:active={dragOverTopZone && dragActivated}
                                         style="height: 4px;"
                                     ></div>
-                                    {#each upcomingVirtualState.visibleTracks as item, i (item.track.id + "-next-" + item.index)}
+                                    {#each upcomingVirtualState.visibleTracks as item, i (item.track.id + '-queue-track')}
                                         <div
                                             class="queue-track"
                                             class:dragging={draggedIndex === item.index}
