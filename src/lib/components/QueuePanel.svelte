@@ -266,7 +266,7 @@
         const draggedPosInUpcoming = upcomingTracks.findIndex(t => t.index === draggedAbsIdx);
         if (draggedPosInUpcoming === -1) return upcomingTracks;
 
-        let targetVisualIdx: number;
+        let targetVisualIdx: number | null = null;
 
         if (dragOverTopZone) {
             targetVisualIdx = 0;
@@ -274,23 +274,34 @@
             targetVisualIdx = upcomingTracks.length - 1;
         } else if (dragOverIndex !== null && dragOverPosition !== null) {
             const hoverPosInUpcoming = upcomingTracks.findIndex(t => t.index === dragOverIndex);
-            if (hoverPosInUpcoming === -1) return upcomingTracks;
+            if (hoverPosInUpcoming !== -1) {
+                // Adjust for the dragged item's removal
+                let adjustedHoverPos = hoverPosInUpcoming;
+                if (draggedPosInUpcoming < hoverPosInUpcoming) {
+                    adjustedHoverPos -= 1;
+                }
 
-            // Adjust for the dragged item's removal
-            let adjustedHoverPos = hoverPosInUpcoming;
-            if (draggedPosInUpcoming < hoverPosInUpcoming) {
-                adjustedHoverPos -= 1;
+                targetVisualIdx =
+                    dragOverPosition === 'before'
+                        ? adjustedHoverPos
+                        : adjustedHoverPos + 1;
             }
-
-            targetVisualIdx = dragOverPosition === 'before' ? adjustedHoverPos : adjustedHoverPos + 1;
         } else {
-            return upcomingTracks;
+            targetVisualIdx = null;
         }
 
-        // Build the new visual order
-        const result = upcomingTracks.filter(t => t.index !== draggedAbsIdx);
-        const draggedItem = upcomingTracks[draggedPosInUpcoming];
-        result.splice(targetVisualIdx, 0, draggedItem);
+        // Always remove the dragged item from the rendered list — the ghost
+        // clone is the visual representation while drag is active.
+        const result = upcomingTracks.filter((t) => t.index !== draggedAbsIdx);
+
+        // If no target detected, leave the dragged item out of visualOrder.
+        // The other items shift up to fill the gap (handled via per-item
+        // transform: translateY).
+        if (targetVisualIdx !== null) {
+            const draggedItem = upcomingTracks[draggedPosInUpcoming];
+            result.splice(targetVisualIdx, 0, draggedItem);
+        }
+
         return result;
     }
 
