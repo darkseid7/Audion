@@ -313,6 +313,12 @@
                             flipDurationMs: FLIP_MS,
                             dragDisabled: $shuffle,
                             type: 'queue-upcoming',
+                            // svelte-dnd-action's default dropTargetStyle is a yellow
+                            // outline around the entire zone — ugly and clashes with
+                            // the dark theme. Empty object suppresses it; the per-item
+                            // FLIP animation already gives enough feedback.
+                            dropTargetStyle: {},
+                            dropTargetClasses: [],
                         }}
                         on:consider={handleConsider}
                         on:finalize={handleFinalize}
