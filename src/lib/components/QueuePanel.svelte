@@ -206,7 +206,14 @@
     // can call reorderQueue(from, to) with correct indices on finalize.
     let dragStartIndex: number | null = null;
 
+    // Track drag-active state and the original DOM position of the dragged
+    // clone so we can clamp the library's transform to stay within the
+    // queue panel. Without this, the clone floats freely across the app.
+    let dragActive = false;
+    let dragOriginalRect: { top: number; left: number; width: number; height: number } | null = null;
+
     const FLIP_MS = 180;
+    const DRAGGED_EL_ID = "dnd-action-dragged-el";
 
     function handleConsider(
         e: CustomEvent<{
@@ -219,6 +226,26 @@
         if (info.trigger === TRIGGERS.DRAG_STARTED && dragStartIndex === null && info.id) {
             const item = upcomingTracks.find((t) => String(t.track.id) === info.id);
             if (item) dragStartIndex = item.index;
+
+            // svelte-dnd-action has now appended its `position: fixed`
+            // clone to document.body. Grab its initial rect and start
+            // clamping. Registering the mousemove listener here (rather
+            // than at mount) ensures it runs AFTER the library's own
+            // mousemove handler (which was registered earlier in the
+            // drag-start sequence), so we read and clamp the freshly
+            // updated transform on every frame.
+            const draggedEl = document.getElementById(DRAGGED_EL_ID);
+            if (draggedEl) {
+                dragOriginalRect = {
+                    top: parseFloat(draggedEl.style.top),
+                    left: parseFloat(draggedEl.style.left),
+                    width: draggedEl.offsetWidth,
+                    height: draggedEl.offsetHeight,
+                };
+                dragActive = true;
+                window.addEventListener("mousemove", clampDraggedToPanel);
+                window.addEventListener("touchmove", clampDraggedToPanel);
+            }
         }
         dndItems = e.detail.items;
     }
@@ -248,7 +275,54 @@
                 }
             }
         }
+
+        // Clean up clamp listener and state.
+        if (dragActive) {
+            window.removeEventListener("mousemove", clampDraggedToPanel);
+            window.removeEventListener("touchmove", clampDraggedToPanel);
+            dragActive = false;
+            dragOriginalRect = null;
+        }
         dragStartIndex = null;
+    }
+
+    // Panel ref for bounding the drag.
+    let queuePanelElement: HTMLElement;
+
+    // Clamp the library's floating drag clone to stay within the queue
+    // panel. The library sets `transform: translate3d(dx, dy, 0)` based on
+    // cursor delta from the original press position; we adjust that
+    // transform so the clone never escapes the panel bounds, no matter
+    // where the cursor wanders.
+    function clampDraggedToPanel(e: MouseEvent | TouchEvent) {
+        if (!dragActive || !queuePanelElement || !dragOriginalRect) return;
+        const draggedEl = document.getElementById(DRAGGED_EL_ID);
+        if (!draggedEl) return;
+
+        const panelRect = queuePanelElement.getBoundingClientRect();
+        const match = draggedEl.style.transform.match(
+            /translate3d\(([-\d.]+)px,\s*([-\d.]+)px/,
+        );
+        if (!match) return;
+
+        const tx = parseFloat(match[1]);
+        const ty = parseFloat(match[2]);
+
+        const effLeft = dragOriginalRect.left + tx;
+        const effTop = dragOriginalRect.top + ty;
+        const effRight = effLeft + dragOriginalRect.width;
+        const effBottom = effTop + dragOriginalRect.height;
+
+        let dx = 0;
+        let dy = 0;
+        if (effLeft < panelRect.left) dx = panelRect.left - effLeft;
+        else if (effRight > panelRect.right) dx = panelRect.right - effRight;
+        if (effTop < panelRect.top) dy = panelRect.top - effTop;
+        else if (effBottom > panelRect.bottom) dy = panelRect.bottom - effBottom;
+
+        if (dx !== 0 || dy !== 0) {
+            draggedEl.style.transform = `translate3d(${tx + dx}px, ${ty + dy}px, 0)`;
+        }
     }
 </script>
 
@@ -257,6 +331,7 @@
         class="queue-panel"
         class:mobile={$isMobile}
         class:android-lite={isAndroid && $isMobile}
+        bind:this={queuePanelElement}
         transition:fly={{
             x: $isMobile ? 0 : 300,
             y: $isMobile ? (isAndroid ? 0 : 100) : 0,
