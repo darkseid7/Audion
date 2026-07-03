@@ -289,11 +289,10 @@
     // Panel ref for bounding the drag.
     let queuePanelElement: HTMLElement;
 
-    // Clamp the library's floating drag clone to stay within the queue
-    // panel. The library sets `transform: translate3d(dx, dy, 0)` based on
-    // cursor delta from the original press position; we adjust that
-    // transform so the clone never escapes the panel bounds, no matter
-    // where the cursor wanders.
+    // Lock the library's floating drag clone to vertical-only motion within
+    // the queue column. The library sets `transform: translate3d(dx, dy, 0)`
+    // from cursor delta; we override it so X is always 0 (no horizontal
+    // drift across the app) and Y is clamped to the panel bounds.
     function clampDraggedToPanel(e: MouseEvent | TouchEvent) {
         if (!dragActive || !queuePanelElement || !dragOriginalRect) return;
         const draggedEl = document.getElementById(DRAGGED_EL_ID);
@@ -305,24 +304,24 @@
         );
         if (!match) return;
 
-        const tx = parseFloat(match[1]);
         const ty = parseFloat(match[2]);
 
-        const effLeft = dragOriginalRect.left + tx;
-        const effTop = dragOriginalRect.top + ty;
-        const effRight = effLeft + dragOriginalRect.width;
-        const effBottom = effTop + dragOriginalRect.height;
+        // X is always 0 — drag is vertical only.
+        const lockedTx = 0;
 
-        let dx = 0;
+        // Y is clamped to panel bounds so the clone never escapes vertically.
+        const effTop = dragOriginalRect.top + ty;
+        const effBottom = effTop + dragOriginalRect.height;
         let dy = 0;
-        if (effLeft < panelRect.left) dx = panelRect.left - effLeft;
-        else if (effRight > panelRect.right) dx = panelRect.right - effRight;
         if (effTop < panelRect.top) dy = panelRect.top - effTop;
         else if (effBottom > panelRect.bottom) dy = panelRect.bottom - effBottom;
 
-        if (dx !== 0 || dy !== 0) {
-            draggedEl.style.transform = `translate3d(${tx + dx}px, ${ty + dy}px, 0)`;
-        }
+        const finalTy = ty + dy;
+
+        // Always rewrite the transform: locks X to 0 and applies Y clamping.
+        // We rewrite every frame (even when dy is 0) because the library sets
+        // X based on cursor delta and we need to override that consistently.
+        draggedEl.style.transform = `translate3d(${lockedTx}px, ${finalTy}px, 0)`;
     }
 </script>
 
