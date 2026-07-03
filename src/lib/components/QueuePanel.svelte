@@ -224,16 +224,21 @@
         const info = e.detail.info;
         // Capture the absolute queue index when drag starts.
         if (info.trigger === TRIGGERS.DRAG_STARTED && dragStartIndex === null && info.id) {
-            const item = upcomingTracks.find((t) => String(t.track.id) === info.id);
+            // info.id can be string or number depending on the event; coerce
+            // both sides to string for a safe comparison. track.id is
+            // number per the Track interface, so we cast both.
+            const draggedId = String(info.id);
+            const item = upcomingTracks.find((t) => String(t.track.id) === draggedId);
             if (item) dragStartIndex = item.index;
 
             // svelte-dnd-action has now appended its `position: fixed`
-            // clone to document.body. Grab its initial rect and start
-            // clamping. Registering the mousemove listener here (rather
-            // than at mount) ensures it runs AFTER the library's own
-            // mousemove handler (which was registered earlier in the
-            // drag-start sequence), so we read and clamp the freshly
-            // updated transform on every frame.
+            // clone to document.body. Grab its initial rect. We defer the
+            // listener registration via queueMicrotask because the
+            // library adds its own mousemove handler on the NEXT line
+            // after dispatching this event — without the deferral, our
+            // listener would be registered BEFORE the library's and run
+            // FIRST on each mousemove, letting the library overwrite our
+            // X-lock on its turn.
             const draggedEl = document.getElementById(DRAGGED_EL_ID);
             if (draggedEl) {
                 dragOriginalRect = {
@@ -243,8 +248,10 @@
                     height: draggedEl.offsetHeight,
                 };
                 dragActive = true;
-                window.addEventListener("mousemove", clampDraggedToPanel);
-                window.addEventListener("touchmove", clampDraggedToPanel);
+                queueMicrotask(() => {
+                    window.addEventListener("mousemove", clampDraggedToPanel);
+                    window.addEventListener("touchmove", clampDraggedToPanel);
+                });
             }
         }
         dndItems = e.detail.items;
@@ -262,9 +269,13 @@
         // Sync the actual queue store with the new visual order.
         if (dragStartIndex !== null && info.id) {
             const qIdx = $queueIndex;
+            // Coerce info.id to string for safe comparison with the
+            // number-typed Track.id (info.id can be either depending on
+            // the library's path).
+            const draggedId = String(info.id);
             // Find the dragged item in the reordered array.
             const newVisualPos = dndItems.findIndex(
-                (it) => String(it.track.id) === info.id,
+                (it) => String(it.track.id) === draggedId,
             );
             if (newVisualPos !== -1) {
                 // In linear mode upcomingTracks[0] = queue[qIdx+1], so
