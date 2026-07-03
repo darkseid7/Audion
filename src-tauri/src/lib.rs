@@ -27,7 +27,7 @@ use tauri::{Emitter, Listener, Manager, WindowEvent};
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder},
 };
 
 /// Handle a deep link URL — extract tokens, store them, fetch profile, trigger sync.
@@ -467,6 +467,7 @@ pub fn run() {
                     .icon(icon)
                     .tooltip("Audion")
                     .menu(&menu)
+                    .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
                             app.exit(0);
@@ -481,7 +482,18 @@ pub fn run() {
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
-                        if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                        // Only respond to left-click release. Right-click is reserved
+                        // for the OS context menu (attached via `.menu(&menu)` above);
+                        // matching all buttons here used to call window.show() on
+                        // right-click too, which shifted the foreground window and
+                        // caused the OS to cancel the context menu before it could
+                        // appear.
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
                             let app = tray.app_handle();
                             if let Some(window) = app.get_webview_window("main") {
                                 window.show().ok();
