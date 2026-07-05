@@ -1258,24 +1258,6 @@
              </div>
 
 
-
-             <div class="divider"></div>
-             <div class="toggle-container">
-               <div class="toggle-info">
-                 <span class="setting-title">{$_('settings.closeToTray', { default: 'Close to tray' })}</span>
-                 <span class="setting-description">{$_('settings.closeToTrayDesc', { default: 'Hide the window to the system tray when closed' })}</span>
-               </div>
-               <button
-                 class="toggle-btn"
-                 class:active={$appSettings.closeToTray}
-                 on:click={() => appSettings.setCloseToTray(!$appSettings.closeToTray)}
-                 role="switch"
-                 aria-checked={$appSettings.closeToTray}
-                 aria-label="Toggle Close to Tray"
-               >
-                 <div class="toggle-handle"></div>
-               </button>
-             </div>
            {/if}
 
            <div class="divider"></div>

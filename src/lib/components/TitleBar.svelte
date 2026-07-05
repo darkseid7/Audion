@@ -8,7 +8,6 @@
         searchResults,
     } from "$lib/stores/search";
     import { isMobile, toggleMobileSidebar } from "$lib/stores/mobile";
-    import { appSettings } from "$lib/stores/settings";
     import { isTauri } from "$lib/api/tauri";
     import MenuBar from "./MenuBar.svelte";
     import Breadcrumbs from "./Breadcrumbs.svelte";
@@ -34,11 +33,7 @@
 
     function close() {
         if (!appWindow) return;
-        if ($appSettings.closeToTray) {
-            appWindow.hide();
-        } else {
-            appWindow.close();
-        }
+        appWindow.close();
     }
 
     let searchInput = "";

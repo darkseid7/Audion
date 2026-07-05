@@ -9,8 +9,6 @@ export interface AppSettings {
   developerMode: boolean;
   showDiscord: boolean;
   startMode: "normal" | "maximized" | "minimized";
-  closeToTray: boolean;
-  minimizeToTray: boolean;
   autoplay: boolean;
   audioBackend: "auto" | "native" | "html5";
   listenBrainzEnabled: boolean;
@@ -32,8 +30,6 @@ const defaultSettings: AppSettings = {
   developerMode: false,
   showDiscord: true,
   startMode: "normal",
-  closeToTray: false,
-  minimizeToTray: false,
   autoplay: false,
   audioBackend: "auto",
   listenBrainzEnabled: false,
@@ -51,7 +47,10 @@ function loadSettings(): AppSettings {
   try {
     const stored = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (stored) {
-      return { ...defaultSettings, ...JSON.parse(stored) };
+      // Drop keys from older versions that are no longer in AppSettings.
+      const { closeToTray: _close, minimizeToTray: _min, ...rest } =
+        JSON.parse(stored);
+      return { ...defaultSettings, ...rest };
     }
   } catch (error) {
     console.error("[Settings] Failed to load:", error);
@@ -191,22 +190,6 @@ function createSettingsStore() {
         console.error("[Settings] Failed to fetch start mode:", error);
       }
 
-      // Fetch close-to-tray preference from backend
-      try {
-        const closeToTray = await invoke<boolean>("get_close_to_tray");
-        state.closeToTray = closeToTray;
-      } catch (error) {
-        console.error("[Settings] Failed to fetch close-to-tray:", error);
-      }
-
-      // Fetch minimize-to-tray preference from backend
-      try {
-        const minimizeToTray = await invoke<boolean>("get_minimize_to_tray");
-        state.minimizeToTray = minimizeToTray;
-      } catch (error) {
-        console.error("[Settings] Failed to fetch minimize-to-tray:", error);
-      }
-
       // Check whether a ListenBrainz token is stored
       try {
         const tokenSet = await invoke<boolean>("get_listenbrainz_token_set");
@@ -224,24 +207,6 @@ function createSettingsStore() {
         update((state) => ({ ...state, startMode: mode }));
       } catch (error) {
         console.error("[Settings] Failed to set start mode:", error);
-      }
-    },
-
-    async setCloseToTray(enabled: boolean) {
-      try {
-        await invoke("set_close_to_tray", { enabled });
-        update((state) => ({ ...state, closeToTray: enabled }));
-      } catch (error) {
-        console.error("[Settings] Failed to set close-to-tray:", error);
-      }
-    },
-
-    async setMinimizeToTray(enabled: boolean) {
-      try {
-        await invoke("set_minimize_to_tray", { enabled });
-        update((state) => ({ ...state, minimizeToTray: enabled }));
-      } catch (error) {
-        console.error("[Settings] Failed to set minimize-to-tray:", error);
       }
     },
 

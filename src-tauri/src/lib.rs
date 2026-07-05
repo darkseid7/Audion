@@ -23,7 +23,7 @@ mod audio;
 
 use db::Database;
 use std::path::PathBuf;
-use tauri::{Emitter, Listener, Manager, WindowEvent};
+use tauri::{Emitter, Listener, Manager};
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
@@ -696,11 +696,6 @@ pub fn run() {
                     windows_thumbar::windows_update_thumbar_state,
                     commands::proxy_fetch_bytes,
                     commands::save_image_to_gallery,
-                    // Window close-to-tray and minimize-to-tray commands
-                    commands::window::get_close_to_tray,
-                    commands::window::set_close_to_tray,
-                    commands::window::get_minimize_to_tray,
-                    commands::window::set_minimize_to_tray,
                     // Squeeze Connect commands
                     commands::squeeze::squeeze_start_server,
                     commands::squeeze::squeeze_stop_server,
@@ -893,18 +888,6 @@ pub fn run() {
                     commands::proxy_fetch_bytes,
                     commands::save_image_to_gallery,
                 ]
-            }
-        })
-        .on_window_event(|window, event| {
-            #[cfg(desktop)]
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Check if close-to-tray is enabled
-                let config = commands::window::load_window_config(window.app_handle());
-                if config.close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    tracing::info!("Window hidden to tray");
-                }
             }
         })
         .run(tauri::generate_context!())

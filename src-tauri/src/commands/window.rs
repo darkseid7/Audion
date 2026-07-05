@@ -14,24 +14,12 @@ pub enum WindowStartMode {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WindowConfig {
     pub start_mode: WindowStartMode,
-    #[serde(default)]
-    pub close_to_tray: bool,
-    #[serde(default)]
-    pub minimize_to_tray: bool,
-    /// Schema version for one-time migrations.
-    /// v0 (missing): close_to_tray was false by default
-    /// v1:            close_to_tray defaults to true
-    #[serde(default)]
-    pub config_version: u32,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             start_mode: WindowStartMode::Normal,
-            close_to_tray: true,
-            minimize_to_tray: false,
-            config_version: 1,
         }
     }
 }
@@ -49,16 +37,6 @@ pub fn load_window_config(app_handle: &AppHandle) -> WindowConfig {
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
                 if let Ok(config) = serde_json::from_str::<WindowConfig>(&content) {
-                    // One-time migration: v0 → v1 enables close_to_tray by default
-                    if config.config_version == 0 {
-                        let migrated = WindowConfig {
-                            close_to_tray: true,
-                            config_version: 1,
-                            ..config
-                        };
-                        save_window_config(app_handle, &migrated).ok();
-                        return migrated;
-                    }
                     return config;
                 }
             }
@@ -89,29 +67,5 @@ pub fn get_window_start_mode(app_handle: AppHandle) -> WindowStartMode {
 pub fn set_window_start_mode(app_handle: AppHandle, mode: WindowStartMode) -> Result<(), String> {
     let mut config = load_window_config(&app_handle);
     config.start_mode = mode;
-    save_window_config(&app_handle, &config)
-}
-
-#[tauri::command]
-pub fn get_close_to_tray(app_handle: AppHandle) -> bool {
-    load_window_config(&app_handle).close_to_tray
-}
-
-#[tauri::command]
-pub fn set_close_to_tray(app_handle: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut config = load_window_config(&app_handle);
-    config.close_to_tray = enabled;
-    save_window_config(&app_handle, &config)
-}
-
-#[tauri::command]
-pub fn get_minimize_to_tray(app_handle: AppHandle) -> bool {
-    load_window_config(&app_handle).minimize_to_tray
-}
-
-#[tauri::command]
-pub fn set_minimize_to_tray(app_handle: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut config = load_window_config(&app_handle);
-    config.minimize_to_tray = enabled;
     save_window_config(&app_handle, &config)
 }
