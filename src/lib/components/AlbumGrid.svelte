@@ -14,6 +14,7 @@
     } from "$lib/stores/library";
     import { contextMenu } from "$lib/stores/ui";
     import { deleteAlbum, getTracksByAlbum } from "$lib/api/tauri";
+    import { revealItemInDir } from "@tauri-apps/plugin-opener";
     import {
         playTracks,
         currentAlbumId,
@@ -643,6 +644,38 @@
                             unpinItem("album", album.id);
                         } else {
                             pinItem("album", album.id);
+                        }
+                    },
+                },
+                {
+                    label: $_("contextMenu.showLocalFolder", {
+                        default: "Show Local Folder",
+                    }),
+                    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>`,
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album.id);
+                            const localTrack = tracks.find(
+                                (t) => t.path && t.source_type !== "tidal" && t.source_type !== "url",
+                            );
+                            if (!localTrack) {
+                                addToast(
+                                    $_("album.noLocalFiles", {
+                                        default: "No local files for this album",
+                                    }),
+                                    "warning",
+                                );
+                                return;
+                            }
+                            await revealItemInDir(localTrack.path);
+                        } catch (err) {
+                            console.error("Failed to reveal album folder:", err);
+                            addToast(
+                                $_("album.revealFailed", {
+                                    default: "Could not open the file explorer",
+                                }),
+                                "error",
+                            );
                         }
                     },
                 },
