@@ -93,12 +93,15 @@ async function sendPresencePayload(reason: string): Promise<void> {
     return;
   }
 
-  const coverSrc = getTrackCoverSrc(track);
+  // Cover handling: Discord fetches cover images from its own servers, so the
+  // URL must be publicly reachable. For local tracks, getTrackCoverSrc returns
+  // a Tauri asset protocol URL (http://asset.localhost/...) which Discord
+  // cannot resolve. We therefore only forward cover_url when the track comes
+  // from a streaming source with a real public URL. For everything else we
+  // omit the field and let the backend fall back to the audion_logo asset.
+  const isLocal = !track.source_type || track.source_type === "local";
   const coverUrl =
-    coverSrc &&
-    (coverSrc.startsWith("http://") || coverSrc.startsWith("https://"))
-      ? coverSrc
-      : undefined;
+    !isLocal && track.cover_url ? track.cover_url : undefined;
   const dur = get(duration);
   const curTime = get(currentTime);
   const playing = get(isPlaying);
@@ -120,7 +123,7 @@ async function sendPresencePayload(reason: string): Promise<void> {
   }
 
   console.log(
-    `${TAG} sendPresencePayload (${reason}): track="${track.title}" artist="${track.artist}" playing=${playing} cover=${coverUrl ? "yes" : "no"} cur=${curTime.toFixed(1)}s dur=${dur.toFixed(1)}s`,
+    `${TAG} sendPresencePayload (${reason}): track="${track.title}" artist="${track.artist}" playing=${playing} cover=${coverUrl ? "yes" : isLocal ? "skipped-local" : "no"} cur=${curTime.toFixed(1)}s dur=${dur.toFixed(1)}s`,
   );
 
   try {

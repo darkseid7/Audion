@@ -213,6 +213,7 @@
     "discordPresence": "Discord Rich Presence",
     "discordPresenceDesc": "Show what you're listening to in your Discord status",
     "discordReconnect": "Reconnect to Discord",
+    "discordPrivacyNote": "Note: in Discord, enable Settings > Activity Privacy > \"Display current activity as a status message\". Required by Discord for any non-verified app.",
     "openDiscord": "Open Discord",
     "resonateButton": "Resonate button",
     "openResonate": "Open Resonate",

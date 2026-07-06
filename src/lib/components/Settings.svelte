@@ -1165,6 +1165,10 @@
             </button>
           </div>
 
+          <p style="font-size: 0.7rem; opacity: 0.6; margin: var(--spacing-xs) 0 0; line-height: 1.4;">
+            {$_('settings.discordPrivacyNote', { default: 'Note: in Discord, enable Settings > Activity Privacy > "Display current activity as a status message". This is required by Discord for any non-verified app.' })}
+          </p>
+
           <div class="divider"></div>
 
           <div class="toggle-container">

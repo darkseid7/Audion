@@ -162,6 +162,7 @@
     "discordPresence": "Présence riche sur Discord",
     "discordPresenceDesc": "Affiche ce que vous écoutez dans votre statut Discord",
     "discordReconnect": "Reconnexion à Discord",
+    "discordPrivacyNote": "Note : dans Discord, activez Paramètres > Confidentialité de l'activité > « Afficher l'activité actuelle comme message d'état ». Discord l'exige pour toute application non vérifiée.",
     "openDiscord": "Ouvrir Discord",
     "appearance": "Apparence",
     "selectLanguage": "Langue",
