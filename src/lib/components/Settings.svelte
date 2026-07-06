@@ -44,6 +44,7 @@
     deleteAccount,
   } from "$lib/stores/sync";
   import { nativeAudioStop } from "$lib/services/native-audio";
+  import { reconnectDiscord } from "$lib/stores/discordPresence";
 
   interface MigrationProgressUpdate {
     current: number;
@@ -87,6 +88,9 @@
   let mergePercentage = 0;
 
   // Android single music folder state
+
+  // Discord reconnect state
+  let discordReconnecting = false;
 
   // Backup state
   let backups: BackupInfo[] = [];
@@ -1129,7 +1133,8 @@
 
           <div class="toggle-container">
             <div class="toggle-info">
-              <span class="setting-title">{$_('settings.discordButton', { default: 'Discord button' })}</span>
+              <span class="setting-title">{$_('settings.discordPresence', { default: 'Discord Rich Presence' })}</span>
+              <span class="setting-description">{$_('settings.discordPresenceDesc', { default: 'Show what you\'re listening to in your Discord status' })}</span>
             </div>
             <button
               class="toggle-btn"
@@ -1137,12 +1142,29 @@
               on:click={() => appSettings.setShowDiscord(!$appSettings.showDiscord)}
               role="switch"
               aria-checked={$appSettings.showDiscord}
-              aria-label="Toggle Discord Button"
+              aria-label="Toggle Discord Rich Presence"
             >
               <div class="toggle-handle"></div>
             </button>
           </div>
-          
+
+          <div class="button-group-row" style="margin-top: var(--spacing-sm);">
+            <button
+              class="btn-outline-compact"
+              on:click={async () => {
+                discordReconnecting = true;
+                try {
+                  await reconnectDiscord();
+                } finally {
+                  discordReconnecting = false;
+                }
+              }}
+              disabled={discordReconnecting}
+            >
+              {discordReconnecting ? '...' : $_('settings.discordReconnect', { default: 'Reconnect to Discord' })}
+            </button>
+          </div>
+
           <div class="divider"></div>
 
           <div class="toggle-container">

@@ -5,6 +5,10 @@
   import { theme } from "$lib/stores/theme";
   import { cleanupPlayer, initAudioBackend } from "$lib/stores/player";
   import {
+    initDiscordPresence,
+    disposeDiscordPresence,
+  } from "$lib/stores/discordPresence";
+  import {
     migrateCoversToFiles,
     isAndroid,
     isTauri,
@@ -126,6 +130,7 @@
 
     initMobileDetection();
     await initAudioBackend();
+    initDiscordPresence();
 
     // Load liked tracks and albums from database
     loadLikedTracks();
@@ -262,6 +267,9 @@
     // Cleanup player resources
     cleanupPlayer();
 
+    // Cleanup Discord Rich Presence
+    disposeDiscordPresence();
+
     // Cleanup file watcher listener
     watcherUnlisten?.();
 
@@ -274,6 +282,7 @@
     import.meta.hot.dispose(() => {
       console.log("[App] Cleaning up on hot reload");
       cleanupPlayer();
+      disposeDiscordPresence();
       const runtime = pluginStore.getRuntime();
       if (runtime) {
         for (const plugin of runtime.getLoadedPlugins()) {
