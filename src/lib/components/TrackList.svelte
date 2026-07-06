@@ -1547,6 +1547,17 @@
     color: var(--accent-primary);
   }
 
+  /* Dim non-playing track titles so the playing one stands out (Spotify-style) */
+  .track-name {
+    opacity: 0.5;
+    transition: opacity 0.15s ease;
+  }
+  .track-row.playing .track-name,
+  .track-row:hover .track-name,
+  .track-row.selected .track-name {
+    opacity: 1;
+  }
+
   .track-row.dragging {
     opacity: 0.5;
     background-color: var(--bg-highlight);
@@ -1983,8 +1994,38 @@
   }
 
   /* â”€â”€ Equalizer bars (hidden by default, shown on mobile album view) â”€â”€ */
+  /* Equalizer bars (playing-track indicator) — shown wherever a track is playing */
   .equalizer-bars {
-    display: none;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 2px;
+    height: 16px;
+    width: 16px;
+  }
+
+  .eq-bar {
+    width: 3px;
+    background-color: var(--accent-primary);
+    border-radius: 1px;
+    animation: eq-bounce 1.2s ease-in-out infinite;
+  }
+
+  .eq-bar:nth-child(1) { height: 60%;  animation-delay: 0s;   }
+  .eq-bar:nth-child(2) { height: 100%; animation-delay: 0.2s; }
+  .eq-bar:nth-child(3) { height: 40%;  animation-delay: 0.4s; }
+  .eq-bar:nth-child(4) { height: 80%;  animation-delay: 0.6s; }
+
+  @keyframes eq-bounce {
+    0%, 100% { height: 20%; }
+    50%      { height: 100%; }
+  }
+
+  /* Desktop: equalizer bars replace the SVG music-note icon */
+  @media (min-width: 769px) {
+    .playing-icon {
+      display: none;
+    }
   }
 
   /* â”€â”€ Mobile â”€â”€ */
@@ -2048,55 +2089,14 @@
       display: none;
     }
 
-    /* Show equalizer bars, hide music note on album mobile */
-    .list-body.mobile-album .equalizer-bars {
-      display: flex;
-      align-items: flex-end;
-      justify-content: center;
-      gap: 2px;
-      height: 16px;
-      width: 16px;
-    }
-
+    /* Mobile album: SVG note hidden in favor of equalizer bars */
     .list-body.mobile-album .playing-icon {
       display: none;
     }
 
-    .eq-bar {
-      width: 3px;
-      background-color: var(--accent-primary);
-      border-radius: 1px;
-      animation: eq-bounce 1.2s ease-in-out infinite;
-    }
-
-    .eq-bar:nth-child(1) {
-      height: 60%;
-      animation-delay: 0s;
-    }
-
-    .eq-bar:nth-child(2) {
-      height: 100%;
-      animation-delay: 0.2s;
-    }
-
-    .eq-bar:nth-child(3) {
-      height: 40%;
-      animation-delay: 0.4s;
-    }
-
-    .eq-bar:nth-child(4) {
-      height: 80%;
-      animation-delay: 0.6s;
-    }
-
-    @keyframes eq-bounce {
-      0%,
-      100% {
-        height: 20%;
-      }
-      50% {
-        height: 100%;
-      }
+    /* Mobile non-album: keep the SVG note (no bars here) */
+    .list-body:not(.mobile-album) .equalizer-bars {
+      display: none;
     }
 
     /* Title in album view â€” bold, prominent */
