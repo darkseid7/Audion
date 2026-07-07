@@ -34,6 +34,7 @@
     discoveredSqueezePlayers,
     startGlobalSqueezeDiscovery,
     stopGlobalSqueezeDiscovery,
+    disconnectSqueezePlayer,
   } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
@@ -80,8 +81,7 @@
 
   function selectSqueezePlayer(player: SqueezePlayerInfo) {
     if ($activeSqueezePlayer === player.mac) {
-      activeSqueezePlayer.set(null);
-      activeBackend.set("none");
+      disconnectSqueezePlayer(player.mac);
     } else {
       activeSqueezePlayer.set(player.mac);
       activeBackend.set("squeeze");

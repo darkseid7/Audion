@@ -49,6 +49,15 @@ let discoveryInterval: ReturnType<typeof setInterval> | null = null;
 let discoveryStarting = false;
 
 /**
+ * MAC addresses that the user has explicitly disconnected in this session.
+ * Polling skips these so a Disconnect button press is sticky and not
+ * immediately undone by the next 1 s discovery tick.
+ * Cleared when the Squeeze server is stopped — restarting re-enables
+ * auto-pickup for all previously-discovered players.
+ */
+const userDisconnectedMacs = new Set<string>();
+
+/**
  * Idempotent. Starts a 1 Hz poll that:
  *   1. Keeps `discoveredSqueezePlayers` in sync with the backend.
  *   2. Auto-selects the first discovered player when nothing is active,
@@ -86,6 +95,21 @@ export function stopGlobalSqueezeDiscovery(): void {
     discoveryInterval = null;
   }
   discoveredSqueezePlayers.set([]);
+  // Wipe the disconnect list so a subsequent server restart lets every
+  // player become eligible for auto-pickup again.
+  userDisconnectedMacs.clear();
+}
+
+/**
+ * Disconnect a Squeeze player and prevent it from being auto-reselected
+ * by the discovery poll. Call this instead of manually clearing
+ * activeSqueezePlayer + activeBackend — the MAC is recorded so the
+ * next poll tick skips it.
+ */
+export function disconnectSqueezePlayer(mac: string): void {
+  userDisconnectedMacs.add(mac);
+  activeSqueezePlayer.set(null);
+  activeBackend.set("none");
 }
 
 async function pollSqueezePlayersOnce(): Promise<void> {
@@ -93,13 +117,16 @@ async function pollSqueezePlayersOnce(): Promise<void> {
     const players = await squeezeGetPlayers();
     discoveredSqueezePlayers.set(players ?? []);
     // Auto-connect: pick the first available player when no squeeze
-    // player is currently selected. Mirrors the previous in-panel logic
-    // so the experience is identical whether the user opens the Connect
-    // panel or just lets the Eversolo come online on its own.
+    // player is currently selected. Skip players whose MAC the user
+    // manually disconnected this server session — otherwise a Disconnect
+    // button press is undone by the very next 1 s tick.
     if (players && players.length > 0 && !get(activeSqueezePlayer)) {
-      activeSqueezePlayer.set(players[0].mac);
-      activeBackend.set("squeeze");
-      activeRemoteDevice.set(null);
+      const candidate = players.find((p) => !userDisconnectedMacs.has(p.mac));
+      if (candidate) {
+        activeSqueezePlayer.set(candidate.mac);
+        activeBackend.set("squeeze");
+        activeRemoteDevice.set(null);
+      }
     }
   } catch {
     // Server may have been stopped mid-tick; ignore.
