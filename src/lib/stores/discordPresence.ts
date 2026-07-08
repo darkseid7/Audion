@@ -220,9 +220,16 @@ export function initDiscordPresence(): void {
       console.log(`${TAG} track change detected: id=${track.id} title="${track.title}"`);
       lastTrackId = track.id;
       lastSentCurrentTimeSec = -1;
-      sendPresencePayload("track-change");
-      if (get(isPlaying)) startThrottle();
-      else stopThrottle();
+      // If we're paused, activity is cleared (Spotify-style) — don't push a
+      // paused-state payload for the new track; it would just show a phantom
+      // card. Sending happens on resume.
+      if (get(isPlaying)) {
+        sendPresencePayload("track-change");
+        startThrottle();
+      } else {
+        console.log(`${TAG} track changed while paused — activity stays cleared`);
+        stopThrottle();
+      }
     } else {
       console.log(`${TAG} track subscribe: same track id=${track.id}, no-op`);
     }
@@ -245,9 +252,17 @@ export function initDiscordPresence(): void {
     }
 
     console.log(`${TAG} play/pause edge: playing=${playing} track="${track.title}"`);
-    sendPresencePayload(`play-${playing ? "on" : "off"}`);
-    if (playing) startThrottle();
-    else stopThrottle();
+    if (playing) {
+      sendPresencePayload("play-on");
+      startThrottle();
+    } else {
+      // Spotify-style: pause immediately hides the activity card from
+      // Discord instead of leaving a count-up timestamp running.
+      stopThrottle();
+      invoke("discord_clear_presence").catch((e) =>
+        console.warn(`${TAG} play-off: discord_clear_presence failed`, e),
+      );
+    }
   });
 
   const unsubSettings = appSettings.subscribe((settings) => {
