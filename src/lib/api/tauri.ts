@@ -250,6 +250,10 @@ export async function rescanMusic(): Promise<ScanResult> {
   return await invoke("rescan_music");
 }
 
+export async function hardRescanMusic(): Promise<ScanResult> {
+  return await invoke("hard_rescan_music");
+}
+
 // File watcher commands (desktop only)
 export async function startWatcher(): Promise<void> {
   return await invoke("start_watcher");

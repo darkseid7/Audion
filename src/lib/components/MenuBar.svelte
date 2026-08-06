@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { selectMusicFolder, addFolder, rescanMusic } from "$lib/api/tauri";
+  import { selectMusicFolder, addFolder, rescanMusic, hardRescanMusic } from "$lib/api/tauri";
   import {
     loadLibrary,
     loadPlaylists,
@@ -170,6 +170,52 @@
     }
   }
 
+  async function handleHardRescan() {
+    closeMenus();
+
+    const confirmed = await confirm(
+      "Hard rescan re-processes ALL files regardless of cache. This may take a while. Continue?",
+      { title: "Hard Rescan", confirmLabel: "Rescan All", danger: true },
+    );
+
+    if (!confirmed) return;
+
+    try {
+      isScanning = true;
+      await progressiveScan.startScan(false);
+
+      const result = await hardRescanMusic();
+
+      if (result.errors.length > 0) {
+        console.warn("Hard rescan errors:", result.errors);
+      }
+
+      console.log(
+        `Hard rescan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
+      );
+
+      await Promise.all([loadLibrary(), loadPlaylists()]);
+
+      const parts = [];
+      if (result.tracks_added > 0) parts.push(`${result.tracks_added} added`);
+      if (result.tracks_updated > 0) parts.push(`${result.tracks_updated} updated`);
+      if (result.tracks_deleted > 0) parts.push(`${result.tracks_deleted} deleted`);
+
+      const message =
+        parts.length > 0
+          ? `Hard rescan complete: ${parts.join(", ")}`
+          : "Hard rescan complete - no changes";
+
+      addToast(message, "success", 4000);
+    } catch (error) {
+      console.error("Failed to hard rescan:", error);
+      addToast("Failed to hard rescan library", "error");
+    } finally {
+      isScanning = false;
+      progressiveScan.reset();
+    }
+  }
+
   async function handleClearCache() {
     closeMenus();
 
@@ -251,6 +297,14 @@
           </svg>
           <span>Rescan Library</span>
           <span class="shortcut">Ctrl+R</span>
+        </button>
+        <button class="menu-item" on:click={handleHardRescan} disabled={isScanning}>
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+            <path
+              d="M12 5V2L8 6l4 4V7c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.97 20 14.04 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 8.74C4.46 9.97 4 11.9 4 13.94c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"
+            />
+          </svg>
+          <span>Hard Rescan</span>
         </button>
       </div>
 

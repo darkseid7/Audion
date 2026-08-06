@@ -25,6 +25,11 @@ export type ThemeMode =
   | "cobalt-royal"
   | "terracotta"
   | "holo-foil"
+  | "neon-lime"
+  | "golden-hour"
+  | "indigo-night"
+  | "coral-reef"
+  | "frosted-amethyst"
   | "true-black";
 
 export interface ThemeColors {
@@ -229,6 +234,46 @@ export const themePresets: ThemePreset[] = [
     accent: "#ffffff",
     preview: { bg: "#000000", accent: "#ffffff", text: "#a3a3a3" },
   },
+  {
+    id: "neon-lime",
+    name: "Neon Lime",
+    icon: "💚",
+    description: "Electric green neon with high-voltage energy",
+    accent: "#7FFF00",
+    preview: { bg: "#0d0d00", accent: "#7FFF00", text: "#bfff80" },
+  },
+  {
+    id: "golden-hour",
+    name: "Golden Hour",
+    icon: "🟡",
+    description: "Warm amber glow like a perfect sunset",
+    accent: "#FFD700",
+    preview: { bg: "#120e08", accent: "#FFD700", text: "#ffec8b" },
+  },
+  {
+    id: "indigo-night",
+    name: "Indigo Night",
+    icon: "🟣",
+    description: "Deep violet mystery and midnight calm",
+    accent: "#6A0DAD",
+    preview: { bg: "#08041a", accent: "#6A0DAD", text: "#c9a0f0" },
+  },
+  {
+    id: "coral-reef",
+    name: "Coral Reef",
+    icon: "🪸",
+    description: "Warm coral shimmer like tropical shallows",
+    accent: "#FF7F50",
+    preview: { bg: "#140a0a", accent: "#FF7F50", text: "#ffb89a" },
+  },
+  {
+    id: "frosted-amethyst",
+    name: "Frosted Amethyst",
+    icon: "💜",
+    description: "Cool purple crystal with soft frost glow",
+    accent: "#9966CC",
+    preview: { bg: "#0a0a14", accent: "#9966CC", text: "#c4a0e8" },
+  },
 ];
 
 // Theme definitions: CSS variables + custom styles for each preset
@@ -237,7 +282,7 @@ interface ThemeDefinition {
   customStyles: string;
 }
 
-const themeDefinitions: Record<string, ThemeDefinition> = {
+export const themeDefinitions: Record<string, ThemeDefinition> = {
   "cyberpunk-neon": {
     vars: {
       "--bg-base": "#0a0a12",
@@ -1552,6 +1597,249 @@ const themeDefinitions: Record<string, ThemeDefinition> = {
             ::selection {
                 background: #ffffff !important;
                 color: #000000 !important;
+            }
+        `,
+  },
+  "neon-lime": {
+    vars: {
+      "--bg-base": "#0d0d00",
+      "--bg-elevated": "#121206",
+      "--bg-surface": "#1a1a0e",
+      "--bg-highlight": "#252518",
+      "--bg-press": "#303022",
+      "--accent-primary": "#7FFF00",
+      "--accent-hover": "#9AFF42",
+      "--accent-subtle": "rgba(127, 255, 0, 0.15)",
+      "--text-primary": "#f0ffe0",
+      "--text-secondary": "#bfff80",
+      "--text-subdued": "#8a9a4a",
+      "--border-color": "rgba(127, 255, 0, 0.3)",
+    },
+    customStyles: `
+            .sidebar, .nav-sidebar {
+                background: linear-gradient(180deg, #0d0d00 0%, rgba(127,255,0,0.06) 100%) !important;
+            }
+            .player-bar {
+                background: linear-gradient(180deg, rgba(127,255,0,0.06) 0%, rgba(127,255,0,0.03) 50%, #0d0d00 100%) !important;
+                border-top: 1px solid rgba(127,255,0,0.2) !important;
+            }
+            body::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background: radial-gradient(circle at 50% 30%, rgba(127,255,0,0.05) 0%, transparent 50%);
+                z-index: -1;
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #5a8a00 0%, #7FFF00 50%, #9AFF42 100%) !important;
+                box-shadow: 0 4px 25px rgba(127,255,0,0.4) !important;
+            }
+            .progress-bar .progress, .volume-bar .progress {
+                background: linear-gradient(90deg, #7FFF00, #9AFF42) !important;
+                box-shadow: 0 0 12px rgba(127,255,0,0.4) !important;
+            }
+            .track-item.playing .track-title,
+            .queue-track.current .track-title,
+            .track-row.playing .track-title {
+                color: #9AFF42 !important;
+                text-shadow: 0 0 10px rgba(154,255,66,0.5) !important;
+            }
+            .icon-btn.active {
+                color: #7FFF00 !important;
+            }
+        `,
+  },
+  "golden-hour": {
+    vars: {
+      "--bg-base": "#120e08",
+      "--bg-elevated": "#1a150e",
+      "--bg-surface": "#241d12",
+      "--bg-highlight": "#302618",
+      "--bg-press": "#3c3020",
+      "--accent-primary": "#FFD700",
+      "--accent-hover": "#FFE44D",
+      "--accent-subtle": "rgba(255, 215, 0, 0.15)",
+      "--text-primary": "#fff8e0",
+      "--text-secondary": "#ffec8b",
+      "--text-subdued": "#a09060",
+      "--border-color": "rgba(255, 215, 0, 0.3)",
+    },
+    customStyles: `
+            .sidebar, .nav-sidebar {
+                background: linear-gradient(180deg, #120e08 0%, rgba(255,215,0,0.06) 100%) !important;
+            }
+            .player-bar {
+                background: linear-gradient(180deg, rgba(255,215,0,0.06) 0%, rgba(255,215,0,0.03) 50%, #120e08 100%) !important;
+                border-top: 1px solid rgba(255,215,0,0.2) !important;
+            }
+            body::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background: radial-gradient(circle at 20% 80%, rgba(255,215,0,0.06) 0%, transparent 50%);
+                z-index: -1;
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #8a7200 0%, #FFD700 50%, #FFE44D 100%) !important;
+                box-shadow: 0 4px 20px rgba(255,215,0,0.3) !important;
+            }
+            .progress-bar .progress, .volume-bar .progress {
+                background: linear-gradient(90deg, #FFD700, #FFE44D) !important;
+            }
+            .track-item.playing .track-title,
+            .queue-track.current .track-title,
+            .track-row.playing .track-title {
+                color: #FFE44D !important;
+            }
+            .icon-btn.active {
+                color: #FFD700 !important;
+            }
+        `,
+  },
+  "indigo-night": {
+    vars: {
+      "--bg-base": "#08041a",
+      "--bg-elevated": "#0e0725",
+      "--bg-surface": "#160c30",
+      "--bg-highlight": "#201540",
+      "--bg-press": "#2a1e50",
+      "--accent-primary": "#6A0DAD",
+      "--accent-hover": "#8B2FC9",
+      "--accent-subtle": "rgba(106, 13, 173, 0.15)",
+      "--text-primary": "#f0e6ff",
+      "--text-secondary": "#c9a0f0",
+      "--text-subdued": "#9585a0",
+      "--border-color": "rgba(106, 13, 173, 0.3)",
+    },
+    customStyles: `
+            .sidebar, .nav-sidebar {
+                background: linear-gradient(180deg, #08041a 0%, rgba(106,13,173,0.07) 100%) !important;
+            }
+            .player-bar {
+                background: linear-gradient(180deg, rgba(106,13,173,0.08) 0%, rgba(106,13,173,0.03) 50%, #08041a 100%) !important;
+                border-top: 1px solid rgba(106,13,173,0.2) !important;
+            }
+            body::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background: radial-gradient(circle at 50% 40%, rgba(106,13,173,0.06) 0%, transparent 50%);
+                z-index: -1;
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #4a0a7a 0%, #6A0DAD 50%, #8B2FC9 100%) !important;
+                box-shadow: 0 4px 25px rgba(106,13,173,0.35) !important;
+            }
+            .progress-bar .progress, .volume-bar .progress {
+                background: linear-gradient(90deg, #6A0DAD, #8B2FC9) !important;
+            }
+            .track-item.playing .track-title,
+            .queue-track.current .track-title,
+            .track-row.playing .track-title {
+                color: #8B2FC9 !important;
+                text-shadow: 0 0 8px rgba(139,47,201,0.4) !important;
+            }
+            .icon-btn.active {
+                color: #6A0DAD !important;
+            }
+        `,
+  },
+  "coral-reef": {
+    vars: {
+      "--bg-base": "#140a0a",
+      "--bg-elevated": "#1c0f0e",
+      "--bg-surface": "#261612",
+      "--bg-highlight": "#321e18",
+      "--bg-press": "#3e261e",
+      "--accent-primary": "#FF7F50",
+      "--accent-hover": "#FFA070",
+      "--accent-subtle": "rgba(255, 127, 80, 0.15)",
+      "--text-primary": "#fff0ea",
+      "--text-secondary": "#ffb89a",
+      "--text-subdued": "#9a8070",
+      "--border-color": "rgba(255, 127, 80, 0.3)",
+    },
+    customStyles: `
+            .sidebar, .nav-sidebar {
+                background: linear-gradient(180deg, #140a0a 0%, rgba(255,127,80,0.06) 100%) !important;
+            }
+            .player-bar {
+                background: linear-gradient(180deg, rgba(255,127,80,0.06) 0%, rgba(255,127,80,0.03) 50%, #140a0a 100%) !important;
+                border-top: 1px solid rgba(255,127,80,0.2) !important;
+            }
+            body::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background: radial-gradient(circle at 80% 80%, rgba(255,127,80,0.06) 0%, transparent 50%);
+                z-index: -1;
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #cc5a30 0%, #FF7F50 50%, #FFA070 100%) !important;
+                box-shadow: 0 4px 20px rgba(255,127,80,0.3) !important;
+            }
+            .progress-bar .progress, .volume-bar .progress {
+                background: linear-gradient(90deg, #FF7F50, #FFA070) !important;
+            }
+            .track-item.playing .track-title,
+            .queue-track.current .track-title,
+            .track-row.playing .track-title {
+                color: #FFA070 !important;
+            }
+            .icon-btn.active {
+                color: #FF7F50 !important;
+            }
+        `,
+  },
+  "frosted-amethyst": {
+    vars: {
+      "--bg-base": "#0a0a14",
+      "--bg-elevated": "#10102e",
+      "--bg-surface": "#1a1a3e",
+      "--bg-highlight": "#25254e",
+      "--bg-press": "#30305e",
+      "--accent-primary": "#9966CC",
+      "--accent-hover": "#B388E0",
+      "--accent-subtle": "rgba(153, 102, 204, 0.15)",
+      "--text-primary": "#f0e6ff",
+      "--text-secondary": "#c4a0e8",
+      "--text-subdued": "#958aaa",
+      "--border-color": "rgba(153, 102, 204, 0.25)",
+    },
+    customStyles: `
+            .sidebar, .nav-sidebar {
+                background: linear-gradient(180deg, #0a0a14 0%, rgba(153,102,204,0.07) 100%) !important;
+            }
+            .player-bar {
+                background: linear-gradient(180deg, rgba(153,102,204,0.07) 0%, rgba(153,102,204,0.03) 50%, #0a0a14 100%) !important;
+                border-top: 1px solid rgba(153,102,204,0.2) !important;
+            }
+            body::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background: radial-gradient(circle at 30% 30%, rgba(153,102,204,0.06) 0%, transparent 50%);
+                z-index: -1;
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #704aaa 0%, #9966CC 50%, #B388E0 100%) !important;
+                box-shadow: 0 4px 20px rgba(153,102,204,0.3) !important;
+            }
+            .progress-bar .progress, .volume-bar .progress {
+                background: linear-gradient(90deg, #9966CC, #B388E0) !important;
+            }
+            .track-item.playing .track-title,
+            .queue-track.current .track-title,
+            .track-row.playing .track-title {
+                color: #B388E0 !important;
+            }
+            .icon-btn.active {
+                color: #9966CC !important;
             }
         `,
   },

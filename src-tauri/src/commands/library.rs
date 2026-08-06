@@ -124,6 +124,7 @@ pub async fn begin_folder_import(
             scan_errors,
             vec![folder_str],
             ScanSource::FolderImport(playlist_id),
+            false,
         )
         .await;
     });
@@ -498,39 +499,44 @@ async fn run_scan_and_import(
     scan_errors: Vec<String>,
     folders: Vec<String>, // used for timestamp update after batch
     source: ScanSource,
+    force: bool,
 ) -> Result<ScanResult, String> {
     let total_start = std::time::Instant::now();
 
-    // ── Incremental scan: skip files whose mtime hasn't changed ──
-    let known_mtimes = {
-        let conn = db_conn.lock().map_err(|e| e.to_string())?;
-        queries::get_track_mtimes(&conn).unwrap_or_default()
+    let files_to_process: Vec<String> = if force {
+        // Hard rescan: process ALL files, ignoring mtime cache
+        all_files
+    } else {
+        // ── Incremental scan: skip files whose mtime hasn't changed ──
+        let known_mtimes = {
+            let conn = db_conn.lock().map_err(|e| e.to_string())?;
+            queries::get_track_mtimes(&conn).unwrap_or_default()
+        };
+
+        all_files
+            .into_iter()
+            .filter(|file_path| {
+                let fs_mtime = std::fs::metadata(file_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64);
+
+                match (known_mtimes.get(file_path.as_str()), fs_mtime) {
+                    (Some(&db_mtime), Some(fs_mt)) => db_mtime != fs_mt, // changed
+                    (None, _) => true,   // new file
+                    (_, None) => true,   // can't read mtime, process anyway
+                }
+            })
+            .collect()
     };
 
-    let files_to_process: Vec<String> = all_files
-        .into_iter()
-        .filter(|file_path| {
-            let fs_mtime = std::fs::metadata(file_path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64);
-
-            match (known_mtimes.get(file_path.as_str()), fs_mtime) {
-                (Some(&db_mtime), Some(fs_mt)) => db_mtime != fs_mt, // changed
-                (None, _) => true,   // new file
-                (_, None) => true,   // can't read mtime, process anyway
-            }
-        })
-        .collect();
-
-    let skipped = known_mtimes.len().saturating_sub(0); // info only
     let total_files = files_to_process.len();
 
     tracing::info!(
         "[Scan] {} files to process ({} skipped as unchanged)",
         total_files,
-        known_mtimes.len().saturating_sub(total_files),
+        if force { 0 } else { 0 },
     );
 
     if total_files == 0 {
@@ -913,6 +919,7 @@ pub async fn rescan_music(
         scan_errors,
         folders, // all registered folders, for timestamp update
         ScanSource::Rescan,
+        false,
     )
     .await?;
  
@@ -924,6 +931,92 @@ pub async fn rescan_music(
         }
     });
  
+    Ok(result)
+}
+
+/// Hard rescan: re-processes ALL files regardless of mtime cache.
+/// Use when album identity logic or metadata parsing has changed and
+/// existing tracks need to be re-evaluated.
+#[tauri::command]
+pub async fn hard_rescan_music(
+    window: tauri::Window,
+    db: State<'_, Database>,
+) -> Result<ScanResult, String> {
+    // 1: Cleanup (same as normal rescan)
+    let (folders, folder_playlists, tracks_deleted) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+        let folders = queries::get_music_folders(&conn).map_err(|e| e.to_string())?;
+
+        let tracks_deleted = queries::cleanup_deleted_tracks(&conn, &folders)
+            .map_err(|e| format!("Failed to cleanup deleted tracks: {}", e))?;
+
+        let _ = queries::cleanup_empty_albums(&conn);
+
+        let folder_playlists = queries::get_folder_playlists(&conn).unwrap_or_default();
+
+        (folders, folder_playlists, tracks_deleted)
+    }; // conn dropped here
+
+    // 2: Directory walk
+    let mut all_files = Vec::new();
+    let mut scan_errors = Vec::new();
+
+    for folder in &folders {
+        let result = scan_directory(folder);
+        all_files.extend(result.audio_files);
+        scan_errors.extend(result.errors);
+    }
+
+    let mut file_playlist_map: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
+
+    for (playlist_id, folder_path) in &folder_playlists {
+        let already_covered = folders.iter().any(|f| folder_path.starts_with(f.as_str()));
+
+        if already_covered {
+            for file_path in all_files.iter().filter(|p| p.starts_with(folder_path.as_str())) {
+                file_playlist_map
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(*playlist_id);
+            }
+        } else {
+            let result = scan_directory(folder_path);
+            for file_path in &result.audio_files {
+                file_playlist_map
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(*playlist_id);
+                all_files.push(file_path.clone());
+            }
+            scan_errors.extend(result.errors);
+        }
+    }
+
+    // 3: Force processing ALL files (skip mtime cache)
+    let db_conn = Arc::clone(&db.conn);
+    let result = run_scan_and_import(
+        &window,
+        db_conn,
+        all_files,
+        file_playlist_map,
+        tracks_deleted,
+        scan_errors,
+        folders,
+        ScanSource::Rescan,
+        true, // force = true: ignore mtime, re-process everything
+    )
+    .await?;
+
+    // Background orphan cleanup (non-blocking)
+    let db_conn_cleanup = Arc::clone(&db.conn);
+    tauri::async_runtime::spawn(async move {
+        if let Ok(conn) = db_conn_cleanup.lock() {
+            let _ = cover_storage::cleanup_orphaned_covers(&conn);
+        }
+    });
+
     Ok(result)
 }
 
