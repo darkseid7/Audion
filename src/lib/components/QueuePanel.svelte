@@ -19,6 +19,7 @@
     import { albums } from "$lib/stores/library";
     import { formatDuration, getAlbumArtSrc, getTrackCoverSrc, getAlbumCoverSrc } from "$lib/api/tauri";
     import { onMount, onDestroy } from "svelte";
+    import { dndzone, dragHandle, TRIGGERS } from "svelte-dnd-action";
     
     export let hideheader: boolean = false;
     export let forceVisible: boolean = false;
@@ -28,10 +29,6 @@
     // Virtual scrolling configuration
     const TRACK_ROW_HEIGHT = 56; // pixels
     const OVERSCAN = 5; // Extra rows to render above/below viewport
-
-    let upcomingContainerHeight = 400;
-    let upcomingScrollTop = 0;
-    let upcomingContainerElement: HTMLDivElement;
 
     let historyContainerHeight = 300;
     let historyScrollTop = 0;
@@ -145,27 +142,6 @@
 
     $: hasUpcoming = upcomingTracks.length > 0;
 
-    // Virtual scroll state for upcoming tracks
-    let upcomingVirtualState = {
-        totalHeight: 0,
-        startIndex: 0,
-        endIndex: 0,
-        offsetY: 0,
-        visibleTracks: [] as typeof upcomingTracks,
-    };
-
-    $: {
-        const totalHeight = upcomingTracks.length * TRACK_ROW_HEIGHT;
-        const startIndex = Math.max(0, Math.floor(upcomingScrollTop / TRACK_ROW_HEIGHT) - OVERSCAN);
-        const endIndex = Math.min(
-            upcomingTracks.length,
-            Math.ceil((upcomingScrollTop + upcomingContainerHeight) / TRACK_ROW_HEIGHT) + OVERSCAN
-        );
-        const visibleTracks = upcomingTracks.slice(startIndex, endIndex);
-        const offsetY = startIndex * TRACK_ROW_HEIGHT;
-        upcomingVirtualState = { totalHeight, startIndex, endIndex, offsetY, visibleTracks };
-    }
-
     // Virtual scroll state for history tracks
     let historyVirtualState = {
         totalHeight: 0,
@@ -187,10 +163,6 @@
         historyVirtualState = { totalHeight, startIndex, endIndex, offsetY, visibleTracks };
     }
 
-    function handleUpcomingScroll(e: Event) {
-        upcomingScrollTop = (e.target as HTMLElement).scrollTop;
-    }
-
     function handleHistoryScroll(e: Event) {
         historyScrollTop = (e.target as HTMLElement).scrollTop;
     }
@@ -200,17 +172,6 @@
             typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
 
         const observers: ResizeObserver[] = [];
-        
-        // Set up ResizeObserver for upcoming container
-        if (upcomingContainerElement) {
-            const updateUpcomingHeight = () => {
-                upcomingContainerHeight = upcomingContainerElement.clientHeight;
-            };
-            updateUpcomingHeight();
-            const upcomingObserver = new ResizeObserver(updateUpcomingHeight);
-            upcomingObserver.observe(upcomingContainerElement);
-            observers.push(upcomingObserver);
-        }
         
         // Set up ResizeObserver for history container
         if (historyContainerElement) {
@@ -228,10 +189,6 @@
         };
     });
 
-    onDestroy(() => {
-        if (cleanupDragListeners) cleanupDragListeners();
-    });
-
     function handlePlayTrack(index: number) {
         playFromQueue(index);
     }
@@ -240,79 +197,142 @@
         removeFromQueue(index);
     }
 
-    // Pointer-based drag and drop (works better in Tauri webview)
-    let draggedIndex: number | null = null;
-    let dragOverIndex: number | null = null;
-    let isDragging = false;
-    let cleanupDragListeners: (() => void) | null = null;
+    // ── svelte-dnd-action integration ──
+    // The library requires a local mutable items array with a top-level
+    // `id` property. upcomingTracks has `track.id` nested — we map it.
+    $: dndItems = upcomingTracks.map((t) => ({ ...t, id: t.track.id }));
 
-    function handlePointerDown(e: PointerEvent, actualIndex: number) {
-        e.preventDefault();
-        e.stopPropagation();
-        isDragging = true;
-        draggedIndex = actualIndex;
+    // Track the dragged item's absolute queue index at drag start so we
+    // can call reorderQueue(from, to) with correct indices on finalize.
+    let dragStartIndex: number | null = null;
 
-        // Capture pointer events
-        const target = e.currentTarget as HTMLElement;
-        target.setPointerCapture(e.pointerId);
+    // Track drag-active state and the original DOM position of the dragged
+    // clone so we can clamp the library's transform to stay within the
+    // queue panel. Without this, the clone floats freely across the app.
+    let dragActive = false;
+    let dragOriginalRect: { top: number; left: number; width: number; height: number } | null = null;
 
-        // Add global listeners
-        window.addEventListener("pointermove", handlePointerMove);
-        window.addEventListener("pointerup", handlePointerUp);
+    const FLIP_MS = 180;
+    const DRAGGED_EL_ID = "dnd-action-dragged-el";
 
-        cleanupDragListeners = () => {
-            window.removeEventListener("pointermove", handlePointerMove);
-            window.removeEventListener("pointerup", handlePointerUp);
-        };
+    function handleConsider(
+        e: CustomEvent<{
+            items: typeof dndItems;
+            info: { trigger: TRIGGERS; id?: string };
+        }>,
+    ) {
+        const info = e.detail.info;
+        // Capture the absolute queue index when drag starts.
+        if (info.trigger === TRIGGERS.DRAG_STARTED && dragStartIndex === null && info.id) {
+            // info.id can be string or number depending on the event; coerce
+            // both sides to string for a safe comparison. track.id is
+            // number per the Track interface, so we cast both.
+            const draggedId = String(info.id);
+            const item = upcomingTracks.find((t) => String(t.track.id) === draggedId);
+            if (item) dragStartIndex = item.index;
+
+            // svelte-dnd-action has now appended its `position: fixed`
+            // clone to document.body. Grab its initial rect. We defer the
+            // listener registration via queueMicrotask because the
+            // library adds its own mousemove handler on the NEXT line
+            // after dispatching this event — without the deferral, our
+            // listener would be registered BEFORE the library's and run
+            // FIRST on each mousemove, letting the library overwrite our
+            // X-lock on its turn.
+            const draggedEl = document.getElementById(DRAGGED_EL_ID);
+            if (draggedEl) {
+                dragOriginalRect = {
+                    top: parseFloat(draggedEl.style.top),
+                    left: parseFloat(draggedEl.style.left),
+                    width: draggedEl.offsetWidth,
+                    height: draggedEl.offsetHeight,
+                };
+                dragActive = true;
+                queueMicrotask(() => {
+                    window.addEventListener("mousemove", clampDraggedToPanel);
+                    window.addEventListener("touchmove", clampDraggedToPanel);
+                });
+            }
+        }
+        dndItems = e.detail.items;
     }
 
-    function handlePointerMove(e: PointerEvent) {
-        if (!isDragging || draggedIndex === null) return;
+    function handleFinalize(
+        e: CustomEvent<{
+            items: typeof dndItems;
+            info: { trigger: TRIGGERS; id?: string };
+        }>,
+    ) {
+        dndItems = e.detail.items;
+        const info = e.detail.info;
 
-        // Find element under pointer
-        const elementsUnderPointer = document.elementsFromPoint(
-            e.clientX,
-            e.clientY,
-        );
-        const queueTrack = elementsUnderPointer.find((el) =>
-            el.classList.contains("queue-track"),
-        );
-
-        if (queueTrack) {
-            const indexAttr = queueTrack.getAttribute("data-index");
-            if (indexAttr !== null) {
-                const overIndex = parseInt(indexAttr, 10);
-                if (overIndex !== draggedIndex) {
-                    dragOverIndex = overIndex;
-                } else {
-                    dragOverIndex = null;
+        // Sync the actual queue store with the new visual order.
+        if (dragStartIndex !== null && info.id) {
+            const qIdx = $queueIndex;
+            // Coerce info.id to string for safe comparison with the
+            // number-typed Track.id (info.id can be either depending on
+            // the library's path).
+            const draggedId = String(info.id);
+            // Find the dragged item in the reordered array.
+            const newVisualPos = dndItems.findIndex(
+                (it) => String(it.track.id) === draggedId,
+            );
+            if (newVisualPos !== -1) {
+                // In linear mode upcomingTracks[0] = queue[qIdx+1], so
+                // new visual position maps to qIdx + 1 + newVisualPos.
+                const newQueueIndex = qIdx + 1 + newVisualPos;
+                if (dragStartIndex !== newQueueIndex) {
+                    reorderQueue(dragStartIndex, newQueueIndex);
                 }
             }
-        } else {
-            dragOverIndex = null;
         }
+
+        // Clean up clamp listener and state.
+        if (dragActive) {
+            window.removeEventListener("mousemove", clampDraggedToPanel);
+            window.removeEventListener("touchmove", clampDraggedToPanel);
+            dragActive = false;
+            dragOriginalRect = null;
+        }
+        dragStartIndex = null;
     }
 
-    function handlePointerUp() {
-        if (
-            isDragging &&
-            draggedIndex !== null &&
-            dragOverIndex !== null &&
-            draggedIndex !== dragOverIndex
-        ) {
-            console.log("Reorder:", draggedIndex, "->", dragOverIndex);
-            reorderQueue(draggedIndex, dragOverIndex);
-        }
+    // Panel ref for bounding the drag.
+    let queuePanelElement: HTMLElement;
 
-        // Cleanup
-        isDragging = false;
-        draggedIndex = null;
-        dragOverIndex = null;
-        
-        if (cleanupDragListeners) {
-            cleanupDragListeners();
-            cleanupDragListeners = null;
-        }
+    // Lock the library's floating drag clone to vertical-only motion within
+    // the queue column. The library sets `transform: translate3d(dx, dy, 0)`
+    // from cursor delta; we override it so X is always 0 (no horizontal
+    // drift across the app) and Y is clamped to the panel bounds.
+    function clampDraggedToPanel(e: MouseEvent | TouchEvent) {
+        if (!dragActive || !queuePanelElement || !dragOriginalRect) return;
+        const draggedEl = document.getElementById(DRAGGED_EL_ID);
+        if (!draggedEl) return;
+
+        const panelRect = queuePanelElement.getBoundingClientRect();
+        const match = draggedEl.style.transform.match(
+            /translate3d\(([-\d.]+)px,\s*([-\d.]+)px/,
+        );
+        if (!match) return;
+
+        const ty = parseFloat(match[2]);
+
+        // X is always 0 — drag is vertical only.
+        const lockedTx = 0;
+
+        // Y is clamped to panel bounds so the clone never escapes vertically.
+        const effTop = dragOriginalRect.top + ty;
+        const effBottom = effTop + dragOriginalRect.height;
+        let dy = 0;
+        if (effTop < panelRect.top) dy = panelRect.top - effTop;
+        else if (effBottom > panelRect.bottom) dy = panelRect.bottom - effBottom;
+
+        const finalTy = ty + dy;
+
+        // Always rewrite the transform: locks X to 0 and applies Y clamping.
+        // We rewrite every frame (even when dy is 0) because the library sets
+        // X based on cursor delta and we need to override that consistently.
+        draggedEl.style.transform = `translate3d(${lockedTx}px, ${finalTy}px, 0)`;
     }
 </script>
 
@@ -321,6 +341,7 @@
         class="queue-panel"
         class:mobile={$isMobile}
         class:android-lite={isAndroid && $isMobile}
+        bind:this={queuePanelElement}
         transition:fly={{
             x: $isMobile ? 0 : 300,
             y: $isMobile ? (isAndroid ? 0 : 100) : 0,
@@ -362,21 +383,44 @@
     {/if}
 
         <div class="queue-content">
-            {#if $currentTrack}
+            {#if upcomingTracks.length > 0}
                 <section class="queue-section">
-                    <h4 class="section-title">Now Playing</h4>
-                    <div class="now-playing">
-                        <div class="queue-track current">
-                            <div class="track-art">
-                                {#if getTrackArt($currentTrack)}
-                                    <img
-                                        src={getTrackArt($currentTrack)}
-                                        alt=""
-                                        loading="lazy"
-                                        decoding="async"
-                                    />
-                                {:else}
-                                    <div class="art-placeholder">
+                    <h4 class="section-title">
+                        Next Up
+                        <span class="count">{upcomingTracks.length}</span>
+                    </h4>
+
+                    <div
+                        class="queue-list upcoming-dnd"
+                        class:shuffle-disabled={$shuffle}
+                        use:dndzone={{
+                            items: dndItems,
+                            flipDurationMs: FLIP_MS,
+                            dragDisabled: $shuffle,
+                            type: 'queue-upcoming',
+                            // svelte-dnd-action's default dropTargetStyle is a yellow
+                            // outline around the entire zone — ugly and clashes with
+                            // the dark theme. Empty object suppresses it; the per-item
+                            // FLIP animation already gives enough feedback.
+                            dropTargetStyle: {},
+                            dropTargetClasses: [],
+                        }}
+                        on:consider={handleConsider}
+                        on:finalize={handleFinalize}
+                    >
+                        {#each dndItems as item (item.id)}
+                            <div
+                                class="queue-track"
+                                class:priority={item.isPriority}
+                            >
+                                {#if item.index !== $queueIndex}
+                                    <div
+                                        class="drag-handle"
+                                        use:dragHandle
+                                        title="Drag to reorder"
+                                        role="button"
+                                        tabindex="-1"
+                                    >
                                         <svg
                                             viewBox="0 0 24 24"
                                             fill="currentColor"
@@ -384,146 +428,78 @@
                                             height="16"
                                         >
                                             <path
-                                                d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
+                                                d="M3 15h18v-2H3v2zm0 4h18v-2H3v2zm0-8h18V9H3v2zm0-6v2h18V5H3z"
                                             />
                                         </svg>
                                     </div>
+                                {:else}
+                                    <!-- Spacer so the track-btn doesn't shift when drag-handle is hidden -->
+                                    <div class="drag-handle-spacer"></div>
                                 {/if}
-                                {#if $isPlaying}
-                                    <div class="playing-indicator">
-                                        <span class="bar"></span>
-                                        <span class="bar"></span>
-                                        <span class="bar"></span>
-                                    </div>
-                                {/if}
-                            </div>
-                            <div class="track-info">
-                                <span class="track-title truncate"
-                                    >{$currentTrack.title ||
-                                        "Unknown Title"}</span
+                                <button
+                                    class="track-btn"
+                                    on:click={() => handlePlayTrack(item.index)}
                                 >
-                                <span class="track-artist truncate"
-                                    >{$currentTrack.artist ||
-                                        "Unknown Artist"}</span
-                                >
-                            </div>
-                            <span class="track-duration"
-                                >{formatDuration($currentTrack.duration)}</span
-                            >
-                        </div>
-                    </div>
-                </section>
-            {/if}
-
-            {#if upcomingTracks.length > 0}
-                <section class="queue-section">
-                    <h4 class="section-title">
-                        Next Up
-                        <span class="count">{upcomingTracks.length}</span>
-                    </h4>
-                    <div 
-                        class="queue-list virtualized"
-                        on:scroll={handleUpcomingScroll}
-                        bind:this={upcomingContainerElement}
-                    >
-                        <div class="virtual-spacer" style="height: {upcomingVirtualState.totalHeight}px;">
-                            <div 
-                                class="virtual-content"
-                                style="transform: translateY({upcomingVirtualState.offsetY}px);"
-                            >
-                                {#each upcomingVirtualState.visibleTracks as item, i (item.track.id + "-next-" + item.index)}
-                                    <div
-                                        class="queue-track"
-                                        class:dragging={draggedIndex === item.index}
-                                        class:drag-over={dragOverIndex === item.index}
-                                        class:priority={item.isPriority}
-                                        data-index={item.index}
-                                        role="listitem"
-                                        style="height: {TRACK_ROW_HEIGHT}px;"
-                                    >
-                                        <div
-                                            class="drag-handle"
-                                            on:pointerdown={(e) =>
-                                                handlePointerDown(e, item.index)}
-                                            on:click|stopPropagation
-                                            on:dblclick|stopPropagation
-                                            title="Drag to reorder"
-                                            role="button"
-                                            tabindex="-1"
-                                        >
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="currentColor"
-                                                width="16"
-                                                height="16"
-                                            >
-                                                <path
-                                                    d="M3 15h18v-2H3v2zm0 4h18v-2H3v2zm0-8h18V9H3v2zm0-6v2h18V5H3z"
-                                                />
-                                            </svg>
-                                        </div>
-                                        <button
-                                            class="track-btn"
-                                            on:click={() => handlePlayTrack(item.index)}
-                                        >
-                                            <div class="track-art">
-                                                {#if getTrackArt(item.track)}
-                                                    <img
-                                                        src={getTrackArt(item.track)}
-                                                        alt=""
-                                                        loading="lazy"
-                                                        decoding="async"
+                                    <div class="track-art">
+                                        {#if getTrackArt(item.track)}
+                                            <img
+                                                src={getTrackArt(item.track)}
+                                                alt=""
+                                                loading="lazy"
+                                                decoding="async"
+                                            />
+                                        {:else}
+                                            <div class="art-placeholder">
+                                                <svg
+                                                    viewBox="0 0 24 24"
+                                                    fill="currentColor"
+                                                    width="16"
+                                                    height="16"
+                                                >
+                                                    <path
+                                                        d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
                                                     />
-                                                {:else}
-                                                    <div class="art-placeholder">
-                                                        <svg
-                                                            viewBox="0 0 24 24"
-                                                            fill="currentColor"
-                                                            width="16"
-                                                            height="16"
-                                                        >
-                                                            <path
-                                                                d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                                                            />
-                                                        </svg>
-                                                    </div>
-                                                {/if}
+                                                </svg>
                                             </div>
-                                            <div class="track-info">
-                                                <span class="track-title truncate"
-                                                    >{item.track.title ||
-                                                        "Unknown Title"}</span
-                                                >
-                                                <span class="track-artist truncate"
-                                                    >{item.track.artist ||
-                                                        "Unknown Artist"}</span
-                                                >
-                                            </div>
-                                        </button>
-                                        <span class="track-duration"
-                                            >{formatDuration(item.track.duration)}</span
-                                        >
-                                        <button
-                                            class="remove-btn"
-                                            on:click={() => handleRemove(item.index)}
-                                            title="Remove from queue"
-                                        >
-                                            <svg
-                                                viewBox="0 0 24 24"
-                                                fill="currentColor"
-                                                width="16"
-                                                height="16"
-                                            >
-                                                <path
-                                                    d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
-                                                />
-                                            </svg>
-                                        </button>
+                                        {/if}
                                     </div>
-                                {/each}
+                                    <div class="track-info">
+                                        <span class="track-title truncate"
+                                            >{item.track.title ||
+                                                "Unknown Title"}</span
+                                        >
+                                        <span class="track-artist truncate"
+                                            >{item.track.artist ||
+                                                "Unknown Artist"}</span
+                                        >
+                                    </div>
+                                </button>
+                                <span class="track-duration"
+                                    >{formatDuration(item.track.duration)}</span
+                                >
+                                <button
+                                    class="remove-btn"
+                                    on:click={() => handleRemove(item.index)}
+                                    title="Remove from queue"
+                                >
+                                    <svg
+                                        viewBox="0 0 24 24"
+                                        fill="currentColor"
+                                        width="16"
+                                        height="16"
+                                    >
+                                        <path
+                                            d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"
+                                        />
+                                    </svg>
+                                </button>
                             </div>
-                        </div>
+                        {/each}
                     </div>
+
+                    {#if $shuffle}
+                        <p class="dnd-hint">Reorder is disabled in shuffle mode</p>
+                    {/if}
                 </section>
             {/if}
 
@@ -720,7 +696,7 @@
         gap: 2px;
     }
 
-    /* Virtualization - flexible height  */
+    /* Virtualization - flexible height (history only now) */
     .queue-list.virtualized {
         /* height for desktop can change */
         max-height: min(400px, 40vh);
@@ -728,6 +704,36 @@
         overflow-x: hidden;
         position: relative;
         overscroll-behavior-y: contain;
+    }
+
+    /* svelte-dnd-action upcoming list */
+    .queue-list.upcoming-dnd {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        max-height: min(400px, 40vh);
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior-y: contain;
+    }
+
+    .queue-list.upcoming-dnd.shuffle-disabled {
+        opacity: 0.6;
+        pointer-events: none;
+    }
+
+    .dnd-hint {
+        font-size: 0.75rem;
+        color: var(--text-subdued);
+        text-align: center;
+        margin-top: var(--spacing-xs);
+        font-style: italic;
+    }
+
+    .drag-handle-spacer {
+        width: 24px;
+        height: 24px;
+        flex-shrink: 0;
     }
 
     .virtual-spacer {
@@ -773,16 +779,6 @@
         opacity: 1;
     }
 
-    .queue-track.dragging {
-        opacity: 0.5;
-        background-color: var(--bg-highlight);
-    }
-
-    .queue-track.drag-over {
-        border-top: 2px solid var(--accent-primary);
-        margin-top: -2px;
-    }
-
     .drag-handle {
         display: flex;
         align-items: center;
@@ -790,7 +786,6 @@
         width: 24px;
         height: 24px;
         color: var(--text-subdued);
-        cursor: grab;
         opacity: 0;
         transition: all var(--transition-fast);
         flex-shrink: 0;
@@ -805,10 +800,6 @@
 
     .drag-handle:hover {
         color: var(--text-primary);
-    }
-
-    .drag-handle:active {
-        cursor: grabbing;
     }
 
     .track-btn {

@@ -124,6 +124,7 @@ pub async fn begin_folder_import(
             scan_errors,
             vec![folder_str],
             ScanSource::FolderImport(playlist_id),
+            false,
         )
         .await;
     });
@@ -267,6 +268,7 @@ async fn handle_track_import(
         disc_number: track_data.disc_number,
         metadata_json: track_data.metadata_json.clone(),
         date_added,
+        play_count: None,
     };
 
     Ok(track)
@@ -497,10 +499,46 @@ async fn run_scan_and_import(
     scan_errors: Vec<String>,
     folders: Vec<String>, // used for timestamp update after batch
     source: ScanSource,
+    force: bool,
 ) -> Result<ScanResult, String> {
-    let total_files = all_files.len();
     let total_start = std::time::Instant::now();
- 
+
+    let files_to_process: Vec<String> = if force {
+        // Hard rescan: process ALL files, ignoring mtime cache
+        all_files
+    } else {
+        // ── Incremental scan: skip files whose mtime hasn't changed ──
+        let known_mtimes = {
+            let conn = db_conn.lock().map_err(|e| e.to_string())?;
+            queries::get_track_mtimes(&conn).unwrap_or_default()
+        };
+
+        all_files
+            .into_iter()
+            .filter(|file_path| {
+                let fs_mtime = std::fs::metadata(file_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64);
+
+                match (known_mtimes.get(file_path.as_str()), fs_mtime) {
+                    (Some(&db_mtime), Some(fs_mt)) => db_mtime != fs_mt, // changed
+                    (None, _) => true,   // new file
+                    (_, None) => true,   // can't read mtime, process anyway
+                }
+            })
+            .collect()
+    };
+
+    let total_files = files_to_process.len();
+
+    tracing::info!(
+        "[Scan] {} files to process ({} skipped as unchanged)",
+        total_files,
+        if force { 0 } else { 0 },
+    );
+
     if total_files == 0 {
         let result = ScanResult {
             tracks_added: 0,
@@ -522,7 +560,7 @@ async fn run_scan_and_import(
     let extracted_count_clone = extracted_count.clone();
 
     std::thread::spawn(move || {
-        all_files.par_iter().for_each(|file_path| {
+        files_to_process.par_iter().for_each(|file_path| {
             if let Some(track_data) = extract_metadata(file_path) {
                 let _ = tx.send(track_data);
             }
@@ -666,18 +704,19 @@ async fn run_scan_and_import(
                         }
  
                         // Build Track struct for batch events
-                        let (album_id, date_added) = tx_db
+                        let (album_id, date_added, db_play_count) = tx_db
                             .query_row(
-                                "SELECT album_id, date_added FROM tracks WHERE id = ?1",
+                                "SELECT album_id, date_added, COALESCE(play_count, 0) FROM tracks WHERE id = ?1",
                                 [track_id],
                                 |row| {
                                     Ok((
                                         row.get::<_, Option<i64>>(0)?,
                                         row.get::<_, Option<String>>(1)?,
+                                        row.get::<_, Option<i64>>(2)?,
                                     ))
                                 },
                             )
-                            .unwrap_or((None, None));
+                            .unwrap_or((None, None, None));
 
                         batch_tracks.push(queries::Track {
                             id: track_id,
@@ -699,6 +738,7 @@ async fn run_scan_and_import(
                             disc_number: track_data.disc_number,
                             metadata_json: track_data.metadata_json.clone(),
                             date_added,
+                            play_count: db_play_count,
                         });
                     }
                     Ok(_) => {}
@@ -879,6 +919,7 @@ pub async fn rescan_music(
         scan_errors,
         folders, // all registered folders, for timestamp update
         ScanSource::Rescan,
+        false,
     )
     .await?;
  
@@ -890,6 +931,92 @@ pub async fn rescan_music(
         }
     });
  
+    Ok(result)
+}
+
+/// Hard rescan: re-processes ALL files regardless of mtime cache.
+/// Use when album identity logic or metadata parsing has changed and
+/// existing tracks need to be re-evaluated.
+#[tauri::command]
+pub async fn hard_rescan_music(
+    window: tauri::Window,
+    db: State<'_, Database>,
+) -> Result<ScanResult, String> {
+    // 1: Cleanup (same as normal rescan)
+    let (folders, folder_playlists, tracks_deleted) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+        let folders = queries::get_music_folders(&conn).map_err(|e| e.to_string())?;
+
+        let tracks_deleted = queries::cleanup_deleted_tracks(&conn, &folders)
+            .map_err(|e| format!("Failed to cleanup deleted tracks: {}", e))?;
+
+        let _ = queries::cleanup_empty_albums(&conn);
+
+        let folder_playlists = queries::get_folder_playlists(&conn).unwrap_or_default();
+
+        (folders, folder_playlists, tracks_deleted)
+    }; // conn dropped here
+
+    // 2: Directory walk
+    let mut all_files = Vec::new();
+    let mut scan_errors = Vec::new();
+
+    for folder in &folders {
+        let result = scan_directory(folder);
+        all_files.extend(result.audio_files);
+        scan_errors.extend(result.errors);
+    }
+
+    let mut file_playlist_map: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
+
+    for (playlist_id, folder_path) in &folder_playlists {
+        let already_covered = folders.iter().any(|f| folder_path.starts_with(f.as_str()));
+
+        if already_covered {
+            for file_path in all_files.iter().filter(|p| p.starts_with(folder_path.as_str())) {
+                file_playlist_map
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(*playlist_id);
+            }
+        } else {
+            let result = scan_directory(folder_path);
+            for file_path in &result.audio_files {
+                file_playlist_map
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(*playlist_id);
+                all_files.push(file_path.clone());
+            }
+            scan_errors.extend(result.errors);
+        }
+    }
+
+    // 3: Force processing ALL files (skip mtime cache)
+    let db_conn = Arc::clone(&db.conn);
+    let result = run_scan_and_import(
+        &window,
+        db_conn,
+        all_files,
+        file_playlist_map,
+        tracks_deleted,
+        scan_errors,
+        folders,
+        ScanSource::Rescan,
+        true, // force = true: ignore mtime, re-process everything
+    )
+    .await?;
+
+    // Background orphan cleanup (non-blocking)
+    let db_conn_cleanup = Arc::clone(&db.conn);
+    tauri::async_runtime::spawn(async move {
+        if let Ok(conn) = db_conn_cleanup.lock() {
+            let _ = cover_storage::cleanup_orphaned_covers(&conn);
+        }
+    });
+
     Ok(result)
 }
 
@@ -922,6 +1049,15 @@ pub async fn get_library(db: State<'_, Database>) -> Result<Library, String> {
         albums,
         artists,
     })
+}
+
+#[tauri::command]
+pub async fn get_track_by_id(
+    track_id: i64,
+    db: State<'_, Database>,
+) -> Result<Option<queries::Track>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    queries::get_track_by_id(&conn, track_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -991,7 +1127,7 @@ pub async fn get_albums_by_artist(
 
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT a.id, a.name, a.artist, a.art_data, a.art_path 
+            "SELECT DISTINCT a.id, a.name, a.artist, a.art_data, a.art_path, a.year, a.original_year 
              FROM albums a
              INNER JOIN tracks t ON t.album_id = a.id
              WHERE t.artist = ?1
@@ -1007,6 +1143,8 @@ pub async fn get_albums_by_artist(
                 artist: row.get(2)?,
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1190,6 +1328,7 @@ pub async fn add_external_track(
         local_src: None,
         musicbrainz_recording_id: track.musicbrainz_recording_id,
         metadata_json: track.metadata_json,
+        file_modified_at: None,
     };
 
     queries::insert_or_update_track(&conn, &track_insert)
@@ -1330,4 +1469,49 @@ pub async fn save_image_to_gallery(
     fs::write(&file_path, bytes).map_err(|e| format!("Failed to write file: {}", e))?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+// =============================================================================
+// FILE WATCHER COMMANDS (desktop only)
+// =============================================================================
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn start_watcher(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<(), String> {
+    let folders = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        queries::get_music_folders(&conn).map_err(|e| e.to_string())?
+    };
+
+    crate::scanner::watcher::start_watching(
+        &watcher_state,
+        folders,
+        Arc::clone(&db.conn),
+        app,
+    )?;
+
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn stop_watcher(
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<(), String> {
+    crate::scanner::watcher::stop_watching(&watcher_state);
+    Ok(())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn get_watcher_status(
+    watcher_state: State<'_, crate::scanner::watcher::WatcherState>,
+) -> Result<bool, String> {
+    Ok(watcher_state
+        .is_running
+        .load(std::sync::atomic::Ordering::SeqCst))
 }

@@ -1,6 +1,8 @@
 {
   "contextMenu": {
     "play": "Lire",
+    "playNext": "Lire ensuite",
+    "playAlbumNext": "Lire l'album ensuite",
     "addToQueue": "Ajouter à la file",
     "download": "Télécharger",
     "addToPlaylist": "Ajouter à la playlist",
@@ -14,13 +16,15 @@
     "pinToTop": "Épingler en haut",
     "unpinFromTop": "Désépingler du haut",
     "goToArtist": "Aller à l'artiste",
-    "goToAlbum": "Aller à l'album"
+    "goToAlbum": "Aller à l'album",
+    "listenLater": "Écouter plus tard",
+    "removeFromListenLater": "Retirer de Écouter plus tard"
   },
   "trackList": {
     "title": "Titre",
     "album": "Album",
     "duration": "Durée",
-    "dateAdded": "Date d'ajout",
+    "plays": "Écoutes",
     "noTracksFound": "Aucune piste trouvée",
     "addFolderToGetStarted": "Ajoutez un dossier de musique pour commencer"
   },
@@ -72,10 +76,19 @@
     "mostPlayedAlbums": "Albums les plus écoutés",
     "viewAll": "Tout voir"
   },
+  "listenLater": {
+    "title": "Écouter plus tard",
+    "albums": "albums",
+    "emptyTitle": "Vous n'avez pas encore d'albums enregistrés",
+    "emptyDescription": "Utilisez le menu contextuel d'un album pour l'ajouter.",
+    "addedToast": "Album ajouté à Écouter plus tard",
+    "removedToast": "Album retiré de Écouter plus tard"
+  },
   "sidebar": {
     "library": "Bibliothèque",
     "home": "Accueil",
     "likedSongs": "Titres aimés",
+    "listenLater": "Écouter plus tard",
     "discover": "Découvrir",
     "recommendations": "Recommandations",
     "allTracks": "Tous les titres",
@@ -146,7 +159,10 @@
     "verify": "Vérifier",
     "loggedInAs": "Connecté en tant que",
     "remove": "Supprimer",
-    "discordButton": "Bouton Discord",
+    "discordPresence": "Présence riche sur Discord",
+    "discordPresenceDesc": "Affiche ce que vous écoutez dans votre statut Discord",
+    "discordReconnect": "Reconnexion à Discord",
+    "discordPrivacyNote": "Note : dans Discord, activez Paramètres > Confidentialité de l'activité > « Afficher l'activité actuelle comme message d'état ». Discord l'exige pour toute application non vérifiée.",
     "openDiscord": "Ouvrir Discord",
     "appearance": "Apparence",
     "selectLanguage": "Langue",

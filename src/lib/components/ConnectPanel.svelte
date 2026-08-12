@@ -19,10 +19,93 @@
     getTrackByIdSync,
   } from "$lib/stores/library";
   import { getTrackCoverSrc } from "$lib/api/tauri";
+  import {
+    squeezeStartServer,
+    squeezeStopServer,
+    squeezeIsRunning,
+    type SqueezePlayerInfo,
+  } from "$lib/api/tauri";
   import { get } from "svelte/store";
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, onMount } from "svelte";
+  import {
+    activeSqueezePlayer,
+    squeezePlayerState,
+    discoveredSqueezePlayers,
+    startGlobalSqueezeDiscovery,
+    stopGlobalSqueezeDiscovery,
+    disconnectSqueezePlayer,
+    activateSqueezeTarget,
+    playHereOnSqueeze,
+  } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
+
+  // ── Squeeze state ──────────────────────────────────────────────────────────
+  // Player list + auto-connect polling live in src/lib/stores/squeeze.ts
+  // (started from +page.svelte so the panel can be closed and the
+  // Eversolo still gets picked up the moment it appears on the network).
+  let squeezeRunning = false;
+  let squeezeStarting = false;
+
+  $: squeezePlayers = $discoveredSqueezePlayers;
+
+  onMount(async () => {
+    try {
+      squeezeRunning = await squeezeIsRunning();
+      // Make sure the global discovery is alive even if the user reached
+      // this panel before +page.svelte finished booting.
+      if (squeezeRunning) await startGlobalSqueezeDiscovery();
+    } catch {}
+  });
+
+  async function toggleSqueezeServer() {
+    squeezeStarting = true;
+    try {
+      if (squeezeRunning) {
+        await squeezeStopServer();
+        squeezeRunning = false;
+        stopGlobalSqueezeDiscovery();
+        if ($activeSqueezePlayer) {
+          activeSqueezePlayer.set(null);
+          activeBackend.set("none");
+        }
+      } else {
+        await squeezeStartServer();
+        squeezeRunning = true;
+        await startGlobalSqueezeDiscovery();
+      }
+    } catch (e) {
+      console.error("Squeeze toggle error:", e);
+    }
+    squeezeStarting = false;
+  }
+
+  function selectSqueezePlayer(player: SqueezePlayerInfo) {
+    if ($activeSqueezePlayer === player.mac) {
+      disconnectSqueezePlayer(player.mac);
+    } else {
+      activateSqueezeTarget(player.mac);
+    }
+  }
+
+  async function playOnSqueezePlayer(mac: string) {
+    const $library = get(libraryTracks);
+    const $current = get(currentTrack);
+    if (!$current) return;
+
+    const trackIds = $library
+      .filter((t: any) => t.path)
+      .map((t: any) => t.id);
+
+    const startIndex = trackIds.indexOf($current.id);
+    if (startIndex === -1) return;
+
+    try {
+      await playHereOnSqueeze(mac, trackIds, startIndex);
+    } catch (e) {
+      console.error("Squeeze play error:", e);
+    }
+  }
 
   // Deduplication and sorting (active device first)
   $: devices = $wsStore.devices
@@ -126,7 +209,7 @@
     </header>
 
     <div class="session-section">
-      <div class="status-card" class:remote={$activeBackend === "remote"}>
+      <div class="status-card" class:remote={$activeBackend === "remote" || $activeBackend === "squeeze"}>
         <div class="device-icon-glow">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
             <path
@@ -135,7 +218,10 @@
           </svg>
         </div>
         <div class="status-info">
-          {#if $activeBackend === "remote"}
+          {#if $activeBackend === "squeeze"}
+            <span class="label">Squeeze Connect</span>
+            <span class="value">{$squeezePlayerState?.name ?? 'Connected'}</span>
+          {:else if $activeBackend === "remote"}
             <span class="label">Controlling Remote</span>
             <span class="value">Active Session</span>
           {:else}
@@ -143,7 +229,7 @@
             <span class="value">This Device</span>
           {/if}
         </div>
-        {#if $isPlaying || $activeBackend === "remote"}
+        {#if $isPlaying || $activeBackend === "remote" || $activeBackend === "squeeze"}
           <div class="playing-indicator">
             <span></span><span></span><span></span>
           </div>
@@ -151,9 +237,84 @@
       </div>
     </div>
 
+    <!-- Squeeze Connect Section -->
     <div class="device-section">
       <div class="section-header">
-        <span>Available to connect</span>
+        <span>Squeeze Connect</span>
+        <div class="line"></div>
+        <button
+          class="squeeze-toggle"
+          class:active={squeezeRunning}
+          on:click={toggleSqueezeServer}
+          disabled={squeezeStarting}
+        >
+          {squeezeStarting ? '...' : squeezeRunning ? 'Stop' : 'Start'}
+        </button>
+      </div>
+
+      {#if squeezeRunning}
+        <div class="device-grid">
+          {#if squeezePlayers.length === 0}
+            <div class="empty-state compact" in:fade>
+              <p>Waiting for Squeeze players...</p>
+              <span>Ensure your device (e.g. Eversolo) is on the same network.</span>
+            </div>
+          {:else}
+            {#each squeezePlayers as player (player.mac)}
+              <div
+                class="device-card"
+                class:active={$activeSqueezePlayer === player.mac}
+                in:fly={{ y: 20, duration: 300 }}
+              >
+                <div class="card-main">
+                  <div class="platform-icon squeeze-icon">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                      <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+                    </svg>
+                  </div>
+                  <div class="card-details">
+                    <span class="device-name">{player.name}</span>
+                    {#if player.current_track}
+                      <div class="track-info">
+                        <span class="dot" class:playing={player.state === 'Playing'}></span>
+                        <span class="track-text">{player.current_track.title} — {player.current_track.artist}</span>
+                      </div>
+                    {:else}
+                      <span class="idle-text">{player.state === 'Stopped' ? 'Ready' : player.state}</span>
+                    {/if}
+                  </div>
+                </div>
+
+                <div class="card-actions">
+                  <button
+                    class="btn secondary"
+                    class:active={$activeSqueezePlayer === player.mac}
+                    on:click={() => selectSqueezePlayer(player)}
+                  >
+                    {$activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
+                  </button>
+                  <button
+                    class="btn primary"
+                    on:click={() => playOnSqueezePlayer(player.mac)}
+                  >
+                    Play Here
+                  </button>
+                </div>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {:else}
+        <div class="empty-state compact" in:fade>
+          <p>Server not running</p>
+          <span>Start the Squeeze server to discover players on your network.</span>
+        </div>
+      {/if}
+    </div>
+
+    <div class="device-section">
+      <div class="section-header">
+        <span>Cloud Devices</span>
         <div class="line"></div>
       </div>
 
@@ -585,11 +746,6 @@
     transition: 0.3s;
   }
 
-  .device-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    transform: translateY(-2px);
-  }
-
   .device-card.active {
     background: color-mix(in srgb, var(--accent-primary), transparent 95%);
     border-color: color-mix(in srgb, var(--accent-primary), transparent 70%);
@@ -783,6 +939,46 @@
     margin: 0 0 4px 0;
     color: #888;
     font-weight: 700;
+  }
+
+  /* Squeeze-specific styles */
+  .squeeze-toggle {
+    padding: 4px 12px;
+    border-radius: 8px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: #888;
+    transition: 0.2s;
+  }
+  .squeeze-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+  }
+  .squeeze-toggle.active {
+    background: color-mix(in srgb, var(--accent-primary), transparent 85%);
+    border-color: color-mix(in srgb, var(--accent-primary), transparent 60%);
+    color: var(--accent-primary);
+  }
+  .squeeze-toggle:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
+
+  .squeeze-icon {
+    background: color-mix(in srgb, var(--accent-primary), transparent 90%) !important;
+    color: var(--accent-primary) !important;
+  }
+
+  .empty-state.compact {
+    padding: 20px;
+  }
+  .empty-state.compact p {
+    font-size: 0.85rem;
   }
 
   @media (max-width: 480px) {

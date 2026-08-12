@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import type { Track } from "$lib/api/tauri";
   import {
     formatDuration,
@@ -15,6 +15,7 @@
     currentTrack,
     isPlaying,
     addToQueue,
+    playNext,
     type PlaybackContext,
   } from "$lib/stores/player";
   import { contextMenu } from "$lib/stores/ui";
@@ -25,6 +26,7 @@
     loadLibrary,
     getTrackAlbumCover,
     loadMoreTracks,
+    tracks as libraryTracks,
   } from "$lib/stores/library";
   import { pluginStore } from "$lib/stores/plugin-store";
   import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
@@ -41,11 +43,39 @@
   import { confirm, prompt } from "$lib/stores/dialogs";
   import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
   import { setCustomArtwork } from "$lib/stores/customArtwork";
+  import { likedTrackIds, toggleLike } from "$lib/stores/liked";
   import MetadataModal from "$lib/components/MetadataModal.svelte";
   import { _, locale } from "svelte-i18n";
 
   // MetadataModal state
   let metadataModalTrack: Track | null = null;
+
+  // Audio quality metadata parsing
+  function parseTrackMeta(track: Track): { sampleRate: number | null; bitDepth: number | null } {
+    if (!track.metadata_json) return { sampleRate: null, bitDepth: null };
+    try {
+      const m = JSON.parse(track.metadata_json);
+      return {
+        sampleRate: m['__sample_rate_hz'] ?? null,
+        bitDepth: m['__bit_depth'] ?? null,
+      };
+    } catch { return { sampleRate: null, bitDepth: null }; }
+  }
+  function fmtSr(hz: number): string {
+    return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+  }
+
+  function normalizeTrackFormat(format: string | null | undefined): string | null {
+    if (!format) return null;
+    const formatUpper = format.toUpperCase();
+    if (formatUpper.includes("HI_RES") || formatUpper.includes("HIRES")) {
+      return "HI-RES";
+    }
+    if (formatUpper.includes("LOSSLESS")) {
+      return "LOSSLESS";
+    }
+    return formatUpper.replace("MPEG", "MP3");
+  }
 
   export let scrollKey: string | null = null;
 
@@ -57,9 +87,10 @@
   export let playlistId: number | null = null;
   export let multiSelectMode: boolean = false;
   export let queueTracks: Track[] | null = null; // New prop for unified queue context
+  export let disableVirtualScroll: boolean = false; // When true, render all tracks without virtual scrolling
 
   // Virtual scrolling configuration
-  const TRACK_ROW_HEIGHT = 50; // pixels (matches desktop row height in CSS)
+  const TRACK_ROW_HEIGHT = 58; // pixels (matches desktop row height in CSS)
   const OVERSCAN = 5; // Extra rows to render above/below viewport
 
   let containerHeight = 600; // Will be calculated from container
@@ -72,6 +103,13 @@
   const MAX_FAILED_IMAGES = 200;
   const trackAlbumArtCache = new Map<number, string | null>();
   let albumMap = new Map<number, any>();
+
+  // Reactive play count map from library store
+  let playCountMap = new Map<number, number>();
+  $: playCountMap = new Map($libraryTracks.map(t => [t.id, t.play_count ?? 0]));
+  // Force sort refresh when play counts change
+  let playCountVersion = 0;
+  $: { playCountMap; playCountVersion++; }
 
   // 1: Track albums by reference, not just length
   let lastAlbumsRef = $albums;
@@ -141,11 +179,10 @@
     | "artist"
     | "album"
     | "duration"
-    | "date_added"
+    | "play_count"
     | null;
   let sortField: SortField = null;
   let sortDirection: "asc" | "desc" = "asc";
-  let showAdvancedMetadata = false;
 
   function toggleSort(field: SortField) {
     if (sortField === field) {
@@ -157,8 +194,8 @@
       }
     } else {
       sortField = field;
-      // For date_added, default to descending (Recently added)
-      sortDirection = field === "date_added" ? "desc" : "asc";
+      // For play_count, default to descending (most played first)
+      sortDirection = field === "play_count" ? "desc" : "asc";
     }
   }
 
@@ -169,11 +206,14 @@
   let cachedSortedTracks: Track[] = [];
 
   $: {
-    // Only re-sort if sort params or tracks actually changed
+    // Re-sort if sort params, tracks, or play counts changed
+    // playCountVersion is tracked to force re-sort on play count updates
+    const _pcv = playCountVersion;
     if (
       sortField !== lastSortField ||
       sortDirection !== lastSortDirection ||
-      filteredTracks !== lastFilteredTracks
+      filteredTracks !== lastFilteredTracks ||
+      (sortField === "play_count" && _pcv)
     ) {
       if (!sortField) {
         cachedSortedTracks = filteredTracks;
@@ -203,9 +243,9 @@
               valA = a.duration || 0;
               valB = b.duration || 0;
               break;
-            case "date_added":
-              valA = a.date_added || "";
-              valB = b.date_added || "";
+            case "play_count":
+              valA = playCountMap.get(a.id) ?? 0;
+              valB = playCountMap.get(b.id) ?? 0;
               break;
           }
 
@@ -241,6 +281,16 @@
   };
 
   $: {
+    if (disableVirtualScroll) {
+      // No virtual scrolling: render all tracks
+      virtualScrollState = {
+        totalHeight: sortedTracks.length * TRACK_ROW_HEIGHT,
+        startIndex: 0,
+        endIndex: sortedTracks.length,
+        offsetY: 0,
+        visibleTracks: sortedTracks,
+      };
+    } else {
     const totalHeight = sortedTracks.length * TRACK_ROW_HEIGHT;
     const startIndex = Math.max(
       0,
@@ -260,6 +310,7 @@
       offsetY,
       visibleTracks,
     };
+    }
   }
 
   // Infinite scroll: when virtual scroll nears the bottom of loaded tracks,
@@ -419,25 +470,6 @@
       multiSelect.toggleTrack(trackId);
       return;
     }
-
-    const trackIndex = trackIndexMap.get(trackId);
-
-    if (trackIndex === undefined) return;
-
-    const track = sortedTracks[trackIndex];
-    if (!track || isTrackUnavailable(track)) return;
-
-    // Use unified queueTracks if available, otherwise fallback to local sortedTracks
-    if (queueTracks) {
-      // Find index of this track in the global/unified queue
-      const globalIndex = queueTracks.findIndex((t) => t.id === trackId);
-      if (globalIndex !== -1) {
-        playTracks(queueTracks, globalIndex, playbackContext);
-        return;
-      }
-    }
-
-    playTracks(sortedTracks, trackIndex, playbackContext);
   }
 
   function handleBodyDoubleClick(e: MouseEvent) {
@@ -512,6 +544,11 @@
         disabled: isUnavailable,
       },
       { type: "separator" },
+      {
+        label: $_('contextMenu.playNext'),
+        action: () => playNext([track]),
+        disabled: isUnavailable,
+      },
       {
         label: $_('contextMenu.addToQueue'),
         action: () => addToQueue([track]),
@@ -774,7 +811,7 @@
     }
   }
 
-  // ── Swipe-to-queue (mobile only) ──
+  // â”€â”€ Swipe-to-queue (mobile only) â”€â”€
   let swipeStartX = 0;
   let swipeStartY = 0;
   let swipeDeltaX = 0;
@@ -919,27 +956,6 @@
       goToArtistDetail(track.artist);
     }
   }
-
-  function formatDateAdded(dateAdded?: string | null): string {
-    if (!dateAdded) return "Unknown";
-
-    const raw = dateAdded.trim();
-    const isoLike = raw.replace(" ", "T").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
-    const parsed = new Date(isoLike);
-    if (!isNaN(parsed.getTime())) return parsed.toLocaleDateString();
-
-    // Fallback for plain sqlite datetime (YYYY-MM-DD HH:MM:SS)
-    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (match) {
-      const [, y, m, d] = match;
-      const fallback = new Date(Number(y), Number(m) - 1, Number(d));
-      return isNaN(fallback.getTime())
-        ? `${y}-${m}-${d}`
-        : fallback.toLocaleDateString();
-    }
-
-    return raw;
-  }
 </script>
 
 {#if metadataModalTrack}
@@ -951,26 +967,7 @@
   />
 {/if}
 
-<div class="track-list">
-  {#if !$isMobile}
-    <div class="list-toolbar">
-      <span class="toolbar-hint"
-        >{showAdvancedMetadata
-          ? "Details shown: format, bitrate, source"
-          : "Minimal view"}</span
-      >
-      <button
-        class="advanced-toggle"
-        title="Toggle extra metadata (format, bitrate, source)"
-        on:click={() => {
-          showAdvancedMetadata = !showAdvancedMetadata;
-        }}
-      >
-        {showAdvancedMetadata ? "Hide details" : "Show details"}
-      </button>
-    </div>
-  {/if}
-
+<div class="track-list" class:no-scroll={disableVirtualScroll}>
   <!-- Header stays fixed -->
   <header
     class="list-header"
@@ -1003,16 +1000,17 @@
     <button class="col-header col-num sortable" on:click={() => toggleSort("track_number")}>
       #
       {#if sortField === "track_number"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
+    <span class="col-header col-cover" aria-hidden="true"></span>
     <button
       class="col-header col-artist sortable"
       on:click={() => toggleSort("title")}
     >
       {$_('trackList.title')}
       {#if sortField === "title"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
     {#if showAlbum}
@@ -1022,7 +1020,7 @@
       >
         {$_('trackList.album')}
         {#if sortField === "album"}
-          <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+          <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
         {/if}
       </button>
     {/if}
@@ -1032,16 +1030,21 @@
     >
       {$_('trackList.duration')}
       {#if sortField === "duration"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
+    <span class="col-header col-like">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+      </svg>
+    </span>
     <button
-      class="col-header col-date-added sortable"
-      on:click={() => toggleSort("date_added")}
+      class="col-header col-plays sortable"
+      on:click={() => toggleSort("play_count")}
     >
-      {$_('trackList.dateAdded')}
-      {#if sortField === "date_added"}
-        <span class="sort-icon">{sortDirection === "asc" ? "▲" : "▼"}</span>
+      {$_('trackList.plays')}
+      {#if sortField === "play_count"}
+        <span class="sort-icon">{sortDirection === "asc" ? "â–²" : "â–¼"}</span>
       {/if}
     </button>
   </header>
@@ -1052,6 +1055,7 @@
     <div
       class="list-body"
       class:no-album={!showAlbum}
+      class:no-scroll={disableVirtualScroll}
       class:with-drag={playlistId !== null && !multiSelectMode}
       class:multiselect={multiSelectMode}
       class:mobile-album={mobileViewMode === "album"}
@@ -1077,6 +1081,7 @@
           {#each visibleTracksWithMetadata as { track, albumArt, unavailable }, index (track.id)}
             {@const actualIndex = virtualScrollState.startIndex + index}
             {@const isSelected = $multiSelect.selectedTrackIds.has(track.id)}
+            {@const audioMeta = parseTrackMeta(track)}
             <div
               class="track-row"
               class:playing={playingTrackId === track.id}
@@ -1142,8 +1147,8 @@
                     class="playing-icon"
                     viewBox="0 0 24 24"
                     fill="currentColor"
-                    width="14"
-                    height="14"
+                    width="18"
+                    height="18"
                   >
                     <path
                       d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
@@ -1157,48 +1162,57 @@
                   </span>
                 {:else}
                   <span class="track-index">{actualIndex + 1}</span>
-                  <span class="hover-play" aria-hidden="true">▶</span>
+                  <button class="hover-play" on:click|stopPropagation={() => {
+                    if (!isTrackUnavailable(track)) {
+                      if (queueTracks) {
+                        const gi = queueTracks.findIndex((t) => t.id === track.id);
+                        if (gi !== -1) { playTracks(queueTracks, gi, playbackContext); return; }
+                      }
+                      playTracks(sortedTracks, actualIndex, playbackContext);
+                    }
+                  }} on:dblclick|stopPropagation title="Play" aria-label="Play">&#9654;</button>
                 {/if}
               </span>
 
-              {#if $isMobile}
-                <span class="col-cover">
-                  <div class="cover-wrapper">
-                    {#if albumArt && !failedImages.has(albumArt)}
-                      <img
-                        src={albumArt}
-                        alt="Album cover"
-                        class="cover-image"
-                        loading="lazy"
-                        decoding="async"
-                        on:error={() => handleImageError(albumArt)}
-                      />
-                    {:else}
-                      <div class="cover-placeholder">
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          width="16"
-                          height="16"
-                        >
-                          <path
-                            d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                          />
-                        </svg>
-                      </div>
-                    {/if}
-                    <div class="cover-play-overlay">
+              <span class="col-cover">
+                <div class="cover-wrapper">
+                  {#if albumArt && !failedImages.has(albumArt)}
+                    <img
+                      src={albumArt}
+                      alt="Album cover"
+                      class="cover-image"
+                      loading="lazy"
+                      decoding="async"
+                      on:error={() => handleImageError(albumArt)}
+                    />
+                  {:else}
+                    <div class="cover-placeholder">
                       <svg
                         viewBox="0 0 24 24"
                         fill="currentColor"
-                        width="18"
-                        height="18"
+                        width="16"
+                        height="16"
                       >
-                        <path d="M8 5v14l11-7z" />
+                        <path
+                          d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
+                        />
                       </svg>
                     </div>
+                  {/if}
+                  <div class="cover-play-overlay">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      width="18"
+                      height="18"
+                    >
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
                   </div>
-                </span>
+                </div>
+              </span>
+
+              {#if $isMobile}
                 <div class="col-title">
                   <div class="title-row">
                     <span class="track-name truncate"
@@ -1240,53 +1254,56 @@
                         {displayFormat}
                       </span>
                     {/if}
+                    {#if audioMeta.sampleRate}
+                      <span class="quality-tag">{fmtSr(audioMeta.sampleRate)}</span>
+                    {/if}
+                    {#if audioMeta.bitDepth}
+                      <span class="quality-tag">{audioMeta.bitDepth}bit</span>
+                    {/if}
                   </div>
-                  <button
-                    class="track-artist truncate"
-                    on:click={handleArtistClick}
-                    >{track.artist || "Unknown Artist"}</button
-                  >
+                  {#if playbackContext?.type !== "album"}
+                    <button
+                      class="track-artist truncate"
+                      on:click={handleArtistClick}
+                      >{track.artist || "Unknown Artist"}</button
+                    >
+                  {/if}
                 </div>
               {:else}
                 <div class="col-artist">
-                  <span class="artist-thumb">
-                    {#if albumArt && !failedImages.has(albumArt)}
-                      <img
-                        src={albumArt}
-                        alt="Album cover"
-                        class="cover-image-small"
-                        loading="lazy"
-                        decoding="async"
-                        on:error={() => handleImageError(albumArt)}
-                      />
-                    {:else}
-                      <span class="cover-placeholder-small">
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          width="12"
-                          height="12"
-                        >
-                          <path
-                            d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                          />
-                        </svg>
-                      </span>
-                    {/if}
-                  </span>
                   <div class="artist-meta">
                     <span class="track-name truncate"
                       >{track.title || "Unknown Title"}</span
                     >
-                    <button class="track-artist truncate" on:click={handleArtistClick}
-                      >{track.artist || "Unknown Artist"}</button
-                    >
-                    {#if showAdvancedMetadata}
-                      <span class="media-metadata truncate">
-                        {track.format ? track.format.toUpperCase() : "Unknown format"}
-                        {#if track.bitrate} • {track.bitrate} kbps{/if}
-                        {#if track.source_type} • {track.source_type}{/if}
-                      </span>
+                    {#if playbackContext?.type !== "album"}
+                      <button class="track-artist truncate" on:click={handleArtistClick}
+                        >{track.artist || "Unknown Artist"}</button
+                      >
+                    {/if}
+                    {#if track.format || audioMeta.sampleRate || audioMeta.bitDepth}
+                      <div class="track-quality-row">
+                        {#if track.format}
+                          {@const desktopFormat = normalizeTrackFormat(track.format)}
+                          {#if desktopFormat}
+                            <span
+                              class="quality-tag"
+                              class:high-quality={track.format.toUpperCase().includes("FLAC") ||
+                                track.format.toUpperCase().includes("WAV") ||
+                                track.format.toUpperCase().includes("HI_RES") ||
+                                track.format.toUpperCase().includes("HIRES") ||
+                                (track.bitrate && track.bitrate >= 320)}
+                            >
+                              {desktopFormat}
+                            </span>
+                          {/if}
+                        {/if}
+                        {#if audioMeta.sampleRate}
+                          <span class="quality-tag">{fmtSr(audioMeta.sampleRate)}</span>
+                        {/if}
+                        {#if audioMeta.bitDepth}
+                          <span class="quality-tag">{audioMeta.bitDepth}bit</span>
+                        {/if}
+                      </div>
                     {/if}
                   </div>
                 </div>
@@ -1300,7 +1317,21 @@
               {/if}
               <span class="col-duration">{formatDuration(track.duration)}</span>
               {#if !$isMobile}
-                <span class="col-date-added">{formatDateAdded(track.date_added)}</span>
+                <button
+                  class="col-like"
+                  class:liked={$likedTrackIds.has(track.id)}
+                  on:click|stopPropagation={() => toggleLike(track.id)}
+                  on:dblclick|stopPropagation
+                  title={$likedTrackIds.has(track.id) ? "Unlike" : "Like"}
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16"
+                    fill={$likedTrackIds.has(track.id) ? "currentColor" : "none"}
+                    stroke="currentColor" stroke-width="2"
+                  >
+                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                  </svg>
+                </button>
+                <span class="col-plays">{playCountMap.get(track.id) ?? 0}</span>
               {/if}
             </div>
           {/each}
@@ -1330,42 +1361,19 @@
     overflow: hidden;
   }
 
-  .list-toolbar {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 10px;
-    padding: 6px var(--spacing-md) 0;
-  }
-
-  .toolbar-hint {
-    font-size: 0.72rem;
-    color: var(--text-subdued);
-  }
-
-  .advanced-toggle {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    padding: 2px 8px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .advanced-toggle:hover {
-    color: var(--text-primary);
-    border-color: var(--text-secondary);
+  .track-list.no-scroll {
+    height: auto;
+    overflow: visible;
   }
 
   .list-header {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 56px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: var(--spacing-sm) var(--spacing-md);
     padding-right: calc(var(--spacing-md) + var(--scrollbar-width, 0px));
     padding-left: var(--spacing-lg);
+    margin-bottom: 20px;
     border-bottom: 1px solid var(--border-color);
     font-size: 0.78rem;
     font-weight: 500;
@@ -1379,15 +1387,15 @@
   }
 
   .list-header.with-drag {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 32px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.no-album {
-    grid-template-columns: 40px 1fr 80px 130px;
+    grid-template-columns: 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-header.no-album.with-drag {
-    grid-template-columns: 32px 40px 1fr 80px 130px;
+    grid-template-columns: 32px 40px 56px 1fr 80px 36px 100px;
   }
 
   .col-header {
@@ -1429,7 +1437,6 @@
 
   .col-header.col-artist {
     justify-content: flex-start;
-    padding-left: 36px;
   }
 
   .col-header.col-album {
@@ -1437,11 +1444,16 @@
   }
 
   .col-header.col-duration {
-    justify-content: flex-end;
+    justify-content: center;
   }
 
-  .col-header.col-date-added {
-    justify-content: flex-end;
+  .col-header.col-like {
+    justify-content: center;
+    color: var(--text-subdued);
+  }
+
+  .col-header.col-plays {
+    justify-content: center;
   }
 
   .sort-icon {
@@ -1455,6 +1467,13 @@
     overflow-x: hidden;
     position: relative;
     overscroll-behavior-y: contain;
+  }
+
+  .list-body.no-scroll {
+    overflow-y: visible;
+    overflow-x: visible;
+    flex: none;
+    overscroll-behavior-y: auto;
   }
 
   /* Virtual scrolling structure */
@@ -1473,7 +1492,7 @@
 
   .track-row {
     display: grid;
-    grid-template-columns: 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 56px 1fr 1fr 80px 36px 100px;
     gap: var(--spacing-md);
     padding: 6px var(--spacing-md);
     padding-left: var(--spacing-lg);
@@ -1482,28 +1501,29 @@
     transition: background-color var(--transition-fast);
     width: 100%;
     text-align: left;
-    height: 50px; /* Fixed height for virtual scrolling */
+    height: 58px; /* Fixed height for virtual scrolling */
     box-sizing: border-box;
+    overflow: hidden;
   }
 
   .list-body.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 32px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.no-album .track-row {
-    grid-template-columns: 40px 1fr 80px 130px;
+    grid-template-columns: 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-body.no-album.with-drag .track-row {
-    grid-template-columns: 32px 40px 1fr 80px 130px;
+    grid-template-columns: 32px 40px 56px 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect .track-row {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-body.multiselect.no-album .track-row {
-    grid-template-columns: 40px 40px 1fr 80px 130px;
+    grid-template-columns: 40px 40px 56px 1fr 80px 36px 100px;
   }
 
   .track-row.selected {
@@ -1525,6 +1545,17 @@
 
   .track-row.playing .track-name {
     color: var(--accent-primary);
+  }
+
+  /* Dim non-playing track titles so the playing one stands out (Spotify-style) */
+  .track-name {
+    opacity: 0.5;
+    transition: opacity 0.15s ease;
+  }
+  .track-row.playing .track-name,
+  .track-row:hover .track-name,
+  .track-row.selected .track-name {
+    opacity: 1;
   }
 
   .track-row.dragging {
@@ -1588,11 +1619,16 @@
   }
 
   .hover-play {
+    all: unset;
     position: absolute;
     opacity: 0;
     color: var(--text-primary);
-    font-size: 0.82rem;
+    font-size: 1.1rem;
     line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .track-row:hover .track-index {
@@ -1682,6 +1718,7 @@
     gap: 1px;
     height: 100%;
     padding-top: 1.5px;
+    overflow: hidden;
   }
 
   .col-artist {
@@ -1689,6 +1726,7 @@
     align-items: center;
     min-width: 0;
     gap: 8px;
+    overflow: hidden;
   }
 
   .artist-thumb {
@@ -1701,15 +1739,15 @@
   }
 
   .cover-image-small {
-    width: 28px;
-    height: 28px;
+    width: 40px;
+    height: 40px;
     border-radius: 6px;
     object-fit: cover;
   }
 
   .cover-placeholder-small {
-    width: 28px;
-    height: 28px;
+    width: 40px;
+    height: 40px;
     border-radius: 6px;
     background-color: var(--bg-highlight);
     color: var(--text-subdued);
@@ -1724,6 +1762,7 @@
     justify-content: center;
     min-width: 0;
     gap: 1px;
+    overflow: hidden;
   }
 
   .title-row {
@@ -1734,7 +1773,7 @@
   }
 
   .track-name {
-    font-size: 0.9375rem;
+    font-size: 1rem;
     font-weight: 500;
     color: var(--text-primary);
     line-height: 1.2;
@@ -1757,6 +1796,15 @@
 
   .track-row:hover .quality-tag {
     opacity: 1;
+  }
+
+  .track-quality-row {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: nowrap;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .quality-tag.high-quality {
@@ -1809,21 +1857,47 @@
   }
 
   .col-duration {
-    text-align: right;
+    text-align: center;
     font-size: 0.875rem;
     color: var(--text-subdued);
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: center;
   }
 
-  .col-date-added {
-    text-align: right;
+  .col-like {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-subdued);
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast);
+  }
+
+  .col-like.liked {
+    opacity: 1;
+    color: var(--accent-primary);
+  }
+
+  .track-row:hover .col-like {
+    opacity: 1;
+  }
+
+  .col-like:hover {
+    color: var(--accent-primary);
+  }
+
+  .col-plays {
+    text-align: center;
     font-size: 0.8125rem;
     color: var(--text-subdued);
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   .empty-state {
@@ -1912,24 +1986,50 @@
   }
 
   .list-header.multiselect {
-    grid-template-columns: 40px 40px 1fr 1fr 80px 130px;
+    grid-template-columns: 40px 40px 56px 1fr 1fr 80px 36px 100px;
   }
 
   .list-header.multiselect.no-album {
-    grid-template-columns: 40px 40px 1fr 80px 130px;
+    grid-template-columns: 40px 40px 56px 1fr 80px 36px 100px;
   }
 
-  /* ── Equalizer bars (hidden by default, shown on mobile album view) ── */
+  /* â”€â”€ Equalizer bars (hidden by default, shown on mobile album view) â”€â”€ */
+  /* Equalizer bars (playing-track indicator) — shown wherever a track is playing */
   .equalizer-bars {
-    display: none;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 2px;
+    height: 16px;
+    width: 16px;
   }
 
-  /* ── Mobile ── */
-  @media (max-width: 768px) {
-    .list-toolbar {
+  .eq-bar {
+    width: 3px;
+    background-color: var(--accent-primary);
+    border-radius: 1px;
+    animation: eq-bounce 1.2s ease-in-out infinite;
+  }
+
+  .eq-bar:nth-child(1) { height: 60%;  animation-delay: 0s;   }
+  .eq-bar:nth-child(2) { height: 100%; animation-delay: 0.2s; }
+  .eq-bar:nth-child(3) { height: 40%;  animation-delay: 0.4s; }
+  .eq-bar:nth-child(4) { height: 80%;  animation-delay: 0.6s; }
+
+  @keyframes eq-bounce {
+    0%, 100% { height: 20%; }
+    50%      { height: 100%; }
+  }
+
+  /* Desktop: equalizer bars replace the SVG music-note icon */
+  @media (min-width: 769px) {
+    .playing-icon {
       display: none;
     }
+  }
 
+  /* â”€â”€ Mobile â”€â”€ */
+  @media (max-width: 768px) {
     /* Hide the entire header row on mobile */
     .list-header {
       display: none;
@@ -1950,7 +2050,7 @@
       opacity: 1;
     }
 
-    /* ─── Base track row (shared) ─── */
+    /* â”€â”€â”€ Base track row (shared) â”€â”€â”€ */
     .track-row {
       gap: var(--spacing-sm);
       padding: var(--spacing-xs) var(--spacing-sm);
@@ -1958,10 +2058,10 @@
       min-height: 60px;
     }
 
-    /* ─────────────────────────────────────────────────
-       ALBUM VIEW — Numbered, no covers, clean & minimal
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       ALBUM VIEW â€” Numbered, no covers, clean & minimal
        Grid: [number] [title] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-album .track-row {
       grid-template-columns: 32px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -1989,58 +2089,17 @@
       display: none;
     }
 
-    /* Show equalizer bars, hide music note on album mobile */
-    .list-body.mobile-album .equalizer-bars {
-      display: flex;
-      align-items: flex-end;
-      justify-content: center;
-      gap: 2px;
-      height: 16px;
-      width: 16px;
-    }
-
+    /* Mobile album: SVG note hidden in favor of equalizer bars */
     .list-body.mobile-album .playing-icon {
       display: none;
     }
 
-    .eq-bar {
-      width: 3px;
-      background-color: var(--accent-primary);
-      border-radius: 1px;
-      animation: eq-bounce 1.2s ease-in-out infinite;
+    /* Mobile non-album: keep the SVG note (no bars here) */
+    .list-body:not(.mobile-album) .equalizer-bars {
+      display: none;
     }
 
-    .eq-bar:nth-child(1) {
-      height: 60%;
-      animation-delay: 0s;
-    }
-
-    .eq-bar:nth-child(2) {
-      height: 100%;
-      animation-delay: 0.2s;
-    }
-
-    .eq-bar:nth-child(3) {
-      height: 40%;
-      animation-delay: 0.4s;
-    }
-
-    .eq-bar:nth-child(4) {
-      height: 80%;
-      animation-delay: 0.6s;
-    }
-
-    @keyframes eq-bounce {
-      0%,
-      100% {
-        height: 20%;
-      }
-      50% {
-        height: 100%;
-      }
-    }
-
-    /* Title in album view — bold, prominent */
+    /* Title in album view â€” bold, prominent */
     .list-body.mobile-album .track-name {
       font-size: 0.9375rem;
       font-weight: 600;
@@ -2068,10 +2127,10 @@
       grid-template-columns: 36px 32px 1fr 48px;
     }
 
-    /* ─────────────────────────────────────────────────
-       PLAYLIST VIEW — Cover art + info, Spotify-style
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       PLAYLIST VIEW â€” Cover art + info, Spotify-style
        Grid: [cover] [title+artist] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-playlist .track-row {
       grid-template-columns: 48px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -2137,10 +2196,10 @@
       grid-template-columns: 36px 48px 1fr 48px;
     }
 
-    /* ─────────────────────────────────────────────────
-       LIBRARY VIEW — Full info with cover + album context
+    /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+       LIBRARY VIEW â€” Full info with cover + album context
        Grid: [cover] [title+artist] [duration]
-    ───────────────────────────────────────────────── */
+    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .list-body.mobile-library .track-row {
       grid-template-columns: 48px 1fr 48px;
       padding-left: var(--spacing-sm);
@@ -2207,7 +2266,7 @@
       grid-template-columns: 36px 48px 1fr 48px;
     }
 
-    /* ─── Shared playing state accents ─── */
+    /* â”€â”€â”€ Shared playing state accents â”€â”€â”€ */
     .track-row.playing .track-name {
       color: var(--accent-primary);
     }
@@ -2216,7 +2275,7 @@
       color: var(--accent-primary);
     }
 
-    /* ─── Downloaded icon compact ─── */
+    /* â”€â”€â”€ Downloaded icon compact â”€â”€â”€ */
     .downloaded-icon {
       margin-left: 2px;
     }
@@ -2226,7 +2285,7 @@
       height: 12px;
     }
 
-    /* ─── Swipe-to-queue visual states ─── */
+    /* â”€â”€â”€ Swipe-to-queue visual states â”€â”€â”€ */
     .track-row {
       position: relative;
       will-change: transform;
@@ -2273,7 +2332,7 @@
     }
 
     :global(.track-row.swipe-queue-added)::after {
-      content: "✓";
+      content: "âœ“";
       opacity: 1;
     }
   }

@@ -2,12 +2,14 @@
 
 // Check if we're running in Tauri environment
 export function isTauri(): boolean {
-    return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 // Check if running on Android
 export function isAndroid(): boolean {
-    return typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
+  return (
+    typeof navigator !== "undefined" && /android/i.test(navigator.userAgent)
+  );
 }
 
 // =============================================================================
@@ -20,286 +22,358 @@ let isLinuxPlatform: boolean | null = null;
 let isWindowsPlatform: boolean | null = null;
 
 async function detectLinux(): Promise<boolean> {
-    if (isLinuxPlatform !== null) return isLinuxPlatform;
+  if (isLinuxPlatform !== null) return isLinuxPlatform;
 
-    if (!isTauri()) {
-        isLinuxPlatform = false;
-        return false;
-    }
+  if (!isTauri()) {
+    isLinuxPlatform = false;
+    return false;
+  }
 
-    try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        const os = await platform();
-        isLinuxPlatform = os === 'linux';
-    } catch {
-        // Fallback to navigator.platform
-        isLinuxPlatform = typeof navigator !== 'undefined' &&
-            navigator.platform.toLowerCase().includes('linux');
-    }
-    return isLinuxPlatform;
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    const os = await platform();
+    isLinuxPlatform = os === "linux";
+  } catch {
+    // Fallback to navigator.platform
+    isLinuxPlatform =
+      typeof navigator !== "undefined" &&
+      navigator.platform.toLowerCase().includes("linux");
+  }
+  return isLinuxPlatform;
 }
 
 async function detectWindows(): Promise<boolean> {
-    if (isWindowsPlatform !== null) return isWindowsPlatform;
+  if (isWindowsPlatform !== null) return isWindowsPlatform;
 
-    if (!isTauri()) {
-        isWindowsPlatform = false;
-        return false;
-    }
+  if (!isTauri()) {
+    isWindowsPlatform = false;
+    return false;
+  }
 
-    try {
-        const { platform } = await import('@tauri-apps/plugin-os');
-        const os = await platform();
-        isWindowsPlatform = os === 'windows';
-    } catch {
-        isWindowsPlatform = typeof navigator !== 'undefined' &&
-            navigator.userAgent.toLowerCase().includes('windows');
-    }
-    return isWindowsPlatform;
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    const os = await platform();
+    isWindowsPlatform = os === "windows";
+  } catch {
+    isWindowsPlatform =
+      typeof navigator !== "undefined" &&
+      navigator.userAgent.toLowerCase().includes("windows");
+  }
+  return isWindowsPlatform;
 }
 
 // Initialize platform detection early - call this on app startup
 export async function initPlatformDetection(): Promise<void> {
-    await detectLinux();
-    await detectWindows();
+  await detectLinux();
+  await detectWindows();
 }
 
 export async function initWindowsThumbar(): Promise<boolean> {
-    if (!isTauri()) return false;
-    const onWindows = await detectWindows();
-    if (!onWindows) return false;
+  if (!isTauri()) return false;
+  const onWindows = await detectWindows();
+  if (!onWindows) return false;
 
-    return await invoke<boolean>('windows_init_thumbar');
+  return await invoke<boolean>("windows_init_thumbar");
 }
 
-export async function updateWindowsThumbarState(isPlaying: boolean): Promise<void> {
-    if (!isTauri()) return;
-    const onWindows = await detectWindows();
-    if (!onWindows) return;
+export async function updateWindowsThumbarState(
+  isPlaying: boolean,
+): Promise<void> {
+  if (!isTauri()) return;
+  const onWindows = await detectWindows();
+  if (!onWindows) return;
 
-    await invoke('windows_update_thumbar_state', { isPlaying });
+  await invoke("windows_update_thumbar_state", { isPlaying });
 }
 
 // Dynamic imports to avoid SSR issues
-let invokeFunc: typeof import('@tauri-apps/api/core').invoke | null = null;
-let openFunc: typeof import('@tauri-apps/plugin-dialog').open | null = null;
-let convertFileSrcFunc: typeof import('@tauri-apps/api/core').convertFileSrc | null = null;
-let listenFunc: typeof import('@tauri-apps/api/event').listen | null = null;
+let invokeFunc: typeof import("@tauri-apps/api/core").invoke | null = null;
+let openFunc: typeof import("@tauri-apps/plugin-dialog").open | null = null;
+let convertFileSrcFunc:
+  | typeof import("@tauri-apps/api/core").convertFileSrc
+  | null = null;
+let listenFunc: typeof import("@tauri-apps/api/event").listen | null = null;
 
 async function ensureTauriLoaded() {
-    if (!isTauri()) {
-        throw new Error('Not running in Tauri environment');
-    }
-    if (!invokeFunc) {
-        const core = await import('@tauri-apps/api/core');
-        invokeFunc = core.invoke;
-        convertFileSrcFunc = core.convertFileSrc;
-    }
-    if (!openFunc) {
-        const dialog = await import('@tauri-apps/plugin-dialog');
-        openFunc = dialog.open;
-    }
-    if (!listenFunc) {
-        const event = await import('@tauri-apps/api/event');
-        listenFunc = event.listen;
-    }
+  if (!isTauri()) {
+    throw new Error("Not running in Tauri environment");
+  }
+  if (!invokeFunc) {
+    const core = await import("@tauri-apps/api/core");
+    invokeFunc = core.invoke;
+    convertFileSrcFunc = core.convertFileSrc;
+  }
+  if (!openFunc) {
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    openFunc = dialog.open;
+  }
+  if (!listenFunc) {
+    const event = await import("@tauri-apps/api/event");
+    listenFunc = event.listen;
+  }
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    await ensureTauriLoaded();
-    return invokeFunc!(cmd, args);
+async function invoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  await ensureTauriLoaded();
+  return invokeFunc!(cmd, args);
 }
 
 // Convert file path to asset:// URL for WebView
 // Note: For audio on Linux, use getAudioSrc() which returns file:// URLs
 export function convertFileSrc(filePath: string): string {
-    if (!convertFileSrcFunc) {
-        throw new Error('Tauri not loaded');
-    }
-    return convertFileSrcFunc(filePath);
+  if (!convertFileSrcFunc) {
+    throw new Error("Tauri not loaded");
+  }
+  return convertFileSrcFunc(filePath);
 }
 
 // Event listener helper — used by the progressive scan pipeline
 // to receive scan-batch-ready and scan-complete events
-export async function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> {
-    await ensureTauriLoaded();
-    const unlisten = await listenFunc!(event, handler);
-    return unlisten;
+export async function listen<T>(
+  event: string,
+  handler: (event: { payload: T }) => void,
+): Promise<() => void> {
+  await ensureTauriLoaded();
+  const unlisten = await listenFunc!(event, handler);
+  return unlisten;
 }
 
 // Types
 export interface Track {
-    id: number;
-    path: string;
-    title: string | null;
-    artist: string | null;
-    album: string | null;
-    track_number: number | null;
-    duration: number | null;
-    album_id: number | null;
-    format: string | null;
-    bitrate: number | null;
-    cover_url?: string | null;  // For streaming services (Tidal, etc.)
-    track_cover?: string | null; // old - Track's embedded cover (base64)
-    track_cover_path?: string | null; // File path to cover image
-    source_type?: string | null;  // 'local', 'tidal', 'url'
-    external_id?: string | null;  // Source-specific ID
-    local_src?: string | null; // Local file path for offline playback
-    disc_number?: number | null;
-    metadata_json?: string | null;
-    date_added?: string | null;
+  id: number;
+  path: string;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  track_number: number | null;
+  duration: number | null;
+  album_id: number | null;
+  format: string | null;
+  bitrate: number | null;
+  cover_url?: string | null; // For streaming services (Tidal, etc.)
+  track_cover?: string | null; // old - Track's embedded cover (base64)
+  track_cover_path?: string | null; // File path to cover image
+  source_type?: string | null; // 'local', 'tidal', 'url'
+  external_id?: string | null; // Source-specific ID
+  local_src?: string | null; // Local file path for offline playback
+  disc_number?: number | null;
+  metadata_json?: string | null;
+  date_added?: string | null;
+  play_count?: number | null;
 }
 
 export interface Album {
-    id: number;
-    name: string;
-    artist: string | null;
-    art_data: string | null; // old - base64 album art
-    art_path?: string | null; // File path to album art
+  id: number;
+  name: string;
+  artist: string | null;
+  art_data: string | null; // old - base64 album art
+  art_path?: string | null; // File path to album art
+  year?: number | null;
+  original_year?: number | null;
 }
 
 export interface Artist {
-    name: string;
-    track_count: number;
-    album_count: number;
+  name: string;
+  track_count: number;
+  album_count: number;
 }
 
 export interface Playlist {
-    id: number;
-    name: string;
-    created_at: string | null;
-    folder_path?: string | null;
-    cover_url?: string | null;
+  id: number;
+  name: string;
+  created_at: string | null;
+  folder_path?: string | null;
+  cover_url?: string | null;
 }
 
 export interface Library {
-    tracks: Track[];
-    albums: Album[];
-    artists: Artist[];
+  tracks: Track[];
+  albums: Album[];
+  artists: Artist[];
 }
 
 export interface ScanResult {
-    tracks_added: number;
-    tracks_updated: number;
-    tracks_deleted: number;
-    errors: string[];
+  tracks_added: number;
+  tracks_updated: number;
+  tracks_deleted: number;
+  errors: string[];
 }
 
 // Progressive scan types
 export interface ScanProgress {
-    current: number;
-    total: number;
-    current_batch: number;
-    batch_size: number;
-    estimated_time_remaining_ms: number;
-    tracks_added: number;
-    tracks_updated: number;
+  current: number;
+  total: number;
+  current_batch: number;
+  batch_size: number;
+  estimated_time_remaining_ms: number;
+  tracks_added: number;
+  tracks_updated: number;
 }
 
 export interface ScanBatchEvent {
-    tracks: Track[];
-    progress: ScanProgress;
+  tracks: Track[];
+  progress: ScanProgress;
 }
 
 export interface MigrationProgress {
-    total: number;
-    processed: number;
-    tracks_migrated: number;
-    albums_migrated: number;
-    errors: string[];
+  total: number;
+  processed: number;
+  tracks_migrated: number;
+  albums_migrated: number;
+  errors: string[];
 }
 
 export interface MergeCoverResult {
-    covers_merged: number;
-    space_saved_bytes: number;
-    albums_processed: number;
-    errors: string[];
+  covers_merged: number;
+  space_saved_bytes: number;
+  albums_processed: number;
+  errors: string[];
 }
 
 // Library commands
 export async function scanMusic(paths: string[]): Promise<ScanResult> {
-    return await invoke('scan_music', { paths });
+  return await invoke("scan_music", { paths });
 }
 
 export async function addFolder(path: string): Promise<void> {
-    return await invoke('add_folder', { path });
+  return await invoke("add_folder", { path });
 }
 
 export async function setSingleMusicFolder(path: string): Promise<void> {
-    return await invoke('set_single_music_folder', { path });
+  return await invoke("set_single_music_folder", { path });
 }
 
 export async function rescanMusic(): Promise<ScanResult> {
-    return await invoke('rescan_music');
+  return await invoke("rescan_music");
+}
+
+export async function hardRescanMusic(): Promise<ScanResult> {
+  return await invoke("hard_rescan_music");
+}
+
+// File watcher commands (desktop only)
+export async function startWatcher(): Promise<void> {
+  return await invoke("start_watcher");
+}
+
+export async function stopWatcher(): Promise<void> {
+  return await invoke("stop_watcher");
+}
+
+export async function getWatcherStatus(): Promise<boolean> {
+  return await invoke("get_watcher_status");
 }
 
 export async function getDefaultMusicDirs(): Promise<string[]> {
-    return await invoke('get_default_music_dirs');
+  return await invoke("get_default_music_dirs");
 }
 
 export async function getLibrary(): Promise<Library> {
-    return await invoke('get_library');
+  return await invoke("get_library");
 }
 
-export async function getTracksPaginated(limit: number, offset: number): Promise<Track[]> {
-    return await invoke('get_tracks_paginated', { limit, offset });
+export async function getTrackById(trackId: number): Promise<Track | null> {
+  return await invoke("get_track_by_id", { trackId });
 }
 
-export async function getAlbumsPaginated(limit: number, offset: number): Promise<Album[]> {
-    return await invoke<Album[]>("get_albums_paginated", { limit, offset });
+export async function getTracksPaginated(
+  limit: number,
+  offset: number,
+): Promise<Track[]> {
+  return await invoke("get_tracks_paginated", { limit, offset });
 }
 
-export async function searchLibrary(query: string, limit: number, offset: number): Promise<Track[]> {
-    return await invoke('search_library', { query, limit, offset });
+export async function getAlbumsPaginated(
+  limit: number,
+  offset: number,
+): Promise<Album[]> {
+  return await invoke<Album[]>("get_albums_paginated", { limit, offset });
+}
+
+export async function searchLibrary(
+  query: string,
+  limit: number,
+  offset: number,
+): Promise<Track[]> {
+  return await invoke("search_library", { query, limit, offset });
 }
 
 export async function getTracksByAlbum(albumId: number): Promise<Track[]> {
-    return await invoke('get_tracks_by_album', { albumId });
+  return await invoke("get_tracks_by_album", { albumId });
 }
 
 export async function getTracksByArtist(artist: string): Promise<Track[]> {
-    return await invoke('get_tracks_by_artist', { artist });
+  return await invoke("get_tracks_by_artist", { artist });
 }
 
 export async function getAlbum(albumId: number): Promise<Album | null> {
-    return await invoke('get_album', { albumId });
+  return await invoke("get_album", { albumId });
 }
 
 export async function getAlbumsByArtist(artist: string): Promise<Album[]> {
-    return await invoke('get_albums_by_artist', { artist });
+  return await invoke("get_albums_by_artist", { artist });
 }
 
 export interface ExternalTrackInput {
-    title: string;
-    artist: string;
-    album?: string;
-    duration?: number;
-    cover_url?: string;
-    source_type: string;  // e.g., 'tidal', 'url'
-    external_id: string;  // Source-specific ID
-    format?: string;
-    bitrate?: number;
-    stream_url?: string;
-    track_number?: number;
-    disc_number?: number;
-    musicbrainz_recording_id?: string;
-    metadata_json?: string;
+  title: string;
+  artist: string;
+  album?: string;
+  duration?: number;
+  cover_url?: string;
+  source_type: string; // e.g., 'tidal', 'url'
+  external_id: string; // Source-specific ID
+  format?: string;
+  bitrate?: number;
+  stream_url?: string;
+  track_number?: number;
+  disc_number?: number;
+  musicbrainz_recording_id?: string;
+  metadata_json?: string;
 }
 
-export async function addExternalTrack(track: ExternalTrackInput): Promise<number> {
-    return await invoke('add_external_track', { track });
+export async function addExternalTrack(
+  track: ExternalTrackInput,
+): Promise<number> {
+  return await invoke("add_external_track", { track });
 }
 
 export async function deleteTrack(trackId: number): Promise<boolean> {
-    return await invoke('delete_track', { trackId });
+  return await invoke("delete_track", { trackId });
 }
 
 export async function deleteAlbum(albumId: number): Promise<boolean> {
-    return await invoke('delete_album', { albumId });
+  return await invoke("delete_album", { albumId });
 }
 
 export async function resetDatabase(): Promise<void> {
-    return await invoke('reset_database');
+  return await invoke("reset_database");
+}
+
+// Backup Commands
+
+export interface BackupInfo {
+  filename: string;
+  size_bytes: number;
+  date: string;
+}
+
+export async function listBackups(): Promise<BackupInfo[]> {
+  return await invoke("list_backups");
+}
+
+export async function exportBackup(destination: string): Promise<void> {
+  return await invoke("export_backup", { destination });
+}
+
+export async function importBackup(sourcePath: string): Promise<void> {
+  return await invoke("import_backup", { sourcePath });
+}
+
+export async function deleteBackup(filename: string): Promise<void> {
+  return await invoke("delete_backup", { filename });
 }
 
 // Cover Loading Commands
@@ -307,59 +381,70 @@ export async function resetDatabase(): Promise<void> {
 // Migrate all existing base64 covers to file-based storage
 // This is a one-time thing that should be run after upgrading
 export async function migrateCoversToFiles(): Promise<MigrationProgress> {
-    return await invoke('migrate_covers_to_files');
+  return await invoke("migrate_covers_to_files");
 }
-
 
 // Get the file path for a single track's cover
 // Returns null if no cover exists
-export async function getTrackCoverPath(trackId: number): Promise<string | null> {
-    return await invoke('get_track_cover_path', { trackId });
+export async function getTrackCoverPath(
+  trackId: number,
+): Promise<string | null> {
+  return await invoke("get_track_cover_path", { trackId });
 }
 
 // Get cover paths for multiple tracks in a single batch operation
 // Returns a map of trackId -> coverPath
-export async function getBatchCoverPaths(trackIds: number[]): Promise<Record<number, string>> {
-    return await invoke('get_batch_cover_paths', { trackIds });
+export async function getBatchCoverPaths(
+  trackIds: number[],
+): Promise<Record<number, string>> {
+  return await invoke("get_batch_cover_paths", { trackIds });
 }
 
-export async function importAudioBytes(filename: string, base64Data: string, overwrite: boolean): Promise<Track | 'duplicate' | string> {
-    try {
-        return await invoke<Track>('import_audio_bytes', { filename, base64_data: base64Data, overwrite });
-    } catch (e: any) {
-        if (typeof e === 'string' && e === 'duplicate') return 'duplicate';
-        return e?.toString?.() || 'error';
-    }
+export async function importAudioBytes(
+  filename: string,
+  base64Data: string,
+  overwrite: boolean,
+): Promise<Track | "duplicate" | string> {
+  try {
+    return await invoke<Track>("import_audio_bytes", {
+      filename,
+      base64_data: base64Data,
+      overwrite,
+    });
+  } catch (e: any) {
+    if (typeof e === "string" && e === "duplicate") return "duplicate";
+    return e?.toString?.() || "error";
+  }
 }
 
 // Get the file path for an album's art
 // Returns null if no art exists
 export async function getAlbumArtPath(albumId: number): Promise<string | null> {
-    return await invoke('get_album_art_path', { albumId });
+  return await invoke("get_album_art_path", { albumId });
 }
 
 // Convert a file path to an asset URL for browser use
 // (This is mostly handled on the frontend via convertFileSrc)
 export async function getCoverAsAssetUrl(filePath: string): Promise<string> {
-    return await invoke('get_cover_as_asset_url', { filePath });
+  return await invoke("get_cover_as_asset_url", { filePath });
 }
 
 // Preload covers for better performance
 // Currently not used, but could implement backend caching in the future
 export async function preloadCovers(trackIds: number[]): Promise<void> {
-    return await invoke('preload_covers', { trackIds });
+  return await invoke("preload_covers", { trackIds });
 }
 
 // Clean up orphaned cover files (covers without corresponding tracks/albums)
 // Returns the number of files deleted
 export async function cleanupOrphanedCoverFiles(): Promise<number> {
-    return await invoke('cleanup_orphaned_cover_files');
+  return await invoke("cleanup_orphaned_cover_files");
 }
 
 // Clear all base64 cover data from the database after successful migration
 // imp -Only run this after verifying all covers have been migrated
 export async function clearBase64Covers(): Promise<number> {
-    return await invoke('clear_base64_covers');
+  return await invoke("clear_base64_covers");
 }
 
 // Helper Functions for Cover Display
@@ -367,39 +452,39 @@ export async function clearBase64Covers(): Promise<number> {
 // Handles both file paths and base64 data
 // Priority: file path > base64 > null
 export function getTrackCoverSrc(track: Track): string | null {
-    // Priority 1: File path (new system)
-    if (track.track_cover_path) {
-        return convertFileSrc(track.track_cover_path);
-    }
+  // Priority 1: File path (new system)
+  if (track.track_cover_path) {
+    return convertFileSrc(track.track_cover_path);
+  }
 
-    // Priority 2: Base64 data - old
-    if (track.track_cover) {
-        return getAlbumArtSrc(track.track_cover, false);
-    }
+  // Priority 2: Base64 data - old
+  if (track.track_cover) {
+    return getAlbumArtSrc(track.track_cover, false);
+  }
 
-    // Priority 3: Cover URL (for streaming services)
-    if (track.cover_url) {
-        return track.cover_url;
-    }
+  // Priority 3: Cover URL (for streaming services)
+  if (track.cover_url) {
+    return track.cover_url;
+  }
 
-    return null;
+  return null;
 }
 
 // Get the album art source URL
 // Handles both file paths and base64 data
 // Priority: file path > base64 > null
 export function getAlbumCoverSrc(album: Album): string | null {
-    // Priority 1: File path (new system)
-    if (album.art_path) {
-        return convertFileSrc(album.art_path);
-    }
+  // Priority 1: File path (new system)
+  if (album.art_path) {
+    return convertFileSrc(album.art_path);
+  }
 
-    // Priority 2: Base64 data - old
-    if (album.art_data) {
-        return getAlbumArtSrc(album.art_data, false);
-    }
+  // Priority 2: Base64 data - old
+  if (album.art_data) {
+    return getAlbumArtSrc(album.art_data, false);
+  }
 
-    return null;
+  return null;
 }
 
 /**
@@ -407,431 +492,535 @@ export function getAlbumCoverSrc(album: Album): string | null {
  * @param artDataOrPath - Either base64 string or file path
  * @param isPath - Whether the input is a file path (true) or base64 (false)
  */
-export function getAlbumArtSrc(artDataOrPath: string | null, isPath: boolean = false): string | null {
-    if (!artDataOrPath) return null;
+export function getAlbumArtSrc(
+  artDataOrPath: string | null,
+  isPath: boolean = false,
+): string | null {
+  if (!artDataOrPath) return null;
 
-    // If it's already a URL (HTTP, asset, blob, or data URI), return it as is
-    if (artDataOrPath.startsWith('http') || 
-        artDataOrPath.startsWith('asset:') || 
-        artDataOrPath.startsWith('blob:') || 
-        artDataOrPath.startsWith('data:')) {
-        return artDataOrPath;
-    }
+  // If it's already a URL (HTTP, asset, blob, or data URI), return it as is
+  if (
+    artDataOrPath.startsWith("http") ||
+    artDataOrPath.startsWith("asset:") ||
+    artDataOrPath.startsWith("blob:") ||
+    artDataOrPath.startsWith("data:")
+  ) {
+    return artDataOrPath;
+  }
 
-    // If it's a file path, convert to asset URL
-    if (isPath) {
-        return convertFileSrc(artDataOrPath);
-    }
+  // If it's a file path, convert to asset URL
+  if (isPath) {
+    return convertFileSrc(artDataOrPath);
+  }
 
-    // Otherwise treat as base64
-    // Detect image type from base64 header
-    if (artDataOrPath.startsWith('/9j/')) {
-        return `data:image/jpeg;base64,${artDataOrPath}`;
-    } else if (artDataOrPath.startsWith('iVBOR')) {
-        return `data:image/png;base64,${artDataOrPath}`;
-    }
-    // Default to JPEG
+  // Otherwise treat as base64
+  // Detect image type from base64 header
+  if (artDataOrPath.startsWith("/9j/")) {
     return `data:image/jpeg;base64,${artDataOrPath}`;
+  } else if (artDataOrPath.startsWith("iVBOR")) {
+    return `data:image/png;base64,${artDataOrPath}`;
+  }
+  // Default to JPEG
+  return `data:image/jpeg;base64,${artDataOrPath}`;
 }
 
 export async function mergeDuplicateCovers(): Promise<MergeCoverResult> {
-    return await invoke('merge_duplicate_covers');
+  return await invoke("merge_duplicate_covers");
 }
-
 
 // Playlist commands
 
-export async function createPlaylist(name: string, coverUrl?: string | null): Promise<number> {
-    return await invoke('create_playlist', { name, coverUrl });
+export async function createPlaylist(
+  name: string,
+  coverUrl?: string | null,
+): Promise<number> {
+  return await invoke("create_playlist", { name, coverUrl });
 }
 
 export async function getPlaylists(): Promise<Playlist[]> {
-    return await invoke('get_playlists');
+  return await invoke("get_playlists");
 }
 
 export async function getPlaylistTracks(playlistId: number): Promise<Track[]> {
-    return await invoke('get_playlist_tracks', { playlistId });
+  return await invoke("get_playlist_tracks", { playlistId });
 }
 
-export async function addTrackToPlaylist(playlistId: number, trackId: number): Promise<void> {
-    return await invoke('add_track_to_playlist', { playlistId, trackId });
+export async function addTrackToPlaylist(
+  playlistId: number,
+  trackId: number,
+): Promise<void> {
+  return await invoke("add_track_to_playlist", { playlistId, trackId });
 }
 
-export async function removeTrackFromPlaylist(playlistId: number, trackId: number): Promise<void> {
-    return await invoke('remove_track_from_playlist', { playlistId, trackId });
+export async function removeTrackFromPlaylist(
+  playlistId: number,
+  trackId: number,
+): Promise<void> {
+  return await invoke("remove_track_from_playlist", { playlistId, trackId });
 }
 
 export async function deletePlaylist(playlistId: number): Promise<void> {
-    return await invoke('delete_playlist', { playlistId });
+  return await invoke("delete_playlist", { playlistId });
 }
 
-export async function renamePlaylist(playlistId: number, newName: string): Promise<void> {
-    return await invoke('rename_playlist', { playlistId, newName });
+export async function renamePlaylist(
+  playlistId: number,
+  newName: string,
+): Promise<void> {
+  return await invoke("rename_playlist", { playlistId, newName });
 }
 
-export async function reorderPlaylistTracks(playlistId: number, fromIndex: number, toIndex: number): Promise<void> {
-    return await invoke('reorder_playlist_tracks', { playlistId, fromIndex, toIndex });
+export async function reorderPlaylistTracks(
+  playlistId: number,
+  fromIndex: number,
+  toIndex: number,
+): Promise<void> {
+  return await invoke("reorder_playlist_tracks", {
+    playlistId,
+    fromIndex,
+    toIndex,
+  });
 }
 
 export async function beginFolderImport(folderPath: string): Promise<number> {
-    return await invoke('begin_folder_import', { folderPath });
+  return await invoke("begin_folder_import", { folderPath });
 }
-
 
 // Activity commands (liked tracks + play history)
 
 export interface TrackWithCount {
-    track: Track;
-    play_count: number;
+  track: Track;
+  play_count: number;
 }
 
 export interface AlbumWithCount {
-    album: Album;
-    play_count: number;
+  album: Album;
+  play_count: number;
 }
 
 export interface ArtistWithCount {
-    artist: String;
-    play_count: number;
+  artist: String;
+  play_count: number;
 }
 
 export interface StatsSummary {
-    total_plays: number;
-    total_duration_seconds: number;
-    top_artist: string | null;
-    top_genre: string | null;
+  total_plays: number;
+  total_duration_seconds: number;
+  top_artist: string | null;
+  top_genre: string | null;
 }
 
 export async function likeTrack(trackId: number): Promise<void> {
-    return await invoke('like_track', { trackId });
+  return await invoke("like_track", { trackId });
 }
 
 export async function unlikeTrack(trackId: number): Promise<void> {
-    return await invoke('unlike_track', { trackId });
+  return await invoke("unlike_track", { trackId });
 }
 
 export async function isTrackLiked(trackId: number): Promise<boolean> {
-    return await invoke('is_track_liked', { trackId });
+  return await invoke("is_track_liked", { trackId });
 }
 
 export async function getLikedTrackIds(): Promise<number[]> {
-    return await invoke('get_liked_track_ids');
+  return await invoke("get_liked_track_ids");
 }
 
 export async function getLikedTracks(): Promise<Track[]> {
-    return await invoke('get_liked_tracks');
+  return await invoke("get_liked_tracks");
 }
 
-export async function recordPlay(trackId: number, albumId: number | null, durationPlayed: number): Promise<void> {
-    return await invoke('record_play', { trackId, albumId, durationPlayed });
+export async function likeAlbum(albumId: number): Promise<void> {
+  return await invoke("like_album", { albumId });
+}
+
+export async function unlikeAlbum(albumId: number): Promise<void> {
+  return await invoke("unlike_album", { albumId });
+}
+
+export async function getLikedAlbumIds(): Promise<number[]> {
+  return await invoke("get_liked_album_ids");
+}
+
+export async function addAlbumToListenLater(albumId: number): Promise<void> {
+  return await invoke("add_album_to_listen_later", { albumId });
+}
+
+export async function removeAlbumFromListenLater(
+  albumId: number,
+): Promise<void> {
+  return await invoke("remove_album_from_listen_later", { albumId });
+}
+
+export async function isAlbumInListenLater(albumId: number): Promise<boolean> {
+  return await invoke("is_album_in_listen_later", { albumId });
+}
+
+export async function getListenLaterAlbumIds(): Promise<number[]> {
+  return await invoke("get_listen_later_album_ids");
+}
+
+export async function recordPlay(
+  trackId: number,
+  albumId: number | null,
+  durationPlayed: number,
+): Promise<void> {
+  return await invoke("record_play", { trackId, albumId, durationPlayed });
 }
 
 export async function getTopTracks(limit: number): Promise<TrackWithCount[]> {
-    return await invoke('get_top_tracks', { limit });
+  return await invoke("get_top_tracks", { limit });
 }
 
 export async function getTopAlbums(limit: number): Promise<AlbumWithCount[]> {
-    return await invoke('get_top_albums', { limit });
+  return await invoke("get_top_albums", { limit });
 }
 
 export async function getRecentlyPlayed(limit: number): Promise<Track[]> {
-    return await invoke('get_recently_played', { limit });
+  return await invoke("get_recently_played", { limit });
+}
+
+/**
+ * Recently played albums (deduped), ordered by most recent play.
+ * Used by the "Jump Back In" section on the home screen.
+ */
+export async function getRecentlyPlayedAlbums(limit: number): Promise<Album[]> {
+  return await invoke("get_recently_played_albums", { limit });
+}
+
+/**
+ * Tracks played since the start of the current calendar week (Monday 00:00
+ * UTC), ordered by most recent play. Used by the "This Week" section on
+ * the home screen. Returns up to `limit` tracks — the frontend should
+ * also fetch a higher limit to determine whether to show a "View all" link.
+ */
+export async function getPlayedThisWeek(limit: number): Promise<Track[]> {
+  return await invoke("get_played_this_week", { limit });
 }
 
 export async function getTopArtists(limit: number): Promise<ArtistWithCount[]> {
-    return await invoke('get_top_artists', { limit });
+  return await invoke("get_top_artists", { limit });
 }
 
 export async function getStatsSummary(): Promise<StatsSummary> {
-    return await invoke('get_stats_summary');
+  return await invoke("get_stats_summary");
 }
-
 
 // File dialog
 
 export async function selectMusicFolder(): Promise<string | null> {
-    await ensureTauriLoaded();
-    const selected = await openFunc!({
-        directory: true,
-        multiple: false,
-        title: 'Select Music Folder',
-    });
-    return selected as string | null;
+  await ensureTauriLoaded();
+  const selected = await openFunc!({
+    directory: true,
+    multiple: false,
+    title: "Select Music Folder",
+  });
+  return selected as string | null;
 }
 
 export async function pickFolder(): Promise<string | null> {
-    await ensureTauriLoaded();
-    const selected = await openFunc!({ directory: true, multiple: false, title: 'Select Playlist Folder', });
-    if (!selected) return null;
-    return typeof selected === "string" ? selected : (selected as string[])[0] ?? null;
+  await ensureTauriLoaded();
+  const selected = await openFunc!({
+    directory: true,
+    multiple: false,
+    title: "Select Playlist Folder",
+  });
+  if (!selected) return null;
+  return typeof selected === "string"
+    ? selected
+    : ((selected as string[])[0] ?? null);
 }
 
 export async function pickAndroidFolder(): Promise<string | null> {
-    if (!isAndroid()) {
-        return selectMusicFolder();
+  if (!isAndroid()) {
+    return selectMusicFolder();
+  }
+
+  return await new Promise<string | null>((resolve) => {
+    (window as any).__onAndroidFolderPicked = (pickedPath: string | null) => {
+      delete (window as any).__onAndroidFolderPicked;
+      resolve(pickedPath);
+    };
+
+    const picker = (window as any).AndroidFolderPicker;
+    if (picker?.pickFolder) {
+      picker.pickFolder();
+      return;
     }
 
-    return await new Promise<string | null>((resolve) => {
-        (window as any).__onAndroidFolderPicked = (pickedPath: string | null) => {
-            delete (window as any).__onAndroidFolderPicked;
-            resolve(pickedPath);
-        };
-
-        const picker = (window as any).AndroidFolderPicker;
-        if (picker?.pickFolder) {
-            picker.pickFolder();
-            return;
-        }
-
-        // Fallback in case native bridge is unavailable
-        delete (window as any).__onAndroidFolderPicked;
-        selectMusicFolder().then(resolve).catch(() => resolve(null));
-    });
+    // Fallback in case native bridge is unavailable
+    delete (window as any).__onAndroidFolderPicked;
+    selectMusicFolder()
+      .then(resolve)
+      .catch(() => resolve(null));
+  });
 }
 
 // Ensure the correct path for downloaded files
 export async function getDownloadPath(): Promise<string> {
-    try {
-        if (!isTauri()) {
-            throw new Error('Not running in Tauri environment');
-        }
-
-        // Get the default download directory from Tauri
-        const downloadPath = await invoke<string>('get_download_path');
-        if (!downloadPath) {
-            throw new Error('Failed to retrieve download path');
-        }
-
-        return downloadPath;
-    } catch (error) {
-        console.error('Error retrieving download path:', error);
-        throw new Error('Unable to determine download path. Please check your configuration.');
+  try {
+    if (!isTauri()) {
+      throw new Error("Not running in Tauri environment");
     }
+
+    // Get the default download directory from Tauri
+    const downloadPath = await invoke<string>("get_download_path");
+    if (!downloadPath) {
+      throw new Error("Failed to retrieve download path");
+    }
+
+    return downloadPath;
+  } catch (error) {
+    console.error("Error retrieving download path:", error);
+    throw new Error(
+      "Unable to determine download path. Please check your configuration.",
+    );
+  }
 }
 
 // Initialize player - load Tauri APIs
 export async function initializePlayer(): Promise<void> {
-    await ensureTauriLoaded();
+  await ensureTauriLoaded();
 }
 
 // Convert local file path to URL for playback
 // On Linux, WebKitGTK doesn't handle asset:// for media, so we use file:// instead
 export async function getAudioSrc(filePath: string): Promise<string> {
-    await ensureTauriLoaded();
+  await ensureTauriLoaded();
 
-    // Linux fix: use file:// protocol instead of asset:// for WebKitGTK compatibility
-    const onLinux = await detectLinux();
-    if (onLinux) {
-        return `file://${filePath}`;
-    }
+  // Linux fix: use file:// protocol instead of asset:// for WebKitGTK compatibility
+  const onLinux = await detectLinux();
+  if (onLinux) {
+    return `file://${filePath}`;
+  }
 
-    return convertFileSrcFunc!(filePath);
+  return convertFileSrcFunc!(filePath);
 }
 
 // Format duration from seconds to MM:SS
 export function formatDuration(seconds: number | null): string {
-    if (seconds === null || seconds === undefined) return '--:--';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
+  if (seconds === null || seconds === undefined) return "--:--";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
 
-    if (h > 0) {
-        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    }
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 export async function syncCoverPathsFromFiles(): Promise<MigrationProgress> {
-    return await invoke('sync_cover_paths_from_files');
+  return await invoke("sync_cover_paths_from_files");
 }
 
 // Android Permission Helpers
 export interface PermissionStatus {
-    status: 'granted' | 'prompt' | 'prompt-with-rationale' | 'requesting';
-    permission?: string;
+  status: "granted" | "prompt" | "prompt-with-rationale" | "requesting";
+  permission?: string;
 }
 
 // Check if audio permission is granted on Android
 export async function checkAudioPermission(): Promise<PermissionStatus> {
-    if (!isAndroid() || !isTauri()) {
-        return { status: 'granted' }; // Not on Android, permission not needed
-    }
+  if (!isAndroid() || !isTauri()) {
+    return { status: "granted" }; // Not on Android, permission not needed
+  }
 
-    try {
-        await ensureTauriLoaded();
-        return await invokeFunc!('plugin:permissions|check_audio_permission');
-    } catch (error) {
-        console.error('[Permissions] Failed to check audio permission:', error);
-        // Assume granted if plugin not available (older builds)
-        return { status: 'granted' };
-    }
+  try {
+    await ensureTauriLoaded();
+    return await invokeFunc!("plugin:permissions|check_audio_permission");
+  } catch (error) {
+    console.error("[Permissions] Failed to check audio permission:", error);
+    // Assume granted if plugin not available (older builds)
+    return { status: "granted" };
+  }
 }
 
 // Request audio permission on Android
 export async function requestAudioPermission(): Promise<PermissionStatus> {
-    if (!isAndroid() || !isTauri()) {
-        return { status: 'granted' }; // Not on Android, permission not needed
-    }
+  if (!isAndroid() || !isTauri()) {
+    return { status: "granted" }; // Not on Android, permission not needed
+  }
 
-    try {
-        await ensureTauriLoaded();
-        return await invokeFunc!('plugin:permissions|request_audio_permission');
-    } catch (error) {
-        console.error('[Permissions] Failed to request audio permission:', error);
-        return { status: 'prompt' };
-    }
+  try {
+    await ensureTauriLoaded();
+    return await invokeFunc!("plugin:permissions|request_audio_permission");
+  } catch (error) {
+    console.error("[Permissions] Failed to request audio permission:", error);
+    return { status: "prompt" };
+  }
 }
 
 // Open app settings (for when permission is permanently denied)
 export async function openAppSettings(): Promise<boolean> {
-    if (!isAndroid() || !isTauri()) {
-        return false;
-    }
+  if (!isAndroid() || !isTauri()) {
+    return false;
+  }
 
-    try {
-        await ensureTauriLoaded();
-        const result = await invokeFunc!<{ success: boolean }>('plugin:permissions|open_app_settings');
-        return result.success;
-    } catch (error) {
-        console.error('[Permissions] Failed to open app settings:', error);
-        return false;
-    }
+  try {
+    await ensureTauriLoaded();
+    const result = await invokeFunc!<{ success: boolean }>(
+      "plugin:permissions|open_app_settings",
+    );
+    return result.success;
+  } catch (error) {
+    console.error("[Permissions] Failed to open app settings:", error);
+    return false;
+  }
 }
 
 // Check and request audio permission with retry logic
 export async function ensureAudioPermission(): Promise<boolean> {
-    if (!isAndroid() || !isTauri()) {
-        return true; // Not on Android, permission not needed
-    }
+  if (!isAndroid() || !isTauri()) {
+    return true; // Not on Android, permission not needed
+  }
 
-    // First check current status
-    let status = await checkAudioPermission();
-    console.log('[Permissions] Current audio permission status:', status.status);
+  // First check current status
+  let status = await checkAudioPermission();
+  console.log("[Permissions] Current audio permission status:", status.status);
 
-    if (status.status === 'granted') {
-        return true;
-    }
+  if (status.status === "granted") {
+    return true;
+  }
 
-    // Request permission
-    await requestAudioPermission();
+  // Request permission
+  await requestAudioPermission();
 
-    // Wait a bit for the system dialog and re-check
-    await new Promise(resolve => setTimeout(resolve, 500));
+  // Wait a bit for the system dialog and re-check
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Re-check status after request
-    status = await checkAudioPermission();
-    console.log('[Permissions] Audio permission status after request:', status.status);
+  // Re-check status after request
+  status = await checkAudioPermission();
+  console.log(
+    "[Permissions] Audio permission status after request:",
+    status.status,
+  );
 
-    return status.status === 'granted';
+  return status.status === "granted";
 }
 
 // Check if storage permission is granted on Android
-export async function checkStoragePermission(): Promise<{ status: 'granted' | 'prompt' | 'prompt-with-rationale' | 'requesting'; permission?: string }> {
-    if (!isAndroid() || !isTauri()) {
-        return { status: 'granted' }; // Not on Android, permission not needed
-    }
+export async function checkStoragePermission(): Promise<{
+  status: "granted" | "prompt" | "prompt-with-rationale" | "requesting";
+  permission?: string;
+}> {
+  if (!isAndroid() || !isTauri()) {
+    return { status: "granted" }; // Not on Android, permission not needed
+  }
 
-    try {
-        await ensureTauriLoaded();
-        return await invokeFunc!('plugin:permissions|check_storage_permission');
-    } catch (error) {
-        console.error('[Permissions] Failed to check storage permission:', error);
-        // Assume granted if plugin not available (older builds)
-        return { status: 'granted' };
-    }
+  try {
+    await ensureTauriLoaded();
+    return await invokeFunc!("plugin:permissions|check_storage_permission");
+  } catch (error) {
+    console.error("[Permissions] Failed to check storage permission:", error);
+    // Assume granted if plugin not available (older builds)
+    return { status: "granted" };
+  }
 }
 
 // Request storage permission on Android
-export async function requestStoragePermission(): Promise<{ status: 'granted' | 'opened' | 'requesting' }> {
-    if (!isAndroid() || !isTauri()) {
-        return { status: 'granted' }; // Not on Android, permission not needed
-    }
+export async function requestStoragePermission(): Promise<{
+  status: "granted" | "opened" | "requesting";
+}> {
+  if (!isAndroid() || !isTauri()) {
+    return { status: "granted" }; // Not on Android, permission not needed
+  }
 
-    try {
-        await ensureTauriLoaded();
-        return await invokeFunc!('plugin:permissions|request_storage_permission');
-    } catch (error) {
-        console.error('[Permissions] Failed to request storage permission:', error);
-        return { status: 'requesting' };
-    }
+  try {
+    await ensureTauriLoaded();
+    return await invokeFunc!("plugin:permissions|request_storage_permission");
+  } catch (error) {
+    console.error("[Permissions] Failed to request storage permission:", error);
+    return { status: "requesting" };
+  }
 }
 
 // Check and request storage permission with retry logic
 export async function ensureStoragePermission(): Promise<boolean> {
-    if (!isAndroid() || !isTauri()) {
-        return true; // Not on Android, permission not needed
-    }
+  if (!isAndroid() || !isTauri()) {
+    return true; // Not on Android, permission not needed
+  }
 
-    // First check current status
-    const status = await checkStoragePermission();
-    console.log('[Permissions] Current storage permission status:', status);
+  // First check current status
+  const status = await checkStoragePermission();
+  console.log("[Permissions] Current storage permission status:", status);
 
-    if (status.status === 'granted') {
-        return true;
-    }
+  if (status.status === "granted") {
+    return true;
+  }
 
-    // Request permission
-    const req = await requestStoragePermission();
-    console.log('[Permissions] Storage permission request result:', req);
+  // Request permission
+  const req = await requestStoragePermission();
+  console.log("[Permissions] Storage permission request result:", req);
 
-    // In some flows permission is granted immediately
-    if (req.status === 'granted') {
-        return true;
-    }
+  // In some flows permission is granted immediately
+  if (req.status === "granted") {
+    return true;
+  }
 
-    // For older Android, wait a bit for the system dialog and re-check
-    await new Promise(resolve => setTimeout(resolve, 500));
+  // For older Android, wait a bit for the system dialog and re-check
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Re-check status after request
-    const recheck = await checkStoragePermission();
-    console.log('[Permissions] Storage permission status after request:', recheck);
+  // Re-check status after request
+  const recheck = await checkStoragePermission();
+  console.log(
+    "[Permissions] Storage permission status after request:",
+    recheck,
+  );
 
-    return recheck.status === 'granted';
+  return recheck.status === "granted";
 }
 
 // Updated downloadTrack function to ensure permission request is triggered
 export async function downloadTrack(trackId: number): Promise<void> {
-    try {
-        if (!isTauri()) {
-            throw new Error('Not running in Tauri environment');
-        }
-
-        // Ensure storage permissions are granted on Android
-        if (isAndroid()) {
-            console.log('Ensuring storage permissions...');
-            const granted = await ensureStoragePermission();
-            if (!granted) {
-                throw new Error('Storage permission not granted. Cannot proceed with download.');
-            }
-        }
-
-        // Get the download path
-        const downloadPath = await getDownloadPath();
-        console.log(`Download path: ${downloadPath}`);
-
-        // Attempt to download the track
-        await invoke('download_track', { trackId, downloadPath });
-        console.log(`Track ${trackId} downloaded successfully to ${downloadPath}.`);
-    } catch (error) {
-        console.error(`Failed to download track ${trackId}:`, error);
-
-        // Display a user-friendly error message
-        if (isAndroid()) {
-            alert('Failed to download track. Please check your storage permissions and try again.');
-        } else {
-            alert('Failed to download track.');
-        }
+  try {
+    if (!isTauri()) {
+      throw new Error("Not running in Tauri environment");
     }
+
+    // Ensure storage permissions are granted on Android
+    if (isAndroid()) {
+      console.log("Ensuring storage permissions...");
+      const granted = await ensureStoragePermission();
+      if (!granted) {
+        throw new Error(
+          "Storage permission not granted. Cannot proceed with download.",
+        );
+      }
+    }
+
+    // Get the download path
+    const downloadPath = await getDownloadPath();
+    console.log(`Download path: ${downloadPath}`);
+
+    // Attempt to download the track
+    await invoke("download_track", { trackId, downloadPath });
+    console.log(`Track ${trackId} downloaded successfully to ${downloadPath}.`);
+  } catch (error) {
+    console.error(`Failed to download track ${trackId}:`, error);
+
+    // Display a user-friendly error message
+    if (isAndroid()) {
+      alert(
+        "Failed to download track. Please check your storage permissions and try again.",
+      );
+    } else {
+      alert("Failed to download track.");
+    }
+  }
 }
 
 // Import a single audio file with duplicate detection and overwrite/skip logic
-export async function importAudioFile(filePath: string, overwrite: boolean): Promise<Track | 'duplicate' | string> {
-    try {
-        return await invoke<Track>('import_audio_file', { filePath, overwrite });
-    } catch (e: any) {
-        if (typeof e === 'string' && e === 'duplicate') return 'duplicate';
-        return e?.toString?.() || 'error';
-    }
+export async function importAudioFile(
+  filePath: string,
+  overwrite: boolean,
+): Promise<Track | "duplicate" | string> {
+  try {
+    return await invoke<Track>("import_audio_file", { filePath, overwrite });
+  } catch (e: any) {
+    if (typeof e === "string" && e === "duplicate") return "duplicate";
+    return e?.toString?.() || "error";
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -839,23 +1028,25 @@ export async function importAudioFile(filePath: string, overwrite: boolean): Pro
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Store or clear the ListenBrainz user token (written to app-data file). */
-export async function setListenbrainzToken(token: string | null): Promise<void> {
-    return await invoke('set_listenbrainz_token', { token });
+export async function setListenbrainzToken(
+  token: string | null,
+): Promise<void> {
+  return await invoke("set_listenbrainz_token", { token });
 }
 
 /** Returns `true` if a token file currently exists. */
 export async function getListenbrainzTokenSet(): Promise<boolean> {
-    return await invoke('get_listenbrainz_token_set');
+  return await invoke("get_listenbrainz_token_set");
 }
 
 /** Retrieve the currently stored ListenBrainz token. */
 export async function getListenbrainzToken(): Promise<string | null> {
-    return await invoke('get_listenbrainz_token');
+  return await invoke("get_listenbrainz_token");
 }
 
 /** Remove the stored token. */
 export async function deleteListenbrainzToken(): Promise<void> {
-    return await invoke('delete_listenbrainz_token');
+  return await invoke("delete_listenbrainz_token");
 }
 
 /**
@@ -863,7 +1054,7 @@ export async function deleteListenbrainzToken(): Promise<void> {
  * Resolves with the username on success, rejects with an error message otherwise.
  */
 export async function verifyListenbrainzToken(token: string): Promise<string> {
-    return await invoke('verify_listenbrainz_token', { token });
+  return await invoke("verify_listenbrainz_token", { token });
 }
 
 /**
@@ -871,34 +1062,36 @@ export async function verifyListenbrainzToken(token: string): Promise<string> {
  * Fire-and-forget safe — always resolves; errors are logged server-side.
  */
 export async function submitListenbrainzListen(
-    artist: string,
-    title: string,
-    album?: string | null,
-    durationSecs?: number | null,
-    nowPlaying = false,
+  artist: string,
+  title: string,
+  album?: string | null,
+  durationSecs?: number | null,
+  nowPlaying = false,
 ): Promise<void> {
-    return await invoke('submit_listenbrainz_listen', {
-        artist,
-        title,
-        album: album ?? null,
-        durationSecs: durationSecs ?? null,
-        nowPlaying,
-    });
+  return await invoke("submit_listenbrainz_listen", {
+    artist,
+    title,
+    album: album ?? null,
+    durationSecs: durationSecs ?? null,
+    nowPlaying,
+  });
 }
 
 export interface LbRecommendation {
-    recording_mbid: string | null;
-    artist_name: string;
-    track_name: string;
-    release_name: string | null;
-    score: number | null;
-    /** Local track ID if a match was found in the library, otherwise null. */
-    local_track_id: number | null;
+  recording_mbid: string | null;
+  artist_name: string;
+  track_name: string;
+  release_name: string | null;
+  score: number | null;
+  /** Local track ID if a match was found in the library, otherwise null. */
+  local_track_id: number | null;
 }
 
 /** Fetch personalised recording recommendations from ListenBrainz CF. */
-export async function fetchListenbrainzRecommendations(limit = 50): Promise<LbRecommendation[]> {
-    return await invoke('fetch_listenbrainz_recommendations', { limit });
+export async function fetchListenbrainzRecommendations(
+  limit = 50,
+): Promise<LbRecommendation[]> {
+  return await invoke("fetch_listenbrainz_recommendations", { limit });
 }
 
 // =============================================================================
@@ -907,24 +1100,26 @@ export async function fetchListenbrainzRecommendations(limit = 50): Promise<LbRe
 
 /** Rich artist metadata returned by the MusicBrainz lookup. */
 export interface MbArtistInfo {
-    mbid: string | null;
-    name: string;
-    /** Extra text disambiguating artists with the same name, e.g. "UK band". */
-    disambiguation: string | null;
-    /** Up to 5 genre names sorted by community vote count. */
-    genres: string[];
-    /** English Wikipedia URL if available. */
-    wikipedia_url: string | null;
-    /** First paragraph bio from the Wikipedia article. */
-    bio: string | null;
+  mbid: string | null;
+  name: string;
+  /** Extra text disambiguating artists with the same name, e.g. "UK band". */
+  disambiguation: string | null;
+  /** Up to 5 genre names sorted by community vote count. */
+  genres: string[];
+  /** English Wikipedia URL if available. */
+  wikipedia_url: string | null;
+  /** First paragraph bio from the Wikipedia article. */
+  bio: string | null;
 }
 
 /**
  * Fetch MusicBrainz metadata for a single artist by name.
  * Makes 2 MB requests + optional Wikipedia fetch (rate-limited server-side).
  */
-export async function getArtistMusicBrainzInfo(artistName: string): Promise<MbArtistInfo> {
-    return await invoke('get_artist_musicbrainz_info', { artistName });
+export async function getArtistMusicBrainzInfo(
+  artistName: string,
+): Promise<MbArtistInfo> {
+  return await invoke("get_artist_musicbrainz_info", { artistName });
 }
 
 /**
@@ -932,47 +1127,50 @@ export async function getArtistMusicBrainzInfo(artistName: string): Promise<MbAr
  * Returns up to 5 `[genre, count]` pairs sorted by frequency.
  * `artistLimit` controls how many top artists to query (default 5, max 10).
  */
-export async function getTopGenresFromMb(artistLimit = 5): Promise<[string, number][]> {
-    return await invoke('get_top_genres_from_mb', { artistLimit });
+export async function getTopGenresFromMb(
+  artistLimit = 5,
+): Promise<[string, number][]> {
+  return await invoke("get_top_genres_from_mb", { artistLimit });
 }
 
 /** Result of enriching a local track with MusicBrainz recording data. */
 export interface MbTrackEnrichment {
-    mbid: string | null;
-    genre: string | null;
-    /** ISRC codes (International Standard Recording Codes) for this recording. */
-    isrcs: string[];
+  mbid: string | null;
+  genre: string | null;
+  /** ISRC codes (International Standard Recording Codes) for this recording. */
+  isrcs: string[];
 }
 
 /** Release metadata from MusicBrainz (label, year, country, release type). */
 export interface MbReleaseInfo {
-    mbid: string | null;
-    year: string | null;
-    country: string | null;
-    label: string | null;
-    /** e.g. "Album", "EP", "Single", "Live", "Compilation" */
-    release_type: string | null;
+  mbid: string | null;
+  year: string | null;
+  original_year: string | null;
+  country: string | null;
+  label: string | null;
+  /** e.g. "Album", "EP", "Single", "Live", "Compilation" */
+  release_type: string | null;
 }
 
 /** An artist related to the queried artist on MusicBrainz. */
 export interface MbSimilarArtist {
-    name: string;
-    /** MB relation type e.g. "member of band", "collaboration". */
-    relation_type: string;
-    /** True when this artist has at least one track in the local library. */
-    in_library: boolean;
+  name: string;
+  /** MB relation type e.g. "member of band", "collaboration". */
+  relation_type: string;
+  /** True when this artist has at least one track in the local library. */
+  in_library: boolean;
 }
 
 /** A release group from an artist's MusicBrainz discography. */
 export interface MbDiscographyItem {
-    /** MusicBrainz Release Group ID (UUID). */
-    mbid: string;
-    title: string;
-    year: string | null;
-    /** e.g. "Album", "EP", "Single", "Live" */
-    release_type: string;
-    /** Cover Art Archive URL (250px front cover). May 404 if no art exists. */
-    cover_url: string;
+  /** MusicBrainz Release Group ID (UUID). */
+  mbid: string;
+  title: string;
+  year: string | null;
+  /** e.g. "Album", "EP", "Single", "Live" */
+  release_type: string;
+  /** Cover Art Archive URL (250px front cover). May 404 if no art exists. */
+  cover_url: string;
 }
 
 /**
@@ -980,98 +1178,219 @@ export interface MbDiscographyItem {
  * Writes MBID + genre back to the local DB and returns ISRC codes.
  */
 export async function enrichTrackMetadataMb(
-    trackId: number,
-    artist: string,
-    title: string,
+  trackId: number,
+  artist: string,
+  title: string,
 ): Promise<MbTrackEnrichment> {
-    return await invoke('enrich_track_metadata_mb', { trackId, artist, title });
+  return await invoke("enrich_track_metadata_mb", { trackId, artist, title });
 }
 
 /**
  * Fetch release info (label, year, country, type) for an album from MusicBrainz.
  */
 export async function getReleaseMbInfo(
-    albumName: string,
-    artistName: string,
+  albumName: string,
+  artistName: string,
 ): Promise<MbReleaseInfo> {
-    return await invoke('get_release_mb_info', { albumName, artistName });
+  return await invoke("get_release_mb_info", { albumName, artistName });
+}
+
+/**
+ * One track in a release's full tracklist (returned by `getReleaseDetailMb`).
+ */
+export interface MbReleaseTrack {
+  mbid: string;
+  position: number;
+  disc_number: number;
+  title: string;
+  length_ms: number | null;
+  artist_credit: string | null;
+}
+
+/**
+ * Rich release metadata for the Album Info modal: full tracklist with
+ * MBIDs, barcode, packaging, format, language, Cover Art Archive URLs,
+ * and an optional Wikipedia summary.
+ */
+export interface MbReleaseDetail {
+  mbid: string;
+  release_group_mbid: string;
+  title: string;
+  artist: string;
+  artist_mbid: string | null;
+  year: string | null;
+  original_year: string | null;
+  country: string | null;
+  label: string | null;
+  catalog_number: string | null;
+  barcode: string | null;
+  packaging: string | null;
+  format: string | null;
+  language: string | null;
+  script: string | null;
+  release_type: string | null;
+  track_count: number;
+  total_duration_ms: number | null;
+  cover_url_250: string | null;
+  cover_url_500: string | null;
+  cover_url_1200: string | null;
+  wikipedia_url: string | null;
+  wiki_extract: string | null;
+  tracks: MbReleaseTrack[];
+}
+
+/**
+ * Fetch rich release detail for the Album Info modal. Uses an in-memory
+ * cache (30-day TTL) on the Rust side, keyed by (album, artist).
+ */
+export async function getReleaseDetailMb(
+  albumName: string,
+  artistName: string,
+): Promise<MbReleaseDetail> {
+  return await invoke("get_release_detail_mb", { albumName, artistName });
+}
+
+/**
+ * Bypass the cache and re-fetch the release detail from MusicBrainz.
+ */
+export async function refreshReleaseDetailMb(
+  albumName: string,
+  artistName: string,
+): Promise<MbReleaseDetail> {
+  return await invoke("refresh_release_detail_mb", { albumName, artistName });
+}
+
+/**
+ * Returns the Cover Art Archive URL for a release at the requested size
+ * (250, 500, or 1200). Returns null for invalid sizes. Existence of the
+ * cover is not pre-verified — the URL may 404 if no cover is uploaded.
+ */
+export async function getReleaseCoverArt(
+  releaseId: string,
+  size?: number,
+): Promise<string | null> {
+  return await invoke("get_release_cover_art", { releaseId, size });
+}
+
+export interface AlbumYearEnrichResult {
+  year: number | null;
+  original_year: number | null;
+}
+
+/**
+ * Enrich a single album's year data from MusicBrainz and persist to DB.
+ */
+export async function enrichAlbumYear(
+  albumId: number,
+  albumName: string,
+  artistName: string,
+): Promise<AlbumYearEnrichResult> {
+  return await invoke("enrich_album_year", { albumId, albumName, artistName });
+}
+
+export interface BatchEnrichResult {
+  enriched: number;
+  failed: number;
+  total: number;
+}
+
+/**
+ * Enrich all albums missing original_year from MusicBrainz.
+ * Emits `album-enrich-progress` events with `{ done, total }`.
+ */
+export async function enrichAllAlbumYears(): Promise<BatchEnrichResult> {
+  return await invoke("enrich_all_album_years");
 }
 
 /**
  * Find artists related to `artistName` on MusicBrainz.
  * Each result includes whether the artist is present in the local library.
  */
-export async function getSimilarArtistsMb(artistName: string): Promise<MbSimilarArtist[]> {
-    return await invoke('get_similar_artists_mb', { artistName });
+export async function getSimilarArtistsMb(
+  artistName: string,
+): Promise<MbSimilarArtist[]> {
+  return await invoke("get_similar_artists_mb", { artistName });
 }
 
 /**
  * Fetch the full MusicBrainz discography (release groups) for an artist,
  * sorted newest-first.
  */
-export async function getArtistDiscographyMb(artistName: string): Promise<MbDiscographyItem[]> {
-    return await invoke('get_artist_discography_mb', { artistName });
+export async function getArtistDiscographyMb(
+  artistName: string,
+): Promise<MbDiscographyItem[]> {
+  return await invoke("get_artist_discography_mb", { artistName });
 }
 
 // ── MusicBrainz Discovery Search ─────────────────────────────────────────────
 
 /** A single artist result from a MusicBrainz discovery search. */
 export interface MbDiscoverArtist {
-    mbid: string;
-    name: string;
-    disambiguation: string | null;
-    artist_type: string | null;
-    country: string | null;
-    genres: string[];
-    active_years: string | null;
+  mbid: string;
+  name: string;
+  disambiguation: string | null;
+  artist_type: string | null;
+  country: string | null;
+  genres: string[];
+  active_years: string | null;
 }
 
 /** A single release-group result from a MusicBrainz discovery search. */
 export interface MbDiscoverRelease {
-    mbid: string;
-    title: string;
-    artist_name: string;
-    artist_mbid: string | null;
-    release_type: string;
-    year: string | null;
-    country: string | null;
-    genres: string[];
+  mbid: string;
+  title: string;
+  artist_name: string;
+  artist_mbid: string | null;
+  release_type: string;
+  year: string | null;
+  country: string | null;
+  genres: string[];
 }
 
 /**
  * Search MusicBrainz for artists matching a free-text query.
  * Returns up to `limit` results (default 15, max 25).
  */
-export async function searchArtistsMb(query: string, limit?: number): Promise<MbDiscoverArtist[]> {
-    return await invoke('search_artists_mb', { query, limit });
+export async function searchArtistsMb(
+  query: string,
+  limit?: number,
+): Promise<MbDiscoverArtist[]> {
+  return await invoke("search_artists_mb", { query, limit });
 }
 
 /**
  * Search MusicBrainz for release groups (albums / EPs / singles)
  * matching a free-text query. Returns up to `limit` results.
  */
-export async function searchReleasesMb(query: string, limit?: number): Promise<MbDiscoverRelease[]> {
-    return await invoke('search_releases_mb', { query, limit });
+export async function searchReleasesMb(
+  query: string,
+  limit?: number,
+): Promise<MbDiscoverRelease[]> {
+  return await invoke("search_releases_mb", { query, limit });
 }
 
 /** A single track from a MusicBrainz release. */
 export interface MbTrack {
-    mbid: string;
-    title: string;
-    artist: string;
-    duration_ms: number | null;
-    track_number: number;
-    disc_number: number;
+  mbid: string;
+  title: string;
+  artist: string;
+  duration_ms: number | null;
+  track_number: number;
+  disc_number: number;
 }
 
 /** Fetch all tracks for a given release-group MBID. */
-export async function getReleaseGroupTracksMb(rgMbid: string): Promise<MbTrack[]> {
-    return await invoke('get_release_group_tracks_mb', { rgMbid });
+export async function getReleaseGroupTracksMb(
+  rgMbid: string,
+): Promise<MbTrack[]> {
+  return await invoke("get_release_group_tracks_mb", { rgMbid });
 }
 
 /** Fetch top tracks for an artist by MBID. */
-export async function getArtistTopTracksMb(artistMbid: string): Promise<MbTrack[]> {
-    return await invoke('get_artist_top_tracks_mb', { artistMbid });
+export async function getArtistTopTracksMb(
+  artistMbid: string,
+): Promise<MbTrack[]> {
+  return await invoke("get_artist_top_tracks_mb", { artistMbid });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1081,20 +1400,162 @@ export async function getArtistTopTracksMb(artistMbid: string): Promise<MbTrack[
 /**
  * Proxy fetch command - makes HTTP requests from the Rust backend to bypass CORS.
  */
-export async function proxyFetch(url: string, method?: string, headers?: Record<string, string>, body?: string): Promise<any> {
-    return await invoke('proxy_fetch', { request: { url, method, headers, body } });
+export async function proxyFetch(
+  url: string,
+  method?: string,
+  headers?: Record<string, string>,
+  body?: string,
+): Promise<any> {
+  return await invoke("proxy_fetch", {
+    request: { url, method, headers, body },
+  });
 }
 
 /**
  * Fetch binary data as a base64 string from the Rust backend (bypasses CORS).
  */
 export async function proxyFetchBytes(url: string): Promise<string> {
-    return await invoke('proxy_fetch_bytes', { url });
+  return await invoke("proxy_fetch_bytes", { url });
 }
 
 /**
  * Save a base64-encoded image to the user's gallery or download folder.
  */
-export async function saveImageToGallery(base64Data: string, filename: string): Promise<string> {
-    return await invoke('save_image_to_gallery', { base64Data, filename });
+export async function saveImageToGallery(
+  base64Data: string,
+  filename: string,
+): Promise<string> {
+  return await invoke("save_image_to_gallery", { base64Data, filename });
+}
+
+// =============================================================================
+// SQUEEZE CONNECT
+// =============================================================================
+
+export interface SqueezePlayerInfo {
+  mac: string;
+  name: string;
+  state: "Disconnected" | "Stopped" | "Buffering" | "Playing" | "Paused";
+  capabilities: string;
+  current_track: SqueezeQueueTrack | null;
+  elapsed_ms: number;
+  volume: number;
+  repeat: "Off" | "One" | "All";
+  shuffle: boolean;
+  queue_length: number;
+  queue_position: number | null;
+}
+
+export interface SqueezeQueueTrack {
+  id: number;
+  title: string;
+  artist: string;
+  album: string;
+  path: string;
+  duration: number;
+  format: string;
+}
+
+export async function squeezeStartServer(): Promise<void> {
+  return await invoke("squeeze_start_server");
+}
+
+export async function squeezeStopServer(): Promise<void> {
+  return await invoke("squeeze_stop_server");
+}
+
+export async function squeezeIsRunning(): Promise<boolean> {
+  return await invoke("squeeze_is_running");
+}
+
+export async function squeezeGetPlayers(): Promise<SqueezePlayerInfo[]> {
+  return await invoke("squeeze_get_players");
+}
+
+export async function squeezeGetPlayerState(
+  mac: string,
+): Promise<SqueezePlayerInfo> {
+  return await invoke("squeeze_get_player_state", { mac });
+}
+
+export async function squeezePlay(
+  mac: string,
+  trackIds: number[],
+  startIndex: number,
+): Promise<void> {
+  return await invoke("squeeze_play", { mac, trackIds, startIndex });
+}
+
+export async function squeezePause(mac: string): Promise<void> {
+  return await invoke("squeeze_pause", { mac });
+}
+
+export async function squeezeResume(mac: string): Promise<void> {
+  return await invoke("squeeze_resume", { mac });
+}
+
+export async function squeezeStop(mac: string): Promise<void> {
+  return await invoke("squeeze_stop", { mac });
+}
+
+export async function squeezeSetVolume(
+  mac: string,
+  volume: number,
+): Promise<void> {
+  return await invoke("squeeze_set_volume", { mac, volume });
+}
+
+export async function squeezeNext(mac: string): Promise<void> {
+  return await invoke("squeeze_next", { mac });
+}
+
+export async function squeezePrevious(mac: string): Promise<void> {
+  return await invoke("squeeze_previous", { mac });
+}
+
+export async function squeezeSeek(
+  mac: string,
+  positionSeconds: number,
+): Promise<void> {
+  return await invoke("squeeze_seek", { mac, positionSeconds });
+}
+
+export async function squeezeSetRepeat(
+  mac: string,
+  mode: string,
+): Promise<void> {
+  return await invoke("squeeze_set_repeat", { mac, mode });
+}
+
+export async function squeezeSetShuffle(
+  mac: string,
+  enabled: boolean,
+): Promise<void> {
+  return await invoke("squeeze_set_shuffle", { mac, enabled });
+}
+
+export async function squeezeGetQueue(
+  mac: string,
+): Promise<SqueezeQueueTrack[]> {
+  return await invoke("squeeze_get_queue", { mac });
+}
+
+export async function squeezeInsertQueue(
+  mac: string,
+  trackIds: number[],
+  position: number,
+): Promise<void> {
+  return await invoke("squeeze_insert_queue", { mac, trackIds, position });
+}
+
+export async function squeezeUpdateQueue(
+  mac: string,
+  trackIds: number[],
+  currentTrackId: number,
+): Promise<void> {
+  return await invoke("squeeze_update_queue", {
+    mac,
+    trackIds,
+    currentTrackId,
+  });
 }

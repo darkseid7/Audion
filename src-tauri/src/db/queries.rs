@@ -1,6 +1,7 @@
 // Database query operations
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Instant;
 use::std::path::Path;
@@ -26,6 +27,8 @@ pub struct Track {
     pub disc_number: Option<i32>,
     pub metadata_json: Option<String>,
     pub date_added: Option<String>,
+    #[serde(default)]
+    pub play_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,8 @@ pub struct Album {
     pub artist: Option<String>,
     pub art_data: Option<String>,
     pub art_path: Option<String>,
+    pub year: Option<i32>,
+    pub original_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,9 +78,156 @@ pub struct TrackInsert {
     pub local_src: Option<String>,
     pub musicbrainz_recording_id: Option<String>,
     pub metadata_json: Option<String>,
+    pub file_modified_at: Option<i64>,
+}
+
+fn read_album_artist_from_metadata(metadata_json: Option<&str>) -> Option<String> {
+    let json = metadata_json?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object()?;
+
+    for (key, val) in object {
+        let normalized_key: String = key
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '_' | '-'))
+            .collect::<String>()
+            .to_lowercase();
+
+        if normalized_key == "albumartist"
+            || normalized_key == "albumartists"
+            || normalized_key == "tpe2"
+        {
+            if let Some(s) = val.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+
+            if let Some(arr) = val.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract a release year from track metadata_json.
+/// Looks specifically at "Year", "Date", "TDRC", "TYER" keys.
+fn read_year_from_metadata(metadata_json: Option<&str>) -> Option<i32> {
+    let json = metadata_json?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object()?;
+
+    for (key, val) in object {
+        let k = key.to_lowercase();
+        if k != "year" && k != "date" && k != "tdrc" && k != "tyer" && k != "originaldate" {
+            continue;
+        }
+        let text = match val {
+            Value::Number(n) => {
+                if let Some(y) = n.as_i64() {
+                    if (1900..=2100).contains(&y) {
+                        return Some(y as i32);
+                    }
+                }
+                continue;
+            }
+            Value::String(s) => s.clone(),
+            _ => continue,
+        };
+        // Extract 4-digit year from strings like "2015", "2015-03-20", etc.
+        if let Some(m) = regex_extract_year(&text) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn regex_extract_year(text: &str) -> Option<i32> {
+    for word in text.split(|c: char| !c.is_ascii_digit()) {
+        if word.len() == 4 {
+            if let Ok(y) = word.parse::<i32>() {
+                if (1900..=2100).contains(&y) {
+                    return Some(y);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn normalize_artist_for_album_key(artist: &str) -> Option<String> {
+    let trimmed = artist.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let separators = [" feat. ", " feat ", " ft. ", " ft ", " featuring "];
+
+    let mut cut_index: Option<usize> = None;
+    for sep in separators {
+        if let Some(idx) = lowered.find(sep) {
+            cut_index = Some(match cut_index {
+                Some(current) => current.min(idx),
+                None => idx,
+            });
+        }
+    }
+
+    let base = if let Some(idx) = cut_index {
+        trimmed[..idx].trim()
+    } else {
+        trimmed
+    };
+
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+fn resolve_album_artist(track: &TrackInsert) -> Option<String> {
+    if let Some(from_metadata) = read_album_artist_from_metadata(track.metadata_json.as_deref()) {
+        return Some(from_metadata);
+    }
+
+    track
+        .artist
+        .as_deref()
+        .and_then(normalize_artist_for_album_key)
 }
 
 // Track operations
+
+/// Get a map of file path -> file_modified_at for all local tracks.
+/// Used by incremental rescan to skip unchanged files.
+pub fn get_track_mtimes(conn: &Connection) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, file_modified_at FROM tracks WHERE file_modified_at IS NOT NULL AND source_type = 'local'"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        if let Ok((path, mtime)) = row {
+            map.insert(path, mtime);
+        }
+    }
+    Ok(map)
+}
+
 pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<(i64, bool)> {
     // Check if a track with the same content_hash already exists (skip duplicates)
     if let Some(ref hash) = track.content_hash {
@@ -94,53 +246,60 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
     }
 
     // Check if track already exists by path
-    let existing_id: Option<i64> = conn
+    let existing_track: Option<(i64, Option<i64>)> = conn
         .query_row(
-            "SELECT id FROM tracks WHERE path = ?1",
+            "SELECT id, album_id FROM tracks WHERE path = ?1",
             params![track.path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
 
     // First, handle album if present
+    let album_artist = resolve_album_artist(track);
+    let album_year = read_year_from_metadata(track.metadata_json.as_deref());
     let album_id = if let Some(album_name) = &track.album {
-        let artist = track.artist.as_deref();
+        let artist = album_artist.as_deref();
         Some(get_or_create_album(
             conn,
             album_name,
             artist,
             track.album_art.as_deref(),
+            album_year,
+            None, // original_year — populated later via MusicBrainz enrichment
         )?)
     } else {
         None
     };
 
-    if let Some(track_id) = existing_id {
+    if let Some((track_id, previous_album_id)) = existing_track {
         // update existing track
         conn.execute(
             "UPDATE tracks SET
                 title = ?1,
                 artist = ?2,
                 album = ?3,
-                track_number = ?4,
-                duration = ?5,
-                album_id = ?6,
-                format = ?7,
-                bitrate = ?8,
-                source_type = ?9,
-                cover_url = ?10,
-                external_id = ?11,
-                content_hash = ?12,
-                local_src = ?13,
+                album_artist = ?4,
+                track_number = ?5,
+                duration = ?6,
+                album_id = ?7,
+                format = ?8,
+                bitrate = ?9,
+                source_type = ?10,
+                cover_url = ?11,
+                external_id = ?12,
+                content_hash = ?13,
+                local_src = ?14,
                 disc_number = ?15,
                 musicbrainz_recording_id = ?16,
                 metadata_json = ?17,
+                file_modified_at = ?18,
                 date_added = COALESCE(date_added, CURRENT_TIMESTAMP)
-             WHERE id = ?14",
+             WHERE id = ?19",
             params![
                 track.title,
                 track.artist,
                 track.album,
+                album_artist,
                 track.track_number,
                 track.duration,
                 album_id,
@@ -151,24 +310,39 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 track.external_id,
                 track.content_hash,
                 track.local_src,
-                track_id, // Use existing ID
                 track.disc_number,
                 track.musicbrainz_recording_id,
                 track.metadata_json,
+                track.file_modified_at,
+                track_id, // Use existing ID
             ],
         )?;
+
+        if let Some(old_album_id) = previous_album_id {
+            if Some(old_album_id) != album_id {
+                let _ = conn.execute(
+                    "DELETE FROM albums
+                     WHERE id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM tracks WHERE album_id = ?1
+                       )",
+                    params![old_album_id],
+                );
+            }
+        }
 
         Ok((track_id, false)) // Return (existing_id, was_new = false)
     } else {
         // insert new track
         conn.execute(
-            "INSERT INTO tracks (path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, date_added)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)",
+            "INSERT INTO tracks (path, title, artist, album, album_artist, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, content_hash, local_src, disc_number, musicbrainz_recording_id, metadata_json, file_modified_at, date_added)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, 'local'), ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, CURRENT_TIMESTAMP)",
             params![
                 track.path,
                 track.title,
                 track.artist,
                 track.album,
+                album_artist,
                 track.track_number,
                 track.duration,
                 album_id,
@@ -182,6 +356,7 @@ pub fn insert_or_update_track(conn: &Connection, track: &TrackInsert) -> Result<
                 track.disc_number,
                 track.musicbrainz_recording_id,
                 track.metadata_json,
+                track.file_modified_at,
             ],
         )?;
 
@@ -216,7 +391,7 @@ pub fn delete_track(conn: &Connection, track_id: i64) -> Result<bool> {
 /// Get a track by its ID
 pub fn get_track_by_id(conn: &Connection, track_id: i64) -> Result<Option<Track>> {
     conn.query_row(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added
+        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added, COALESCE(play_count, 0)
          FROM tracks WHERE id = ?1",
         params![track_id],
         |row| {
@@ -240,6 +415,7 @@ pub fn get_track_by_id(conn: &Connection, track_id: i64) -> Result<Option<Track>
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         },
     )
@@ -251,12 +427,18 @@ fn get_or_create_album(
     name: &str,
     artist: Option<&str>,
     art_data: Option<&[u8]>,
+    year: Option<i32>,
+    original_year: Option<i32>,
 ) -> Result<i64> {
-    // Match by album name only to avoid splitting albums when tracks have different artists
+    // Match by album name + artist to prevent collisions like
+    // different artists sharing common titles (e.g. "Greatest Hits").
+    let normalized_artist = artist.map(str::trim).filter(|s| !s.is_empty());
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM albums WHERE name = ?1",
-            params![name],
+            "SELECT id FROM albums
+             WHERE lower(name) = lower(?1)
+               AND lower(COALESCE(artist, '')) = lower(COALESCE(?2, ''))",
+            params![name.trim(), normalized_artist],
             |row| row.get(0),
         )
         .ok();
@@ -269,13 +451,27 @@ fn get_or_create_album(
                 params![album_artist, id],
             )?;
         }
+        // Update year if not set yet
+        if let Some(y) = year {
+            conn.execute(
+                "UPDATE albums SET year = ?1 WHERE id = ?2 AND year IS NULL",
+                params![y, id],
+            )?;
+        }
+        // Update original_year if not set yet
+        if let Some(y) = original_year {
+            conn.execute(
+                "UPDATE albums SET original_year = ?1 WHERE id = ?2 AND original_year IS NULL",
+                params![y, id],
+            )?;
+        }
         return Ok(id);
     }
 
-    // Create new album (without art_data, we'll save file separately)
+    // Create new album
     conn.execute(
-        "INSERT INTO albums (name, artist) VALUES (?1, ?2)",
-        params![name, artist],
+        "INSERT INTO albums (name, artist, year, original_year) VALUES (?1, ?2, ?3, ?4)",
+        params![name.trim(), normalized_artist, year, original_year],
     )?;
 
     Ok(conn.last_insert_rowid())
@@ -328,7 +524,7 @@ pub fn search_tracks(
     offset: i32,
 ) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added 
+        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added, COALESCE(play_count, 0)
          FROM tracks 
          WHERE id IN (SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?1)
          ORDER BY artist, album, disc_number, track_number, title
@@ -357,6 +553,7 @@ pub fn search_tracks(
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -367,9 +564,9 @@ pub fn search_tracks(
 /// Get paginated tracks
 pub fn get_tracks_paginated(conn: &Connection, limit: i32, offset: i32) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks 
-         ORDER BY artist, album, disc_number, track_number, title
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
+         FROM tracks t
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title
          LIMIT ?1 OFFSET ?2",
     )?;
 
@@ -395,6 +592,7 @@ pub fn get_tracks_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -408,7 +606,7 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
     println!("[DB] get_all_tracks: Preparing query...");
 
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added 
+        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added, COALESCE(play_count, 0)
          FROM tracks ORDER BY artist, album, disc_number, track_number, title",
     )?;
 
@@ -438,6 +636,7 @@ pub fn get_all_tracks(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -460,8 +659,9 @@ pub fn get_all_tracks_lightweight(conn: &Connection) -> Result<Vec<Track>> {
     println!("[DB] get_all_tracks_lightweight: Preparing query...");
 
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, disc_number, metadata_json, date_added 
-         FROM tracks ORDER BY artist, album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
+         FROM tracks t
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let prepare_time = query_start.elapsed();
@@ -493,6 +693,7 @@ pub fn get_all_tracks_lightweight(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(14)?,
                 metadata_json: row.get(15)?,
                 date_added: row.get(16)?,
+                play_count: row.get(17)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -516,8 +717,9 @@ pub fn get_all_tracks_with_paths(conn: &Connection) -> Result<Vec<Track>> {
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks ORDER BY artist, album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
+         FROM tracks t
+         ORDER BY t.artist, t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -542,6 +744,7 @@ pub fn get_all_tracks_with_paths(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -624,8 +827,12 @@ pub fn get_album_art_path(conn: &Connection, album_id: i64) -> Result<Option<Str
 pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt = conn
-        .prepare("SELECT id, name, artist, art_data, art_path FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, a.art_data, a.art_path, a.year, a.original_year
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -635,6 +842,8 @@ pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
                 artist: row.get(2)?,
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -653,7 +862,12 @@ pub fn get_all_albums(conn: &Connection) -> Result<Vec<Album>> {
 pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt = conn.prepare("SELECT id, name, artist FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -663,6 +877,8 @@ pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
                 artist: row.get(2)?,
                 art_data: None,
                 art_path: None,
+                year: None,
+                original_year: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -681,8 +897,12 @@ pub fn get_all_albums_lightweight(conn: &Connection) -> Result<Vec<Album>> {
 pub fn get_all_albums_with_paths(conn: &Connection) -> Result<Vec<Album>> {
     let query_start = Instant::now();
 
-    let mut stmt =
-        conn.prepare("SELECT id, name, artist, art_path FROM albums ORDER BY artist, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, a.art_path, a.year, a.original_year
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
 
     let albums = stmt
         .query_map([], |row| {
@@ -692,6 +912,8 @@ pub fn get_all_albums_with_paths(conn: &Connection) -> Result<Vec<Album>> {
                 artist: row.get(2)?,
                 art_data: None,
                 art_path: row.get(3)?,
+                year: row.get(4)?,
+                original_year: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -711,8 +933,10 @@ pub fn get_albums_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
     let query_start = Instant::now();
 
     let mut stmt = conn.prepare(
-        "SELECT id, name, artist, art_path FROM albums 
-         ORDER BY artist, name
+        "SELECT a.id, a.name, a.artist, a.art_path, a.year, a.original_year
+         FROM albums a
+         WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name
          LIMIT ?1 OFFSET ?2",
     )?;
 
@@ -724,6 +948,8 @@ pub fn get_albums_paginated(conn: &Connection, limit: i32, offset: i32) -> Resul
                 artist: row.get(2)?,
                 art_data: None,
                 art_path: row.get(3)?,
+                year: row.get(4)?,
+                original_year: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -773,8 +999,9 @@ pub fn get_all_artists(conn: &Connection) -> Result<Vec<Artist>> {
 
 pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks WHERE album_id = ?1 ORDER BY disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
+         FROM tracks t
+         WHERE t.album_id = ?1 ORDER BY t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -799,6 +1026,7 @@ pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -808,8 +1036,9 @@ pub fn get_tracks_by_album(conn: &Connection, album_id: i64) -> Result<Vec<Track
 
 pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, track_number, duration, album_id, format, bitrate, source_type, cover_url, external_id, local_src, track_cover, track_cover_path, disc_number, metadata_json, date_added 
-         FROM tracks WHERE artist = ?1 ORDER BY album, disc_number, track_number, title",
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
+         FROM tracks t
+         WHERE t.artist = ?1 ORDER BY t.album, t.disc_number, t.track_number, t.title",
     )?;
 
     let tracks = stmt
@@ -834,6 +1063,7 @@ pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -843,7 +1073,7 @@ pub fn get_tracks_by_artist(conn: &Connection, artist: &str) -> Result<Vec<Track
 
 pub fn get_album_by_id(conn: &Connection, album_id: i64) -> Result<Option<Album>> {
     conn.query_row(
-        "SELECT id, name, artist, art_data, art_path FROM albums WHERE id = ?1",
+        "SELECT id, name, artist, art_data, art_path, year, original_year FROM albums WHERE id = ?1",
         [album_id],
         |row| {
             Ok(Album {
@@ -852,10 +1082,61 @@ pub fn get_album_by_id(conn: &Connection, album_id: i64) -> Result<Option<Album>
                 artist: row.get(2)?,
                 art_data: row.get(3)?,
                 art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
             })
         },
     )
     .optional()
+}
+
+/// Update album year and/or original_year from MusicBrainz enrichment.
+pub fn update_album_years(
+    conn: &Connection,
+    album_id: i64,
+    year: Option<i32>,
+    original_year: Option<i32>,
+) -> Result<()> {
+    if let Some(y) = year {
+        conn.execute(
+            "UPDATE albums SET year = ?1 WHERE id = ?2 AND year IS NULL",
+            params![y, album_id],
+        )?;
+    }
+    if let Some(oy) = original_year {
+        conn.execute(
+            "UPDATE albums SET original_year = ?1 WHERE id = ?2 AND original_year IS NULL",
+            params![oy, album_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Get albums that are missing original_year (candidates for MB enrichment).
+pub fn get_albums_missing_original_year(conn: &Connection) -> Result<Vec<Album>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, NULL, a.art_path, a.year, a.original_year
+         FROM albums a
+         WHERE a.original_year IS NULL
+           AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         ORDER BY a.artist, a.name",
+    )?;
+
+    let albums = stmt
+        .query_map([], |row| {
+            Ok(Album {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                artist: row.get(2)?,
+                art_data: row.get(3)?,
+                art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(albums)
 }
 
 // Playlist operations
@@ -888,7 +1169,7 @@ pub fn get_all_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
 
 pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added 
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
          INNER JOIN playlist_tracks pt ON t.id = pt.track_id
          WHERE pt.playlist_id = ?1
@@ -917,6 +1198,7 @@ pub fn get_playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Tr
                 disc_number: row.get(16)?,
                 metadata_json: row.get(17)?,
                 date_added: row.get(18)?,
+                play_count: row.get(19)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -1202,7 +1484,7 @@ pub fn get_liked_track_ids(conn: &Connection) -> Result<Vec<i64>> {
 
 pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, COALESCE(t.play_count, 0)
          FROM tracks t
          INNER JOIN liked_tracks lt ON t.id = lt.track_id
          ORDER BY lt.liked_at DESC",
@@ -1230,11 +1512,75 @@ pub fn get_liked_tracks(conn: &Connection) -> Result<Vec<Track>> {
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(18)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
 
     Ok(tracks)
+}
+
+// ============================================================================
+// Liked Albums
+// ============================================================================
+
+pub fn like_album(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO liked_albums (album_id) VALUES (?1)",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn unlike_album(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM liked_albums WHERE album_id = ?1",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_liked_album_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT album_id FROM liked_albums ORDER BY liked_at DESC")?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+pub fn add_album_to_listen_later(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO listen_later_albums (album_id) VALUES (?1)",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn remove_album_from_listen_later(conn: &Connection, album_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM listen_later_albums WHERE album_id = ?1",
+        params![album_id],
+    )?;
+    Ok(())
+}
+
+pub fn is_album_in_listen_later(conn: &Connection, album_id: i64) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM listen_later_albums WHERE album_id = ?1",
+        params![album_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+pub fn get_listen_later_album_ids(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT album_id FROM listen_later_albums ORDER BY saved_at DESC",
+    )?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 // ============================================================================
@@ -1250,6 +1596,10 @@ pub fn record_play(
     conn.execute(
         "INSERT INTO play_history (track_id, album_id, duration_played) VALUES (?1, ?2, ?3)",
         params![track_id, album_id, duration_played],
+    )?;
+    conn.execute(
+        "UPDATE tracks SET play_count = COALESCE(play_count, 0) + 1 WHERE id = ?1",
+        params![track_id],
     )?;
     Ok(())
 }
@@ -1288,6 +1638,7 @@ pub fn get_top_tracks(conn: &Connection, limit: i32) -> Result<Vec<TrackWithCoun
                     disc_number: row.get(15)?,
                     metadata_json: row.get(16)?,
                     date_added: row.get(17)?,
+                    play_count: row.get(18)?,
                 },
                 play_count: row.get(18)?,
             })
@@ -1318,6 +1669,8 @@ pub fn get_top_albums(conn: &Connection, limit: i32) -> Result<Vec<AlbumWithCoun
                     artist: row.get(2)?,
                     art_data: row.get(3)?,
                     art_path: row.get(4)?,
+                    year: None,
+                    original_year: None,
                 },
                 play_count: row.get(5)?,
             })
@@ -1329,7 +1682,7 @@ pub fn get_top_albums(conn: &Connection, limit: i32) -> Result<Vec<AlbumWithCoun
 
 pub fn get_recently_played(conn: &Connection, limit: i32) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, MAX(ph.played_at) as last_played
+        "SELECT DISTINCT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, MAX(ph.played_at) as last_played, COALESCE(COUNT(ph.id), 0) as pc
          FROM tracks t
          INNER JOIN play_history ph ON t.id = ph.track_id
          GROUP BY t.id
@@ -1359,6 +1712,88 @@ pub fn get_recently_played(conn: &Connection, limit: i32) -> Result<Vec<Track>> 
                 disc_number: row.get(15)?,
                 metadata_json: row.get(16)?,
                 date_added: row.get(17)?,
+                play_count: row.get(19)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(tracks)
+}
+
+/// Returns the most-recently-played albums (deduped by album_id), ordered
+/// by the most recent play time of any track in that album. Used by the
+/// "Jump Back In" section on the home screen.
+pub fn get_recently_played_albums(conn: &Connection, limit: i32) -> Result<Vec<Album>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.name, a.artist, a.art_data, a.art_path, a.year, a.original_year,
+                MAX(ph.played_at) as last_played
+         FROM albums a
+         INNER JOIN play_history ph ON a.id = ph.album_id
+         WHERE ph.album_id IS NOT NULL
+         GROUP BY a.id
+         ORDER BY last_played DESC
+         LIMIT ?1",
+    )?;
+
+    let albums = stmt
+        .query_map(params![limit], |row| {
+            Ok(Album {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                artist: row.get(2)?,
+                art_data: row.get(3)?,
+                art_path: row.get(4)?,
+                year: row.get(5)?,
+                original_year: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(albums)
+}
+
+/// Returns tracks played since the given ISO timestamp. Used by the
+/// "This Week" section on the home screen. Caller computes the
+/// timestamp (e.g. start of current week) in local time and passes
+/// the ISO string in.
+pub fn get_recently_played_since(
+    conn: &Connection,
+    since_iso: &str,
+    limit: i32,
+) -> Result<Vec<Track>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT t.id, t.path, t.title, t.artist, t.album, t.track_number, t.duration, t.album_id, t.format, t.bitrate, t.source_type, t.cover_url, t.external_id, t.local_src, t.track_cover_path, t.disc_number, t.metadata_json, t.date_added, MAX(ph.played_at) as last_played
+         FROM tracks t
+         INNER JOIN play_history ph ON t.id = ph.track_id
+         WHERE ph.played_at >= ?1
+         GROUP BY t.id
+         ORDER BY last_played DESC
+         LIMIT ?2",
+    )?;
+
+    let tracks = stmt
+        .query_map(params![since_iso, limit], |row| {
+            Ok(Track {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                track_number: row.get(5)?,
+                duration: row.get(6)?,
+                album_id: row.get(7)?,
+                format: row.get(8)?,
+                bitrate: row.get(9)?,
+                source_type: row.get(10)?,
+                cover_url: row.get(11)?,
+                external_id: row.get(12)?,
+                local_src: row.get(13)?,
+                track_cover_path: row.get(14)?,
+                disc_number: row.get(15)?,
+                metadata_json: row.get(16)?,
+                date_added: row.get(17)?,
+                play_count: Some(0),
+                track_cover: None,
             })
         })?
         .collect::<Result<Vec<_>>>()?;

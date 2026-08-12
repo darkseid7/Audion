@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { selectMusicFolder, addFolder, rescanMusic } from "$lib/api/tauri";
+  import { selectMusicFolder, addFolder, rescanMusic, hardRescanMusic } from "$lib/api/tauri";
   import {
     loadLibrary,
-    loadAlbumsAndArtists,
     loadPlaylists,
     clearLibrary,
   } from "$lib/stores/library";
@@ -38,9 +37,11 @@
       if (path) {
         isScanning = true;
 
-        // Start progressive scan (clearExisting = true to start fresh)
+        // Set up progressive loading listeners (don't clear existing tracks —
+        // incremental scan only processes changed files, so clearing would
+        // lose all unchanged tracks and their play_counts from the UI)
         const scanStart = performance.now();
-        await progressiveScan.startScan(true);
+        await progressiveScan.startScan(false);
         console.log(
           ` [TIMING] progressiveScan.startScan took ${(performance.now() - scanStart).toFixed(2)}ms`,
         );
@@ -66,19 +67,12 @@
           `Scan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
         );
 
-        // Load albums/artists after progressive track loading completes
-        // this was a huge pain point. i tried to load them simultaneously
-        // but the problems it created, are waaaay too big for minimal benifit
-        const albumsStart = performance.now();
-        await loadAlbumsAndArtists();
+        // Reload full library to ensure play_counts, sort metadata, and all
+        // unchanged tracks are present in the store
+        const reloadStart = performance.now();
+        await Promise.all([loadLibrary(), loadPlaylists()]);
         console.log(
-          ` [TIMING] loadAlbumsAndArtists took ${(performance.now() - albumsStart).toFixed(2)}ms`,
-        );
-
-        const playlistsStart = performance.now();
-        await loadPlaylists();
-        console.log(
-          ` [TIMING] loadPlaylists took ${(performance.now() - playlistsStart).toFixed(2)}ms`,
+          ` [TIMING] loadLibrary+loadPlaylists took ${(performance.now() - reloadStart).toFixed(2)}ms`,
         );
 
         console.log(
@@ -119,9 +113,10 @@
 
       isScanning = true;
 
-      // Clear existing tracks and set up progressive loading
+      // Set up progressive loading listeners (don't clear — incremental scan
+      // only touches changed files, clearing would lose play_counts)
       const scanStart = performance.now();
-      await progressiveScan.startScan(true); // true = clear existing tracks
+      await progressiveScan.startScan(false);
       console.log(
         ` [TIMING] progressiveScan.startScan took ${(performance.now() - scanStart).toFixed(2)}ms`,
       );
@@ -140,17 +135,12 @@
         `Rescan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
       );
 
-      // Load albums/artists after progressive track loading completes
-      const albumsStart = performance.now();
-      await loadAlbumsAndArtists();
+      // Reload full library so play_counts, sort metadata, and all tracks
+      // (including unchanged ones) are correct in the store
+      const reloadStart = performance.now();
+      await Promise.all([loadLibrary(), loadPlaylists()]);
       console.log(
-        ` [TIMING] loadAlbumsAndArtists took ${(performance.now() - albumsStart).toFixed(2)}ms`,
-      );
-
-      const playlistsStart = performance.now();
-      await loadPlaylists();
-      console.log(
-        ` [TIMING] loadPlaylists took ${(performance.now() - playlistsStart).toFixed(2)}ms`,
+        ` [TIMING] loadLibrary+loadPlaylists took ${(performance.now() - reloadStart).toFixed(2)}ms`,
       );
 
       console.log(
@@ -174,6 +164,52 @@
     } catch (error) {
       console.error("Failed to rescan:", error);
       addToast("Failed to rescan library", "error");
+    } finally {
+      isScanning = false;
+      progressiveScan.reset();
+    }
+  }
+
+  async function handleHardRescan() {
+    closeMenus();
+
+    const confirmed = await confirm(
+      "Hard rescan re-processes ALL files regardless of cache. This may take a while. Continue?",
+      { title: "Hard Rescan", confirmLabel: "Rescan All", danger: true },
+    );
+
+    if (!confirmed) return;
+
+    try {
+      isScanning = true;
+      await progressiveScan.startScan(false);
+
+      const result = await hardRescanMusic();
+
+      if (result.errors.length > 0) {
+        console.warn("Hard rescan errors:", result.errors);
+      }
+
+      console.log(
+        `Hard rescan complete: ${result.tracks_added} added, ${result.tracks_updated} updated, ${result.tracks_deleted} deleted`,
+      );
+
+      await Promise.all([loadLibrary(), loadPlaylists()]);
+
+      const parts = [];
+      if (result.tracks_added > 0) parts.push(`${result.tracks_added} added`);
+      if (result.tracks_updated > 0) parts.push(`${result.tracks_updated} updated`);
+      if (result.tracks_deleted > 0) parts.push(`${result.tracks_deleted} deleted`);
+
+      const message =
+        parts.length > 0
+          ? `Hard rescan complete: ${parts.join(", ")}`
+          : "Hard rescan complete - no changes";
+
+      addToast(message, "success", 4000);
+    } catch (error) {
+      console.error("Failed to hard rescan:", error);
+      addToast("Failed to hard rescan library", "error");
     } finally {
       isScanning = false;
       progressiveScan.reset();
@@ -261,6 +297,14 @@
           </svg>
           <span>Rescan Library</span>
           <span class="shortcut">Ctrl+R</span>
+        </button>
+        <button class="menu-item" on:click={handleHardRescan} disabled={isScanning}>
+          <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+            <path
+              d="M12 5V2L8 6l4 4V7c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.97 20 14.04 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 8.74C4.46 9.97 4 11.9 4 13.94c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"
+            />
+          </svg>
+          <span>Hard Rescan</span>
         </button>
       </div>
 

@@ -16,6 +16,11 @@
   import { loadLibrary, loadPlaylists } from "$lib/stores/library";
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import { isTauri } from "$lib/api/tauri";
+  import { squeezeStartServer } from "$lib/api/tauri";
+  import {
+    startGlobalSqueezeDiscovery,
+    initSqueezeSessionPersistence,
+  } from "$lib/stores/squeeze";
   import {
     initializeFromPersistedState,
     setupAutoSave,
@@ -92,6 +97,19 @@
       console.error("Failed to load library:", error);
     } finally {
       isLoading = false;
+
+      // Auto-start Squeeze server and the global player-discovery poll
+      // so any Eversolo (or other Squeeze player) that appears on the
+      // network is auto-selected as the active target without the user
+      // having to open the Connect panel first.
+      squeezeStartServer()
+        .then(() => startGlobalSqueezeDiscovery())
+        .catch((e) => console.warn("[SQUEEZE] Auto-start failed:", e));
+
+      // Wire up session save/restore subscribers. Done here (not at
+      // module-load) to avoid a circular-import crash between
+      // squeeze.ts and player.ts — both must finish evaluating first.
+      initSqueezeSessionPersistence();
 
       // Lazy load plugins- reduce startup time
       requestIdleCallback(() => {

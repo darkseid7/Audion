@@ -24,6 +24,8 @@
     import MobileHome from "./MobileHome.svelte";
     import DesktopHome from "./DesktopHome.svelte";
     import LikedSongs from "./LikedSongs.svelte";
+    import ListenLaterAlbums from "./ListenLaterAlbums.svelte";
+    import RecentlyPlayed from "./RecentlyPlayed.svelte";
 
     import TrackList from "./TrackList.svelte";
     import AlbumGrid from "./AlbumGrid.svelte";
@@ -682,7 +684,7 @@
     {:else if $currentView.type === "tracks"}
         <div class="view-container">
             <header class="view-header">
-                <h1>All Tracks</h1>
+                <h1>All Tracks xD</h1>
                 {#if $isScanning}
                     <div class="scan-status">Scanning... {$tracks.length} tracks found</div>
                 {/if}
@@ -748,6 +750,14 @@
     {:else if $currentView.type === "liked-songs"}
         <div class="view-container no-padding">
             <LikedSongs />
+        </div>
+    {:else if $currentView.type === "listen-later"}
+        <div class="view-container no-padding">
+            <ListenLaterAlbums />
+        </div>
+    {:else if $currentView.type === "recently-played"}
+        <div class="view-container no-padding">
+            <RecentlyPlayed />
         </div>
     {:else if $currentView.type === "listenbrainz"}
         <div class="view-container no-padding">

@@ -20,6 +20,7 @@
   // If provided, secondary text renders as a clickable button
   export let secondaryAction: (() => void) | null = null;
   export let isPinned = false;
+  export let isLiked = false;
 
   $: isRound = variant === "round";
   $: isCentered = variant === "round";
@@ -164,6 +165,14 @@
       </div>
     {/if}
 
+    {#if isLiked}
+      <div class="liked-indicator" aria-label="Liked">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+          <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+        </svg>
+      </div>
+    {/if}
+
     {#if isNowPlaying}
       <div class="playing-indicator-container">
         <div class="playing-indicator" aria-hidden="true">
@@ -233,43 +242,45 @@
     </div>
 
     {#if secondaryText}
-      <div
-        class="text-track secondary"
-        class:animate={isActive && secondaryOverflows}
-      >
-        {#if secondaryAction}
-          <button
-            class="text-inner secondary-link"
-            bind:this={secondaryEl}
-            style="--marquee-duration: {secondaryDuration};"
-            class:marquee={isActive && secondaryOverflows}
-            on:click|stopPropagation={secondaryAction}>{secondaryText}</button
-          >
-          {#if isActive && secondaryOverflows}
+      <div class="secondary-row">
+        <div
+          class="text-track secondary"
+          class:animate={isActive && secondaryOverflows}
+        >
+          {#if secondaryAction}
             <button
-              class="text-inner secondary-link marquee"
-              aria-hidden="true"
+              class="text-inner secondary-link"
+              bind:this={secondaryEl}
               style="--marquee-duration: {secondaryDuration};"
+              class:marquee={isActive && secondaryOverflows}
               on:click|stopPropagation={secondaryAction}>{secondaryText}</button
             >
-          {/if}
-        {:else}
-          <span
-            class="text-inner"
-            bind:this={secondaryEl}
-            style="--marquee-duration: {secondaryDuration};"
-            class:marquee={isActive && secondaryOverflows}>{secondaryText}</span
-          >
-          {#if isActive && secondaryOverflows}
+            {#if isActive && secondaryOverflows}
+              <button
+                class="text-inner secondary-link marquee"
+                aria-hidden="true"
+                style="--marquee-duration: {secondaryDuration};"
+                on:click|stopPropagation={secondaryAction}>{secondaryText}</button
+              >
+            {/if}
+          {:else}
             <span
-              class="text-inner marquee"
-              aria-hidden="true"
+              class="text-inner"
+              bind:this={secondaryEl}
               style="--marquee-duration: {secondaryDuration};"
+              class:marquee={isActive && secondaryOverflows}>{secondaryText}</span
             >
-              {secondaryText}
-            </span>
+            {#if isActive && secondaryOverflows}
+              <span
+                class="text-inner marquee"
+                aria-hidden="true"
+                style="--marquee-duration: {secondaryDuration};"
+              >
+                {secondaryText}
+              </span>
+            {/if}
           {/if}
-        {/if}
+        </div>
       </div>
     {/if}
 
@@ -395,6 +406,17 @@
     justify-content: center;
     box-shadow: var(--shadow-md);
     z-index: 2;
+  }
+
+  /* Liked Indicator */
+  .liked-indicator {
+    position: absolute;
+    bottom: var(--spacing-sm);
+    left: var(--spacing-sm);
+    color: var(--accent-primary);
+    filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
+    z-index: 2;
+    pointer-events: none;
   }
 
   /* Cover overlay */
@@ -628,6 +650,18 @@
   .text-track.secondary .text-inner {
     font-size: 0.8125rem;
     color: var(--text-secondary);
+  }
+
+  .secondary-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .secondary-row .text-track.secondary {
+    flex: 1;
+    min-width: 0;
   }
 
   .media-card.now-playing .text-track.secondary .text-inner,

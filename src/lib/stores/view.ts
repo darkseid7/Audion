@@ -1,27 +1,29 @@
 // View store - manages current view/navigation state
-import { writable, get, derived } from 'svelte/store';
+import { writable, get, derived } from "svelte/store";
 
 export type ViewType =
-    | 'home'
-    | 'tracks'
-    | 'tracks-multiselect'
-    | 'albums'
-    | 'album-detail'
-    | 'artists'
-    | 'artist-detail'
-    | 'playlists'
-    | 'playlist-detail'
-    | 'liked-songs'
-    | 'plugins'
-    | 'settings'
-    | 'listenbrainz'
-    | 'discover';
+  | "home"
+  | "tracks"
+  | "tracks-multiselect"
+  | "albums"
+  | "album-detail"
+  | "artists"
+  | "artist-detail"
+  | "playlists"
+  | "playlist-detail"
+  | "liked-songs"
+  | "listen-later"
+  | "recently-played"
+  | "plugins"
+  | "settings"
+  | "listenbrainz"
+  | "discover";
 
 export interface ViewState {
-    type: ViewType;
-    id?: number;    // For album/playlist detail views
-    name?: string;  // For artist detail views
-    query?: string; // For discovery search
+  type: ViewType;
+  id?: number; // For album/playlist detail views
+  name?: string; // For artist detail views
+  query?: string; // For discovery search
 }
 
 const MAX_HISTORY = 50;
@@ -32,125 +34,136 @@ const historyUpdate = writable(0);
 let currentIndex = -1;
 let isNavigating = false;
 
-export const currentView = writable<ViewState>({ type: 'tracks' });
+export const currentView = writable<ViewState>({ type: "albums" });
 
 export const navigationHistory = derived(historyUpdate, () => ({
-    canGoBack: currentIndex > 0,
-    canGoForward: currentIndex < history.length - 1
+  canGoBack: currentIndex > 0,
+  canGoForward: currentIndex < history.length - 1,
+  previousView: currentIndex > 0 ? history[currentIndex - 1] : null,
 }));
 
 // Initialize history with default view
-history.push({ type: 'tracks' });
+history.push({ type: "albums" });
 currentIndex = 0;
 
 function notifyHistoryUpdate() {
-    historyUpdate.set(Date.now());
+  historyUpdate.set(Date.now());
 }
 
 // Subscribe to update history when view changes
-currentView.subscribe(view => {
-    if (isNavigating) return;
+currentView.subscribe((view) => {
+  if (isNavigating) return;
 
-    // Remove forward history if we diverge
-    if (currentIndex < history.length - 1) {
-        history.splice(currentIndex + 1);
-    }
+  // Remove forward history if we diverge
+  if (currentIndex < history.length - 1) {
+    history.splice(currentIndex + 1);
+  }
 
-    // Don't push duplicate consecutive views
-    const current = history[currentIndex];
-    if (current &&
-        current.type === view.type &&
-        current.id === view.id &&
-        current.name === view.name) {
-        return;
-    }
+  // Don't push duplicate consecutive views
+  const current = history[currentIndex];
+  if (
+    current &&
+    current.type === view.type &&
+    current.id === view.id &&
+    current.name === view.name
+  ) {
+    return;
+  }
 
-    history.push(view);
-    if (history.length > MAX_HISTORY) {
-        history.shift();
-    } else {
-        currentIndex++;
-    }
-    notifyHistoryUpdate();
+  history.push(view);
+  if (history.length > MAX_HISTORY) {
+    history.shift();
+  } else {
+    currentIndex++;
+  }
+  notifyHistoryUpdate();
 });
 
 export function goBack(): void {
-    if (currentIndex > 0) {
-        currentIndex--;
-        isNavigating = true;
-        currentView.set(history[currentIndex]);
-        isNavigating = false;
-        notifyHistoryUpdate();
-    }
+  if (currentIndex > 0) {
+    currentIndex--;
+    isNavigating = true;
+    currentView.set(history[currentIndex]);
+    isNavigating = false;
+    notifyHistoryUpdate();
+  }
 }
 
 export function goForward(): void {
-    if (currentIndex < history.length - 1) {
-        currentIndex++;
-        isNavigating = true;
-        currentView.set(history[currentIndex]);
-        isNavigating = false;
-        notifyHistoryUpdate();
-    }
+  if (currentIndex < history.length - 1) {
+    currentIndex++;
+    isNavigating = true;
+    currentView.set(history[currentIndex]);
+    isNavigating = false;
+    notifyHistoryUpdate();
+  }
 }
 
 // Navigation helpers
 export function navigateTo(type: ViewType, id?: number, name?: string): void {
-    currentView.set({ type, id, name });
+  currentView.set({ type, id, name });
 }
 
 export function goToHome(): void {
-    currentView.set({ type: 'home' });
+  currentView.set({ type: "home" });
 }
 
 export function goToTracks(): void {
-    currentView.set({ type: 'tracks' });
+  currentView.set({ type: "tracks" });
 }
 
 export function goToAlbums(): void {
-    currentView.set({ type: 'albums' });
+  currentView.set({ type: "albums" });
 }
 
 export function goToAlbumDetail(albumId: number): void {
-    currentView.set({ type: 'album-detail', id: albumId });
+  currentView.set({ type: "album-detail", id: albumId });
 }
 
 export function goToArtists(): void {
-    currentView.set({ type: 'artists' });
+  currentView.set({ type: "artists" });
 }
 
 export function goToArtistDetail(artistName: string): void {
-    currentView.set({ type: 'artist-detail', name: artistName });
+  currentView.set({ type: "artist-detail", name: artistName });
 }
 
 export function goToPlaylists(): void {
-    currentView.set({ type: 'playlists' });
+  currentView.set({ type: "playlists" });
 }
 
 export function goToPlaylistDetail(playlistId: number, name: string): void {
-    currentView.set({ type: 'playlist-detail', id: playlistId, name });
+  currentView.set({ type: "playlist-detail", id: playlistId, name });
 }
 
 export function goToPlugins(): void {
-    currentView.set({ type: 'plugins' });
+  currentView.set({ type: "plugins" });
 }
 
 export function goToSettings(): void {
-    currentView.set({ type: 'settings' });
+  currentView.set({ type: "settings" });
 }
 
 export function goToTracksMultiSelect(playlistId: number): void {
-    currentView.set({ type: 'tracks-multiselect', id: playlistId });
+  currentView.set({ type: "tracks-multiselect", id: playlistId });
 }
 
 export function goToLikedSongs(): void {
-    currentView.set({ type: 'liked-songs' });
+  currentView.set({ type: "liked-songs" });
+}
+
+export function goToListenLater(): void {
+  currentView.set({ type: "listen-later" });
+}
+
+export function goToRecentlyPlayed(): void {
+  currentView.set({ type: "recently-played" });
 }
 
 export function goToListenBrainz(): void {
-    currentView.set({ type: 'listenbrainz' });
+  currentView.set({ type: "listenbrainz" });
 }
 
 export function goToDiscover(query?: string): void {
-    currentView.set({ type: 'discover', query });
+  currentView.set({ type: "discover", query });
 }

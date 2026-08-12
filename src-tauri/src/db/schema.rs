@@ -1,6 +1,38 @@
 // Database schema initialization
 use rusqlite::{Connection, Result};
 
+fn normalize_artist_for_album_key(artist: &str) -> Option<String> {
+    let trimmed = artist.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let separators = [" feat. ", " feat ", " ft. ", " ft ", " featuring "];
+
+    let mut cut_index: Option<usize> = None;
+    for sep in separators {
+        if let Some(idx) = lowered.find(sep) {
+            cut_index = Some(match cut_index {
+                Some(current) => current.min(idx),
+                None => idx,
+            });
+        }
+    }
+
+    let base = if let Some(idx) = cut_index {
+        trimmed[..idx].trim()
+    } else {
+        trimmed
+    };
+
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
 pub fn init_schema(conn: &Connection) -> Result<()> {
     // Enable foreign keys for this connection
     conn.execute("PRAGMA foreign_keys = ON;", [])?;
@@ -13,7 +45,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL,
             artist TEXT,
             art_data TEXT,
-            art_path TEXT
+            art_path TEXT,
+            year INTEGER
         );
 
         -- Tracks table
@@ -23,6 +56,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             title TEXT,
             artist TEXT,
             album TEXT,
+            album_artist TEXT,
             track_number INTEGER,
             disc_number INTEGER,
             duration INTEGER,
@@ -73,6 +107,21 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
         );
 
+        -- Liked albums table
+        CREATE TABLE IF NOT EXISTS liked_albums (
+            album_id INTEGER PRIMARY KEY,
+            liked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+        );
+
+        -- Listen later albums table
+        CREATE TABLE IF NOT EXISTS listen_later_albums (
+            album_id INTEGER PRIMARY KEY,
+            saved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_listen_later_time ON listen_later_albums(saved_at DESC);
+
         -- Play history table (one row per play event)
         CREATE TABLE IF NOT EXISTS play_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,12 +159,15 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         ("content_hash", "TEXT"),
         ("local_src", "TEXT"),
         ("track_cover", "TEXT"),
+        ("album_artist", "TEXT"),
         ("disc_number", "INTEGER"),
         ("track_cover_path", "TEXT"),
         ("musicbrainz_recording_id", "TEXT"),
         ("date_added", "TEXT DEFAULT CURRENT_TIMESTAMP"),
         ("genre", "TEXT"),
         ("metadata_json", "TEXT"),
+        ("play_count", "INTEGER DEFAULT 0"),
+        ("file_modified_at", "INTEGER"),
     ];
 
     for (col_name, col_def) in tracks_columns {
@@ -157,6 +209,30 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         [],
     );
 
+    // Backfill source_type for local tracks that were inserted with NULL
+    let _ = conn.execute(
+        "UPDATE tracks SET source_type = 'local' WHERE source_type IS NULL",
+        [],
+    );
+
+    // Backfill play_count from play_history for tracks that have NULL or 0 play_count
+    let _ = conn.execute(
+        "UPDATE tracks SET play_count = (
+            SELECT COUNT(*) FROM play_history WHERE play_history.track_id = tracks.id
+         ) WHERE play_count IS NULL OR play_count = 0",
+        [],
+    );
+
+    // Backfill album_artist for older rows so album grouping has a stable key.
+    let _ = conn.execute(
+        "UPDATE tracks
+         SET album_artist = artist
+         WHERE (album_artist IS NULL OR TRIM(album_artist) = '')
+           AND artist IS NOT NULL
+           AND TRIM(artist) != ''",
+        [],
+    );
+
     // Create index for content_hash after migration ensures column exists
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tracks_content_hash ON tracks(content_hash)",
@@ -173,6 +249,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "albums", "art_path")? {
         println!("[DB] Adding missing column 'art_path' to albums table...");
         let _ = conn.execute("ALTER TABLE albums ADD COLUMN art_path TEXT", []);
+    }
+    if !column_exists(conn, "albums", "year")? {
+        println!("[DB] Adding missing column 'year' to albums table...");
+        let _ = conn.execute("ALTER TABLE albums ADD COLUMN year INTEGER", []);
+    }
+    if !column_exists(conn, "albums", "original_year")? {
+        println!("[DB] Adding missing column 'original_year' to albums table...");
+        let _ = conn.execute("ALTER TABLE albums ADD COLUMN original_year INTEGER", []);
     }
 
     // ─── Sync infrastructure tables ──────────────────────────────────────────
@@ -228,6 +312,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // Initialize playlist positions for existing playlists
     initialize_playlist_positions(conn)?;
 
+    // Repair legacy grouping where albums were matched by name only.
+    reconcile_albums_by_name_and_artist(conn)?;
+
     Ok(())
 }
 
@@ -270,6 +357,126 @@ fn initialize_playlist_positions(conn: &Connection) -> Result<()> {
                 params![pos as i64, playlist_id, track_id],
             )?;
         }
+    }
+
+    Ok(())
+}
+
+/// Repair legacy album grouping that matched by name only.
+///
+/// This reassociates tracks to albums keyed by (album name, artist) so
+/// same-titled albums from different artists no longer mix together.
+fn reconcile_albums_by_name_and_artist(conn: &Connection) -> Result<()> {
+    use rusqlite::params;
+    use std::collections::HashMap;
+
+    let tx = conn.unchecked_transaction()?;
+
+    let mut album_cache: HashMap<(String, String), i64> = HashMap::new();
+
+    {
+        let mut stmt = tx.prepare("SELECT id, name, artist FROM albums")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (id, name, artist) = row?;
+            let trimmed_name = name.trim();
+            if trimmed_name.is_empty() {
+                continue;
+            }
+
+            let artist_key = artist.unwrap_or_default().trim().to_lowercase();
+            let key = (trimmed_name.to_lowercase(), artist_key);
+            album_cache.entry(key).or_insert(id);
+        }
+    }
+
+    let mut reassigned_tracks = 0_i64;
+
+    {
+        let mut track_stmt = tx.prepare(
+            "SELECT id, album, album_artist, artist, album_id
+             FROM tracks
+             WHERE album IS NOT NULL AND TRIM(album) != ''",
+        )?;
+
+        let rows = track_stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (track_id, album_name, track_album_artist, track_artist, current_album_id) = row?;
+
+            let trimmed_name = album_name.trim().to_string();
+            if trimmed_name.is_empty() {
+                continue;
+            }
+
+            let artist_trimmed = track_album_artist
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| track_artist.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+                .and_then(normalize_artist_for_album_key)
+                .unwrap_or_default();
+            let artist_opt = if artist_trimmed.is_empty() {
+                None
+            } else {
+                Some(artist_trimmed.clone())
+            };
+
+            let key = (trimmed_name.to_lowercase(), artist_trimmed.to_lowercase());
+
+            let target_album_id = if let Some(existing_id) = album_cache.get(&key) {
+                *existing_id
+            } else {
+                tx.execute(
+                    "INSERT INTO albums (name, artist) VALUES (?1, ?2)",
+                    params![trimmed_name, artist_opt],
+                )?;
+                let id = tx.last_insert_rowid();
+                album_cache.insert(key, id);
+                id
+            };
+
+            if current_album_id != Some(target_album_id) {
+                tx.execute(
+                    "UPDATE tracks SET album_id = ?1 WHERE id = ?2",
+                    params![target_album_id, track_id],
+                )?;
+                reassigned_tracks += 1;
+            }
+        }
+    }
+
+    // Remove unused/legacy album rows left after reassignment.
+    tx.execute(
+        "DELETE FROM albums
+         WHERE id NOT IN (
+             SELECT DISTINCT album_id FROM tracks WHERE album_id IS NOT NULL
+         )",
+        [],
+    )?;
+
+    tx.commit()?;
+
+    if reassigned_tracks > 0 {
+        println!(
+            "[DB] Reconciled album grouping for {} tracks (name+artist key)",
+            reassigned_tracks
+        );
     }
 
     Ok(())

@@ -35,7 +35,21 @@ fn generate_content_hash(
 }
 
 pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
-    let path = Path::new(path);
+    let file_path = Path::new(path);
+
+    // Get file modification time (epoch seconds)
+    let file_mtime = std::fs::metadata(file_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+
+    let mut track = extract_metadata_inner(file_path)?;
+    track.file_modified_at = file_mtime;
+    Some(track)
+}
+
+fn extract_metadata_inner(path: &Path) -> Option<TrackInsert> {
 
     // Try to read the file
     // Try to read the file with default options first
@@ -87,6 +101,8 @@ pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
     let properties = tagged_file.properties();
     let duration = properties.duration().as_secs() as i32;
     let bitrate = properties.audio_bitrate().map(|b| b as i32);
+    let sample_rate = properties.sample_rate();
+    let bit_depth = properties.bit_depth();
     let format = Some(format!("{:?}", tagged_file.file_type()));
 
     // Try to get tags
@@ -144,7 +160,12 @@ pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
                 .map(|s| s.to_string());
 
             // Extract all available metadata keys into JSON
-            let metadata_json = collect_all_metadata(tag);
+            let metadata_json = collect_all_metadata(
+                Some(tag),
+                sample_rate,
+                bit_depth,
+                bitrate,
+            );
 
             Some(TrackInsert {
                 path: path.to_string_lossy().to_string(),
@@ -158,13 +179,14 @@ pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
                 track_cover,
                 format,
                 bitrate,
-                source_type: None, // Local file
+                source_type: Some("local".to_string()),
                 cover_url: None,
                 external_id: None,
                 content_hash,
                 local_src: None,
                 musicbrainz_recording_id,
                 metadata_json,
+                file_modified_at: None, // set by extract_metadata wrapper
             })
         }
         None => {
@@ -185,39 +207,57 @@ pub fn extract_metadata(path: &str) -> Option<TrackInsert> {
     }
 }
 
-fn collect_all_metadata(tag: &LoftyTag) -> Option<String> {
+fn collect_all_metadata(
+    tag: Option<&LoftyTag>,
+    sample_rate: Option<u32>,
+    bit_depth: Option<u8>,
+    bitrate: Option<i32>,
+) -> Option<String> {
     use serde_json::{Map, Value};
     let mut metadata = Map::new();
 
     // Standard Lofty keys to extract
-    let keys = [
-        ItemKey::TrackTitle,
-        ItemKey::TrackArtist,
-        ItemKey::AlbumTitle,
-        ItemKey::AlbumArtist,
-        ItemKey::Composer,
-        ItemKey::Genre,
-        ItemKey::TrackNumber,
-        ItemKey::TrackTotal,
-        ItemKey::DiscNumber,
-        ItemKey::DiscTotal,
-        ItemKey::Year,
-        ItemKey::Bpm,
-        ItemKey::Isrc,
-        ItemKey::Label,
-        ItemKey::CatalogNumber,
-        ItemKey::Comment,
-        ItemKey::Lyrics,
-        ItemKey::Conductor,
-        ItemKey::Language,
-        ItemKey::Publisher,
-        ItemKey::EncoderSettings,
-    ];
+    if let Some(tag) = tag {
+        let keys = [
+            ItemKey::TrackTitle,
+            ItemKey::TrackArtist,
+            ItemKey::AlbumTitle,
+            ItemKey::AlbumArtist,
+            ItemKey::Composer,
+            ItemKey::Genre,
+            ItemKey::TrackNumber,
+            ItemKey::TrackTotal,
+            ItemKey::DiscNumber,
+            ItemKey::DiscTotal,
+            ItemKey::Year,
+            ItemKey::Bpm,
+            ItemKey::Isrc,
+            ItemKey::Label,
+            ItemKey::CatalogNumber,
+            ItemKey::Comment,
+            ItemKey::Lyrics,
+            ItemKey::Conductor,
+            ItemKey::Language,
+            ItemKey::Publisher,
+            ItemKey::EncoderSettings,
+        ];
 
-    for key in keys {
-        if let Some(val) = tag.get_string(&key) {
-            metadata.insert(format!("{:?}", key), Value::String(val.to_string()));
+        for key in keys {
+            if let Some(val) = tag.get_string(&key) {
+                metadata.insert(format!("{:?}", key), Value::String(val.to_string()));
+            }
         }
+    }
+
+    // Add normalized technical metadata for frontend quality labels.
+    if let Some(sr) = sample_rate {
+        metadata.insert("__sample_rate_hz".to_string(), Value::Number(sr.into()));
+    }
+    if let Some(depth) = bit_depth {
+        metadata.insert("__bit_depth".to_string(), Value::Number(depth.into()));
+    }
+    if let Some(br) = bitrate {
+        metadata.insert("__bitrate_kbps".to_string(), Value::Number(br.into()));
     }
 
     if metadata.is_empty() {
@@ -240,13 +280,14 @@ fn create_fallback_metadata(path: &Path) -> TrackInsert {
         track_cover: None,
         format: None,
         bitrate: None,
-        source_type: None, // Local file
+        source_type: Some("local".to_string()),
         cover_url: None,
         external_id: None,
         content_hash: None, // Will be set later with duration
         local_src: None,
         musicbrainz_recording_id: None,
         metadata_json: None,
+        file_modified_at: None,
     }
 }
 
@@ -290,6 +331,11 @@ fn extract_flac_metadata_fallback(path: &Path, _duration_hint: Option<i32>) -> O
                 })
                 .or(_duration_hint);
 
+            let sample_rate = tag.get_streaminfo().map(|si| si.sample_rate);
+            let bit_depth = tag.get_streaminfo().map(|si| si.bits_per_sample as u8);
+
+            let metadata_json = collect_all_metadata(None, sample_rate, bit_depth, None);
+
             // Generate content hash
             let content_hash = Some(generate_content_hash(
                 title.as_deref(),
@@ -310,13 +356,14 @@ fn extract_flac_metadata_fallback(path: &Path, _duration_hint: Option<i32>) -> O
                 track_cover: album_art, // Use same art for track cover
                 format,
                 bitrate: None, // Hard to get bitrate without decoding
-                source_type: None,
+                source_type: Some("local".to_string()),
                 cover_url: None,
                 external_id: None,
                 content_hash: content_hash,
                 local_src: None,
                 musicbrainz_recording_id: None,
-                metadata_json: None,
+                metadata_json,
+                file_modified_at: None, // set by extract_metadata wrapper
             })
         }
         Err(e) => {

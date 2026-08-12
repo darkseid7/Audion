@@ -1,5 +1,6 @@
 // Tauri IPC commands
 pub mod activity;
+pub mod backup;
 pub mod covers;
 pub mod library;
 pub mod listenbrainz;
@@ -11,6 +12,7 @@ pub mod musicbrainz;
 pub mod network;
 pub mod playlist;
 pub mod plugin;
+pub mod squeeze;
 pub mod sync;
 
 pub use activity::*;

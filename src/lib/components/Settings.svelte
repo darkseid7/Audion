@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme, presetAccents, type ThemeMode } from "$lib/stores/theme";
+  import { theme, presetAccents, themePresets, type ThemeMode } from "$lib/stores/theme";
   import { appSettings } from "$lib/stores/settings";
   import { equalizer, EQ_PRESETS } from "$lib/stores/equalizer";
   import { _, locale } from "svelte-i18n";
@@ -16,7 +16,16 @@
     deleteListenbrainzToken,
     verifyListenbrainzToken,
     isAndroid,
+    listBackups,
+    exportBackup,
+    importBackup,
+    deleteBackup,
+    type BackupInfo,
     type MergeCoverResult,
+    startWatcher,
+    stopWatcher,
+    enrichAllAlbumYears,
+    type BatchEnrichResult,
   } from "$lib/api/tauri";
   import { trackCount, playlists, loadLibrary } from "$lib/stores/library";
   import UpdatePopup from "./UpdatePopup.svelte";
@@ -35,6 +44,7 @@
     deleteAccount,
   } from "$lib/stores/sync";
   import { nativeAudioStop } from "$lib/services/native-audio";
+  import { reconnectDiscord } from "$lib/stores/discordPresence";
 
   interface MigrationProgressUpdate {
     current: number;
@@ -78,6 +88,15 @@
   let mergePercentage = 0;
 
   // Android single music folder state
+
+  // Discord reconnect state
+  let discordReconnecting = false;
+
+  // Backup state
+  let backups: BackupInfo[] = [];
+  let isLoadingBackups = false;
+  let isExporting = false;
+  let isImporting = false;
   let isUpdatingAndroidMusicFolder = false;
   let androidMusicFolderMessage = "";
   let androidMusicFolderSuccess = false;
@@ -93,6 +112,8 @@
   let unlistenMerge: UnlistenFn | null = null;
 
   onMount(async () => {
+    loadBackups();
+
     // Listen for migration events (used by sync)
     unlistenSync = await listen("migration-batch-ready", (event) => {
       const data = event.payload as { progress: MigrationProgressUpdate };
@@ -454,6 +475,40 @@
     if ($appSettings.listenBrainzEnabled) appSettings.toggleListenBrainz();
   }
 
+  // ── MusicBrainz album year enrichment ──────────────────────────────────────
+  let mbEnrichRunning = false;
+  let mbEnrichDone = 0;
+  let mbEnrichTotal = 0;
+  let mbEnrichResult: BatchEnrichResult | null = null;
+  let mbEnrichUnlisten: UnlistenFn | null = null;
+
+  async function handleEnrichAlbumYears() {
+    mbEnrichRunning = true;
+    mbEnrichDone = 0;
+    mbEnrichTotal = 0;
+    mbEnrichResult = null;
+    try {
+      mbEnrichUnlisten = await listen<{ done: number; total: number }>(
+        "album-enrich-progress",
+        (event) => {
+          mbEnrichDone = event.payload.done;
+          mbEnrichTotal = event.payload.total;
+        },
+      );
+      mbEnrichResult = await enrichAllAlbumYears();
+      // Reload library to reflect updated years
+      await loadLibrary();
+    } catch (e) {
+      console.error("[Settings] Album year enrichment failed:", e);
+    } finally {
+      mbEnrichRunning = false;
+      if (mbEnrichUnlisten) {
+        mbEnrichUnlisten();
+        mbEnrichUnlisten = null;
+      }
+    }
+  }
+
   function formatSupporterUntil(ts: number | null): string {
     if (ts === null) return "Active (subscription)";
     const d = new Date(ts);
@@ -496,6 +551,74 @@
     ($authState.email ? $authState.email.split("@")[0] : "User");
   $: accountEmail = $authState.email || "No email";
   $: accountInitial = (accountDisplayName || "U").charAt(0).toUpperCase();
+
+  // Backup functions
+  async function loadBackups() {
+    isLoadingBackups = true;
+    try {
+      backups = await listBackups();
+    } catch (e) {
+      console.error("Failed to load backups:", e);
+    } finally {
+      isLoadingBackups = false;
+    }
+  }
+
+  async function handleExportBackup() {
+    isExporting = true;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const dest = await save({
+        defaultPath: `audion-backup-${new Date().toISOString().slice(0, 10)}.db`,
+        filters: [{ name: "SQLite Database", extensions: ["db"] }],
+      });
+      if (dest) {
+        await exportBackup(dest);
+        alert("Backup exported successfully.");
+      }
+    } catch (e: any) {
+      alert("Export failed: " + e);
+    } finally {
+      isExporting = false;
+    }
+  }
+
+  async function handleImportBackup() {
+    const ok = await confirm(
+      "Importing a backup will replace your current database. The app will restart. Continue?"
+    );
+    if (!ok) return;
+    isImporting = true;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const file = await open({
+        filters: [{ name: "SQLite Database", extensions: ["db"] }],
+        multiple: false,
+      });
+      if (file) {
+        await importBackup(typeof file === "string" ? file : file.path);
+      }
+    } catch (e: any) {
+      alert("Import failed: " + e);
+      isImporting = false;
+    }
+  }
+
+  async function handleDeleteBackup(filename: string) {
+    const ok = await confirm(`Delete backup "${filename}"?`);
+    if (!ok) return;
+    try {
+      await deleteBackup(filename);
+      await loadBackups();
+    } catch (e: any) {
+      alert("Delete failed: " + e);
+    }
+  }
+
+  function formatBackupSize(bytes: number): string {
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
 </script>
 
 <div class="settings-view">
@@ -736,6 +859,36 @@
             </div>
           </div>
 
+          {#if !isAndroid()}
+            <div class="divider"></div>
+            <div class="toggle-container">
+              <div class="toggle-info">
+                <span class="setting-title">{$_('settings.autoScanLibrary', { default: 'Auto-scan library' })}</span>
+                <span class="setting-description">{$_('settings.autoScanLibraryDesc', { default: 'Automatically detect file changes in your music folders' })}</span>
+              </div>
+              <button
+                class="toggle-btn"
+                class:active={$appSettings.autoScanLibrary}
+                on:click={async () => {
+                  const newValue = !$appSettings.autoScanLibrary;
+                  appSettings.setAutoScanLibrary(newValue);
+                  try {
+                    if (newValue) {
+                      await startWatcher();
+                    } else {
+                      await stopWatcher();
+                    }
+                  } catch (e) {
+                    console.error('[Settings] Failed to toggle watcher:', e);
+                  }
+                }}
+                aria-label={$_('settings.autoScanLibrary', { default: 'Auto-scan library' })}
+              >
+                <div class="toggle-handle"></div>
+              </button>
+            </div>
+          {/if}
+
           {#if isAndroid()}
             <div class="divider"></div>
 
@@ -786,6 +939,60 @@
                <span class="setting-description animate-pulse">{$_('settings.processingCovers', { default: 'Processing covers... view details below for progress' })}</span>
              </div>
           {/if}
+        </div>
+      </section>
+
+      <!-- Section: Backup & Restore -->
+      <section class="settings-section" aria-labelledby="backup-heading">
+        <h2 id="backup-heading" class="section-label">{$_('settings.backup', { default: 'Backup & Restore' })}</h2>
+        <div class="settings-card">
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.autoBackup', { default: 'Automatic backups' })}</span>
+            <span class="setting-description">{$_('settings.autoBackupDesc', { default: 'Your database is automatically backed up daily. Last 7 days are kept.' })}</span>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.savedBackups', { default: 'Saved backups' })}</span>
+            {#if isLoadingBackups}
+              <span class="setting-description">Loading...</span>
+            {:else if backups.length === 0}
+              <span class="setting-description">{$_('settings.noBackups', { default: 'No backups found' })}</span>
+            {:else}
+              <div class="backup-list">
+                {#each backups as backup}
+                  <div class="backup-item">
+                    <div class="backup-info">
+                      <span class="backup-name">{backup.filename}</span>
+                      <span class="setting-description" style="margin-top: 0;">{formatBackupSize(backup.size_bytes)} · {backup.date}</span>
+                    </div>
+                    <button class="btn-outline-compact btn-danger-text" on:click={() => handleDeleteBackup(backup.filename)}>
+                      {$_('settings.delete', { default: 'Delete' })}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            <button class="btn-outline-compact" style="margin-top: 8px;" on:click={loadBackups} disabled={isLoadingBackups}>
+              {$_('settings.refreshBackups', { default: 'Refresh' })}
+            </button>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.manualBackup', { default: 'Manual backup' })}</span>
+            <span class="setting-description">{$_('settings.manualBackupDesc', { default: 'Export your database to a file or restore from a previous backup.' })}</span>
+            <div class="button-group-row" style="margin-top: 8px;">
+              <button class="btn-outline-compact" on:click={handleExportBackup} disabled={isExporting}>
+                {isExporting ? $_('settings.exporting', { default: 'Exporting...' }) : $_('settings.exportBackup', { default: 'Export Backup' })}
+              </button>
+              <button class="btn-outline-compact" on:click={handleImportBackup} disabled={isImporting}>
+                {isImporting ? $_('settings.importing', { default: 'Importing...' }) : $_('settings.importBackup', { default: 'Import Backup' })}
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -926,7 +1133,8 @@
 
           <div class="toggle-container">
             <div class="toggle-info">
-              <span class="setting-title">{$_('settings.discordButton', { default: 'Discord button' })}</span>
+              <span class="setting-title">{$_('settings.discordPresence', { default: 'Discord Rich Presence' })}</span>
+              <span class="setting-description">{$_('settings.discordPresenceDesc', { default: 'Show what you\'re listening to in your Discord status' })}</span>
             </div>
             <button
               class="toggle-btn"
@@ -934,12 +1142,33 @@
               on:click={() => appSettings.setShowDiscord(!$appSettings.showDiscord)}
               role="switch"
               aria-checked={$appSettings.showDiscord}
-              aria-label="Toggle Discord Button"
+              aria-label="Toggle Discord Rich Presence"
             >
               <div class="toggle-handle"></div>
             </button>
           </div>
-          
+
+          <div class="button-group-row" style="margin-top: var(--spacing-sm);">
+            <button
+              class="btn-outline-compact"
+              on:click={async () => {
+                discordReconnecting = true;
+                try {
+                  await reconnectDiscord();
+                } finally {
+                  discordReconnecting = false;
+                }
+              }}
+              disabled={discordReconnecting}
+            >
+              {discordReconnecting ? '...' : $_('settings.discordReconnect', { default: 'Reconnect to Discord' })}
+            </button>
+          </div>
+
+          <p style="font-size: 0.7rem; opacity: 0.6; margin: var(--spacing-xs) 0 0; line-height: 1.4;">
+            {$_('settings.discordPrivacyNote', { default: 'Note: in Discord, enable Settings > Activity Privacy > "Display current activity as a status message". This is required by Discord for any non-verified app.' })}
+          </p>
+
           <div class="divider"></div>
 
           <div class="toggle-container">
@@ -961,6 +1190,35 @@
           <div class="button-group-row" style="margin-top: var(--spacing-sm); gap: var(--spacing-sm);">
             <a href="https://discord.gg/27XRVQsBd9" target="_blank" rel="noreferrer" class="btn-outline-compact" style="flex: 1; text-align: center;">{$_('settings.openDiscord', { default: 'Open Discord' })}</a>
             <a href="https://resonate.audionplayer.com?ref=audion" target="_blank" rel="noreferrer" class="btn-outline-compact" style="flex: 1; text-align: center;">{$_('settings.openResonate', { default: 'Open Resonate' })}</a>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="inner-section">
+            <span class="setting-title">{$_('settings.musicBrainzEnrich', { default: 'MusicBrainz Album Years' })}</span>
+            <span class="setting-description">{$_('settings.musicBrainzEnrichDesc', { default: 'Fetch missing album years (original & edition) from MusicBrainz' })}</span>
+            <button
+              class="btn-outline-compact btn-full-width"
+              style="margin-top: var(--spacing-sm);"
+              on:click={handleEnrichAlbumYears}
+              disabled={mbEnrichRunning}
+            >
+              {#if mbEnrichRunning}
+                {$_('settings.enriching', { default: 'Fetching...' })} {mbEnrichDone}/{mbEnrichTotal}
+              {:else}
+                {$_('settings.fetchMissingYears', { default: 'Fetch missing album years' })}
+              {/if}
+            </button>
+            {#if mbEnrichRunning && mbEnrichTotal > 0}
+              <div class="limit-bar-thick-wrap" style="margin-top: var(--spacing-xs);">
+                <div class="limit-bar-thick" style="width: {(mbEnrichDone / mbEnrichTotal * 100).toFixed(1)}%; transition: width 0.3s;"></div>
+              </div>
+            {/if}
+            {#if mbEnrichResult}
+              <p style="font-size: 0.75rem; margin-top: 4px; opacity: 0.7;">
+                {$_('settings.enrichResult', { default: '{enriched} enriched, {failed} not found, {total} total', values: { enriched: mbEnrichResult.enriched, failed: mbEnrichResult.failed, total: mbEnrichResult.total } })}
+              </p>
+            {/if}
           </div>
         </div>
       </section>
@@ -989,6 +1247,31 @@
              </div>
            </div>
 
+           <div class="divider"></div>
+
+           <div class="inner-section">
+             <span class="setting-title">{$_('settings.themePresets', { default: 'Theme presets' })}</span>
+             <div class="theme-presets-grid" style="margin-top: 6px;">
+               {#each themePresets as preset}
+                 <button
+                   class="theme-preset-card"
+                   class:active={$theme.mode === preset.id}
+                   on:click={() => handleModeChange(preset.id)}
+                   title={preset.description}
+                 >
+                   <div class="preset-preview" style="background: {preset.preview.bg};">
+                     <span class="preset-icon" style="color: {preset.preview.accent}; text-shadow: 0 0 8px {preset.preview.accent};">{preset.icon}</span>
+                     <div class="preset-colors">
+                       <span class="preset-dot" style="background: {preset.preview.accent};"></span>
+                       <span class="preset-dot" style="background: {preset.preview.text};"></span>
+                     </div>
+                   </div>
+                   <span class="preset-name">{preset.name}</span>
+                 </button>
+               {/each}
+             </div>
+           </div>
+
            {#if !isAndroid()}
              <div class="divider"></div>
              <div class="inner-section">
@@ -1001,28 +1284,11 @@
              </div>
 
 
-
-             <div class="divider"></div>
-             <div class="toggle-container">
-               <div class="toggle-info">
-                 <span class="setting-title">{$_('settings.closeToTray', { default: 'Close to tray' })}</span>
-                 <span class="setting-description">{$_('settings.closeToTrayDesc', { default: 'Hide the window to the system tray when closed' })}</span>
-               </div>
-               <button
-                 class="toggle-btn"
-                 class:active={$appSettings.closeToTray}
-                 on:click={() => appSettings.setCloseToTray(!$appSettings.closeToTray)}
-                 role="switch"
-                 aria-checked={$appSettings.closeToTray}
-                 aria-label="Toggle Close to Tray"
-               >
-                 <div class="toggle-handle"></div>
-               </button>
-             </div>
            {/if}
 
            <div class="divider"></div>
 
+           {#if $theme.mode === 'dark' || $theme.mode === 'light' || $theme.mode === 'system'}
            <div class="inner-section">
              <span class="setting-title">Accent color</span>
              <div class="color-grid-compact" style="margin-top: 6px;">
@@ -1037,6 +1303,7 @@
                {/each}
              </div>
            </div>
+           {/if}
         </div>
       </section>
 
@@ -1535,6 +1802,37 @@
     flex-wrap: wrap;
   }
 
+  .backup-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .backup-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
+  }
+
+  .backup-info {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .backup-name {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+  }
+
+  .btn-danger-text {
+    color: var(--danger, #e74c3c) !important;
+    border-color: var(--danger, #e74c3c) !important;
+  }
+
   .support-links-row {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1705,6 +2003,73 @@
     gap: 8px;
     flex-wrap: wrap;
     padding: 4px 0;
+  }
+
+  /* Theme Presets Grid */
+  .theme-presets-grid {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 4px 0;
+  }
+
+  .theme-preset-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: none;
+    border: 2px solid transparent;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+
+  .theme-preset-card:hover {
+    transform: scale(1.05);
+  }
+
+  .theme-preset-card.active {
+    border-color: var(--accent-primary);
+  }
+
+  .preset-preview {
+    width: 80px;
+    height: 50px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    overflow: hidden;
+  }
+
+  .preset-icon {
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .preset-colors {
+    display: flex;
+    gap: 4px;
+  }
+
+  .preset-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .preset-name {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .theme-preset-card.active .preset-name {
+    color: var(--accent-primary);
   }
 
   .color-swatch-sm {

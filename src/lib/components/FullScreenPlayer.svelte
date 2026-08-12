@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { _ } from "svelte-i18n";
   import { fade, fly } from "svelte/transition";
   import { flip } from "svelte/animate";
   import { derived } from "svelte/store";
@@ -25,6 +26,7 @@
     cycleRepeat,
     volume,
     addToQueue,
+    playNext,
   } from "$lib/stores/player";
   import { isMobile } from "$lib/stores/mobile";
   import { lyricsVisible, toggleLyrics } from "$lib/stores/lyrics";
@@ -52,6 +54,9 @@
     SLEEP_TIMER_PRESETS,
     startSleepTimer,
     stopSleepTimer,
+    armTrackEndTimer,
+    armAlbumEndTimer,
+    sleepTimerTriggerMode,
   } from "$lib/stores/sleepTimer";
   import { goToAlbumDetail } from "$lib/stores/view";
 
@@ -269,6 +274,13 @@
     }));
 
     const menuItems: any[] = [
+      {
+        label: $_('contextMenu.playNext'),
+        action: () => {
+          playNext([track]);
+          addToast("Playing next", "success");
+        },
+      },
       {
         label: "Add to Queue",
         action: () => {
@@ -552,7 +564,28 @@
                     {minutes}m
                   </button>
                 {/each}
-                {#if $sleepTimerActive}
+                <button
+                  class="sheet-timer-btn"
+                  class:active={$sleepTimerTriggerMode === 'track_end'}
+                  on:click={() => { armTrackEndTimer(); showMobileMenu = false; }}
+                >
+                  End of Track
+                </button>
+                <button
+                  class="sheet-timer-btn"
+                  class:active={$sleepTimerTriggerMode === 'album_end'}
+                  on:click={() => {
+                    if ($currentTrack?.album_id != null) {
+                      armAlbumEndTimer($currentTrack.album_id);
+                    } else {
+                      armAlbumEndTimer(null);
+                    }
+                    showMobileMenu = false;
+                  }}
+                >
+                  End of Album
+                </button>
+                {#if $sleepTimerActive || $sleepTimerTriggerMode !== 'time'}
                   <button
                     class="sheet-timer-btn cancel"
                     on:click={() => { stopSleepTimer(); showMobileMenu = false; }}
@@ -2403,6 +2436,12 @@
 
   .sheet-timer-btn:active {
     background: rgba(255, 255, 255, 0.15);
+  }
+
+  .sheet-timer-btn.active {
+    border-color: var(--accent-primary, #1db954);
+    color: var(--accent-primary, #1db954);
+    background: rgba(29, 185, 84, 0.12);
   }
 
   .sheet-timer-btn.cancel {

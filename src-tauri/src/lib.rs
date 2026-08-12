@@ -9,6 +9,7 @@ mod discord;
 mod windows_thumbar;
 mod scanner;
 mod security;
+mod squeeze;
 mod sync;
 mod utils;
 
@@ -22,11 +23,11 @@ mod audio;
 
 use db::Database;
 use std::path::PathBuf;
-use tauri::{Emitter, Listener, Manager, WindowEvent};
+use tauri::{Emitter, Listener, Manager};
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder},
 };
 
 /// Handle a deep link URL — extract tokens, store them, fetch profile, trigger sync.
@@ -327,8 +328,18 @@ pub fn run() {
             })?;
             tracing::info!("Database initialized");
 
+            // Run daily backup
+            if let Err(e) = commands::backup::run_daily_backup(app.handle(), &database) {
+                tracing::warn!("Daily backup failed (non-fatal): {}", e);
+            }
+
             app.manage(database);
             app.manage(commands::listenbrainz::ListenBrainzState::new());
+            app.manage(commands::squeeze::SqueezeState::new());
+
+            // File watcher state (desktop only)
+            #[cfg(desktop)]
+            app.manage(scanner::watcher::WatcherState::new());
 
             // Initialize Discord RPC state (desktop only)
             #[cfg(desktop)]
@@ -456,6 +467,7 @@ pub fn run() {
                     .icon(icon)
                     .tooltip("Audion")
                     .menu(&menu)
+                    .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => {
                             app.exit(0);
@@ -470,7 +482,18 @@ pub fn run() {
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
-                        if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                        // Only respond to left-click release. Right-click is reserved
+                        // for the OS context menu (attached via `.menu(&menu)` above);
+                        // matching all buttons here used to call window.show() on
+                        // right-click too, which shifted the foreground window and
+                        // caused the OS to cancel the context menu before it could
+                        // appear.
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
                             let app = tray.app_handle();
                             if let Some(window) = app.get_webview_window("main") {
                                 window.show().ok();
@@ -500,8 +523,10 @@ pub fn run() {
                     commands::add_folder,
                     commands::set_single_music_folder,
                     commands::rescan_music,
+                    commands::hard_rescan_music,
                     commands::get_default_music_dirs,
                     commands::get_library,
+                    commands::get_track_by_id,
                     commands::get_tracks_paginated,
                     commands::get_albums_paginated,
                     commands::search_library,
@@ -542,10 +567,19 @@ pub fn run() {
                     commands::is_track_liked,
                     commands::get_liked_track_ids,
                     commands::get_liked_tracks,
+                    commands::like_album,
+                    commands::unlike_album,
+                    commands::get_liked_album_ids,
+                    commands::add_album_to_listen_later,
+                    commands::remove_album_from_listen_later,
+                    commands::is_album_in_listen_later,
+                    commands::get_listen_later_album_ids,
                     commands::record_play,
                     commands::get_top_tracks,
                     commands::get_top_albums,
                     commands::get_recently_played,
+                    commands::get_recently_played_albums,
+                    commands::get_played_this_week,
                     commands::get_top_artists,
                     commands::get_stats_summary,
                     // Lyrics commands
@@ -602,12 +636,17 @@ pub fn run() {
                     commands::get_top_genres_from_mb,
                     commands::enrich_track_metadata_mb,
                     commands::get_release_mb_info,
+                    commands::get_release_detail_mb,
+                    commands::refresh_release_detail_mb,
+                    commands::get_release_cover_art,
                     commands::get_similar_artists_mb,
                     commands::get_artist_discography_mb,
                     commands::search_artists_mb,
                     commands::search_releases_mb,
                     commands::get_release_group_tracks_mb,
                     commands::get_artist_top_tracks_mb,
+                    commands::enrich_album_year,
+                    commands::enrich_all_album_years,
                     // Window commands
                     commands::window::get_window_start_mode,
                     commands::window::set_window_start_mode,
@@ -631,6 +670,11 @@ pub fn run() {
                     commands::sync_delete_account,
                     commands::sync_get_access_token,
                     commands::sync_get_device_id,
+                    // Backup commands
+                    commands::backup::list_backups,
+                    commands::backup::export_backup,
+                    commands::backup::import_backup,
+                    commands::backup::delete_backup,
                     // =========================================================================
                     // NATIVE AUDIO COMMANDS
                     // =========================================================================
@@ -653,11 +697,29 @@ pub fn run() {
                     windows_thumbar::windows_update_thumbar_state,
                     commands::proxy_fetch_bytes,
                     commands::save_image_to_gallery,
-                    // Window close-to-tray and minimize-to-tray commands
-                    commands::window::get_close_to_tray,
-                    commands::window::set_close_to_tray,
-                    commands::window::get_minimize_to_tray,
-                    commands::window::set_minimize_to_tray,
+                    // Squeeze Connect commands
+                    commands::squeeze::squeeze_start_server,
+                    commands::squeeze::squeeze_stop_server,
+                    commands::squeeze::squeeze_is_running,
+                    commands::squeeze::squeeze_get_players,
+                    commands::squeeze::squeeze_get_player_state,
+                    commands::squeeze::squeeze_play,
+                    commands::squeeze::squeeze_pause,
+                    commands::squeeze::squeeze_resume,
+                    commands::squeeze::squeeze_stop,
+                    commands::squeeze::squeeze_set_volume,
+                    commands::squeeze::squeeze_next,
+                    commands::squeeze::squeeze_previous,
+                    commands::squeeze::squeeze_seek,
+                    commands::squeeze::squeeze_set_repeat,
+                    commands::squeeze::squeeze_set_shuffle,
+                    commands::squeeze::squeeze_get_queue,
+                    commands::squeeze::squeeze_insert_queue,
+                    commands::squeeze::squeeze_update_queue,
+                    // File watcher commands (desktop only)
+                    commands::library::start_watcher,
+                    commands::library::stop_watcher,
+                    commands::library::get_watcher_status,
                 ]
             }
             #[cfg(mobile)]
@@ -668,8 +730,10 @@ pub fn run() {
                     commands::add_folder,
                     commands::set_single_music_folder,
                     commands::rescan_music,
+                    commands::hard_rescan_music,
                     commands::get_default_music_dirs,
                     commands::get_library,
+                    commands::get_track_by_id,
                     commands::get_tracks_paginated,
                     commands::get_albums_paginated,
                     commands::search_library,
@@ -710,10 +774,19 @@ pub fn run() {
                     commands::is_track_liked,
                     commands::get_liked_track_ids,
                     commands::get_liked_tracks,
+                    commands::like_album,
+                    commands::unlike_album,
+                    commands::get_liked_album_ids,
+                    commands::add_album_to_listen_later,
+                    commands::remove_album_from_listen_later,
+                    commands::is_album_in_listen_later,
+                    commands::get_listen_later_album_ids,
                     commands::record_play,
                     commands::get_top_tracks,
                     commands::get_top_albums,
                     commands::get_recently_played,
+                    commands::get_recently_played_albums,
+                    commands::get_played_this_week,
                     commands::get_top_artists,
                     commands::get_stats_summary,
                     // Lyrics commands
@@ -770,11 +843,16 @@ pub fn run() {
                     commands::get_top_genres_from_mb,
                     commands::enrich_track_metadata_mb,
                     commands::get_release_mb_info,
+                    commands::get_release_detail_mb,
+                    commands::refresh_release_detail_mb,
+                    commands::get_release_cover_art,
                     commands::get_similar_artists_mb,
                     commands::get_artist_discography_mb,
                     commands::search_artists_mb,
                     commands::search_releases_mb,
                     commands::get_release_group_tracks_mb,
+                    commands::enrich_album_year,
+                    commands::enrich_all_album_years,
                     // =========================================================================
                     // SYNC COMMANDS
                     // =========================================================================
@@ -789,6 +867,11 @@ pub fn run() {
                     commands::sync_delete_account,
                     commands::sync_get_access_token,
                     commands::sync_get_device_id,
+                    // Backup commands
+                    commands::backup::list_backups,
+                    commands::backup::export_backup,
+                    commands::backup::import_backup,
+                    commands::backup::delete_backup,
                     // =========================================================================
                     // NATIVE AUDIO COMMANDS
                     // =========================================================================
@@ -807,18 +890,6 @@ pub fn run() {
                     commands::proxy_fetch_bytes,
                     commands::save_image_to_gallery,
                 ]
-            }
-        })
-        .on_window_event(|window, event| {
-            #[cfg(desktop)]
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Check if close-to-tray is enabled
-                let config = commands::window::load_window_config(window.app_handle());
-                if config.close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    tracing::info!("Window hidden to tray");
-                }
             }
         })
         .run(tauri::generate_context!())

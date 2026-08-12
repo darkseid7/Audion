@@ -1,10 +1,10 @@
 <script lang="ts">
-    import { currentView } from "$lib/stores/view";
+    import { currentView, navigationHistory } from "$lib/stores/view";
     import { playlists, albums } from "$lib/stores/library";
 
-    $: items = getBreadcrumbs($currentView);
+    $: items = getBreadcrumbs($currentView, $navigationHistory.previousView);
 
-    function getBreadcrumbs(view: any) {
+    function getBreadcrumbs(view: any, previousView: any) {
         const base = [{ label: "Library", path: null }];
 
         switch (view.type) {
@@ -14,9 +14,10 @@
                 return [...base, { label: "Albums", path: null }];
             case "album-detail": {
                 const album = $albums.find((a) => a.id === view.id);
+                const fromListenLater = previousView?.type === "listen-later";
                 return [
                     ...base,
-                    { label: "Albums", path: "albums" },
+                    { label: fromListenLater ? "Escuchar más tarde" : "Albums", path: fromListenLater ? "listen-later" : "albums" },
                     { label: album ? album.name : "Album", path: null },
                 ];
             }
@@ -41,6 +42,8 @@
                     },
                 ];
             }
+            case "recently-played":
+                return [...base, { label: "This Week", path: null }];
             case "plugins":
                 return [
                     { label: "Settings", path: null },

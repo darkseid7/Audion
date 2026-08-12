@@ -583,14 +583,17 @@
     /* Panel shell                                                          */
     /* ------------------------------------------------------------------ */
     .lyrics-panel {
-        /* Theme-aware lyrics colors - light theme default */
-        --lyrics-inactive: rgba(0, 0, 0, 0.4);
-        --lyrics-near: rgba(0, 0, 0, 0.5);
-        --lyrics-mid: rgba(0, 0, 0, 0.35);
-        --lyrics-far: rgba(0, 0, 0, 0.25);
-        --lyrics-past-near: rgba(0, 0, 0, 0.45);
-        --lyrics-past-mid: rgba(0, 0, 0, 0.3);
-        --lyrics-past-far: rgba(0, 0, 0, 0.2);
+        /* White-based lyrics: the panel background is always dark
+           (--bg-base: #121212, --bg-elevated: #181818) so text MUST
+           be white for legibility. The .near/.mid/.far state selectors
+           handle the dimming for inactive lines. */
+        --lyrics-inactive: rgba(255, 255, 255, 1.0);
+        --lyrics-near: rgba(255, 255, 255, 1.0);
+        --lyrics-mid: rgba(255, 255, 255, 0.9);
+        --lyrics-far: rgba(255, 255, 255, 0.7);
+        --lyrics-past-near: rgba(255, 255, 255, 0.85);
+        --lyrics-past-mid: rgba(255, 255, 255, 0.65);
+        --lyrics-past-far: rgba(255, 255, 255, 0.45);
 
         width: 350px;
         min-width: 300px;
@@ -608,16 +611,7 @@
         animation: slideIn 0.3s ease;
     }
 
-    /* Dark theme overrides */
-    :global([data-theme="dark"]) .lyrics-panel {
-        --lyrics-inactive: rgba(255, 255, 255, 0.4);
-        --lyrics-near: rgba(255, 255, 255, 0.5);
-        --lyrics-mid: rgba(255, 255, 255, 0.35);
-        --lyrics-far: rgba(255, 255, 255, 0.25);
-        --lyrics-past-near: rgba(255, 255, 255, 0.45);
-        --lyrics-past-mid: rgba(255, 255, 255, 0.3);
-        --lyrics-past-far: rgba(255, 255, 255, 0.2);
-    }
+
 
     @keyframes slideIn {
         from {
@@ -907,7 +901,6 @@
     }
 
     .lyric-line {
-        --line-distance: 6;
         font-size: 1.15rem;
         font-weight: 700;
         line-height: 1.6;
@@ -923,8 +916,8 @@
             filter 0.45s cubic-bezier(0.25, 0.1, 0.25, 1),
             opacity 0.4s cubic-bezier(0.25, 0.1, 0.25, 1),
             text-shadow 0.45s ease;
-        filter: blur(calc(var(--line-distance) * 0.5px));
-        opacity: calc(1 - var(--line-distance) * 0.1);
+        filter: blur(0px);
+        opacity: 1;
         transform: scale(0.96) translateY(0);
         transform-origin: left center;
         cursor: pointer;
@@ -936,12 +929,12 @@
     }
     .lyric-line:hover { color: var(--text-secondary); filter: blur(0px); opacity: 1; }
 
-    .lyric-line.near { color: var(--lyrics-near);  filter: blur(0.3px);  opacity: 0.85; transform: scale(0.98); }
-    .lyric-line.mid  { color: var(--lyrics-mid);   filter: blur(1px);    opacity: 0.65; transform: scale(0.96); }
+    .lyric-line.near { color: var(--lyrics-near);  filter: blur(0px);  opacity: 0.95; transform: scale(0.98); }
+    .lyric-line.mid  { color: var(--lyrics-mid);   filter: blur(0px);  opacity: 0.85; transform: scale(0.96); }
     .lyric-line.far  {
         color: var(--lyrics-far);
-        filter: blur(calc(var(--line-distance) * 0.5px));
-        opacity: calc(0.55 - var(--line-distance) * 0.05);
+        filter: blur(0.5px);
+        opacity: 0.65;
         transform: scale(0.95);
     }
 

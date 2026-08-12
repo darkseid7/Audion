@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
     import { onMount } from "svelte";
     import {
         currentTrack,
@@ -17,8 +17,9 @@
         toggleShuffle,
         cycleRepeat,
         isStreaming,
+        activeBackend,
     } from "$lib/stores/player";
-    import { lyricsVisible, toggleLyrics } from "$lib/stores/lyrics";
+    import { lyricsVisible, toggleLyrics, lyricsData } from "$lib/stores/lyrics";
     import {
         isFullScreen,
         toggleFullScreen,
@@ -34,27 +35,40 @@
         getAlbumCoverSrc,
     } from "$lib/api/tauri";
     import { uiSlotManager } from "$lib/plugins/ui-slots";
-    import { pluginDrawerOpen } from "$lib/stores/plugin-drawer";
-    import { goToArtistDetail } from "$lib/stores/view";
+    import { goToArtistDetail, goToAlbumDetail } from "$lib/stores/view";
     import { isMobile } from "$lib/stores/mobile";
+    import { getAlbumCoverFromTracks } from "$lib/stores/library";
     import type { Album } from "$lib/api/tauri";
     import { likedTrackIds, toggleLike } from "$lib/stores/liked";
+    import ConnectPanel from "./ConnectPanel.svelte";
+    import WaveformSeekBar from "./WaveformSeekBar.svelte";
+    import { wsStore } from "$lib/stores/websocket";
+    import { activeSqueezePlayer, squeezePlayerState } from "$lib/stores/squeeze";
     import {
-        sleepTimerActive,
-        sleepTimerLastDurationMinutes,
-        sleepTimerRemainingMs,
-        SLEEP_TIMER_PRESETS,
         startSleepTimer,
         stopSleepTimer,
+        sleepTimerActive,
+        sleepTimerRemainingMs,
+        SLEEP_TIMER_PRESETS,
+        armTrackEndTimer,
+        armAlbumEndTimer,
+        sleepTimerTriggerMode,
+        sleepTimerArmedAlbumId,
     } from "$lib/stores/sleepTimer";
-    import ConnectPanel from "./ConnectPanel.svelte";
-    import { wsStore } from "$lib/stores/websocket";
+
+    let showSleepMenu = false;
+    $: sleepRemaining = $sleepTimerRemainingMs > 0
+        ? formatDuration($sleepTimerRemainingMs / 1000)
+        : "";
 
     $: isCurrentLiked = $currentTrack
         ? $likedTrackIds.has($currentTrack.id)
         : false;
 
-    // Detect live streams (radio, etc.) — no duration, streaming source
+    $: isLocalTrack = !!$currentTrack &&
+        ($currentTrack.source_type === 'local' || (!$currentTrack.source_type && !!$currentTrack.path));
+
+    // Detect live streams (radio, etc.) â€” no duration, streaming source
     $: isLive = $currentTrack
         ? $currentTrack.source_type === "radio" ||
           (isStreaming($currentTrack) &&
@@ -71,10 +85,37 @@
     let imageLoadFailed = false;
     let loadedAlbum: any = null;
     let showConnectPanel = false;
-    let showSleepTimerMenu = false;
-    let sleepTimerElement: HTMLDivElement;
 
     $: connectedDevices = $wsStore.devices.length;
+    $: squeezeConnected = !!$activeSqueezePlayer;
+    $: deviceTooltip = squeezeConnected && $squeezePlayerState
+        ? `Connected to ${$squeezePlayerState.name}`
+        : "Connect to a device";
+
+    // Audio quality info for current track
+    function parseTrackAudioInfo(track: any) {
+        if (!track) return null;
+        let meta: Record<string, any> = {};
+        if (track.metadata_json) {
+            try { meta = JSON.parse(track.metadata_json); } catch {}
+        }
+        const format = (() => {
+            const raw = (track.format || meta['format'] || '').toString().toUpperCase();
+            if (!raw) return null;
+            if (raw === 'MPEG' || raw === 'MP3') return 'MP3';
+            if (raw === 'HI_RES' || raw === 'HIRES') return 'HI-RES';
+            if (raw === 'LOSSLESS') return 'LOSSLESS';
+            return raw;
+        })();
+        const sampleRate: number | null = meta['__sample_rate_hz'] ?? null;
+        const bitDepth: number | null = meta['__bit_depth'] ?? null;
+        const bitrate: number | null = meta['__bitrate_kbps'] ?? null;
+        return { format, sampleRate, bitDepth, bitrate };
+    }
+    function fmtSampleRate(hz: number): string {
+        return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+    }
+    $: currentTrackAudioInfo = parseTrackAudioInfo($currentTrack);
 
     // Slot containers
     let slotStart: HTMLDivElement;
@@ -92,28 +133,35 @@
     }
 
     async function loadTrackCover(track: any) {
+        const trackId = track.id;
         imageLoadFailed = false;
 
         if (track.track_cover_path) {
-            // Priority 1: Track's file-based cover
             albumArt = getTrackCoverSrc(track);
         } else if (track.track_cover) {
-            // Priority 2: Track's base64 cover - old
             albumArt = getAlbumArtSrc(track.track_cover);
         } else if (track.cover_url) {
-            // Priority 3: Streaming track cover URL
             albumArt = track.cover_url;
         } else if (track.album_id) {
-            // Priority 4 & 5: Album art (file-based or base64)
-            await loadAlbumArt(track.album_id);
+            // Try in-memory cover cache first (instant)
+            const memoryCover = getAlbumCoverFromTracks(track.album_id);
+            if (memoryCover) {
+                albumArt = memoryCover;
+                return;
+            }
+            // Fallback: async fetch from backend
+            await loadAlbumArt(track.album_id, trackId);
         } else {
             albumArt = null;
         }
     }
 
-    async function loadAlbumArt(albumId: number) {
+    async function loadAlbumArt(albumId: number, originTrackId: number) {
         try {
             const album = await getAlbum(albumId);
+
+            // Guard: if track changed while we were fetching, discard result
+            if ($currentTrack?.id !== originTrackId) return;
 
             if (!album) {
                 albumArt = null;
@@ -124,10 +172,8 @@
             loadedAlbum = album;
 
             if (album.art_path) {
-                // Priority 4: Album's file-based art
                 albumArt = getAlbumCoverSrc(album);
             } else if (album.art_data) {
-                // Priority 5: Album's base64 art - old
                 albumArt = getAlbumArtSrc(album.art_data);
             } else {
                 albumArt = null;
@@ -147,7 +193,7 @@
         if (!seekBarElement) return;
         const rect = seekBarElement.getBoundingClientRect();
         const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        // Update UI immediately for smooth drag — fire-and-forget to backend
+        // Update UI immediately for smooth drag â€” fire-and-forget to backend
         // i know the drag is buggy. but this is the best we can do
         // Poller will correct position on next tick if keyframe alignment differs.
         currentTime.set(pos * $duration);
@@ -170,59 +216,42 @@
         setVolume(Math.max(0, Math.min(1, pos)));
     }
 
+    /** For squeeze, snap volume to integer 0-100 to avoid float drift. */
+    function squeezeVolStep(delta: number): number {
+        return Math.min(100, Math.max(0, Math.round($volume * 100) + delta)) / 100;
+    }
+
     function handleVolumeKey(e: KeyboardEvent) {
-        const step = 0.05;
         if (e.key === "ArrowRight" || e.key === "ArrowUp") {
             e.preventDefault();
-            setVolume(Math.min(1, $volume + step));
+            if ($activeBackend === 'squeeze') {
+                setVolume(squeezeVolStep(2));
+            } else {
+                setVolume(Math.min(1, $volume + 0.05));
+            }
         } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
             e.preventDefault();
-            setVolume(Math.max(0, $volume - step));
+            if ($activeBackend === 'squeeze') {
+                setVolume(squeezeVolStep(-2));
+            } else {
+                setVolume(Math.max(0, $volume - 0.05));
+            }
         }
     }
 
     function handleVolumeScroll(e: WheelEvent) {
         e.preventDefault();
         if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-        const step = 0.05;
-        if (e.deltaY < 0) {
-            setVolume(Math.min(1, $volume + step));
-        } else if (e.deltaY > 0) {
-            setVolume(Math.max(0, $volume - step));
+        if ($activeBackend === 'squeeze') {
+            setVolume(squeezeVolStep(e.deltaY < 0 ? 2 : -2));
+        } else {
+            const step = 0.05;
+            if (e.deltaY < 0) {
+                setVolume(Math.min(1, $volume + step));
+            } else if (e.deltaY > 0) {
+                setVolume(Math.max(0, $volume - step));
+            }
         }
-    }
-
-    function getRepeatIcon(mode: "none" | "one" | "all"): string {
-        if (mode === "one") return "1";
-        return "";
-    }
-
-    function formatSleepTimerRemaining(ms: number): string {
-        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-
-        if (minutes >= 60) {
-            const hours = Math.floor(minutes / 60);
-            const remainingMinutes = minutes % 60;
-            return `${hours}h ${remainingMinutes}m`;
-        }
-
-        return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-    }
-
-    function toggleSleepTimerMenu() {
-        showSleepTimerMenu = !showSleepTimerMenu;
-    }
-
-    function setSleepTimer(minutes: number) {
-        startSleepTimer(minutes);
-        showSleepTimerMenu = false;
-    }
-
-    function cancelSleepTimer() {
-        stopSleepTimer();
-        showSleepTimerMenu = false;
     }
 
     onMount(() => {
@@ -235,19 +264,9 @@
             isSeeking = false;
             isVolumeChanging = false;
         };
-        const handleDocumentMouseDown = (e: MouseEvent) => {
-            if (
-                showSleepTimerMenu &&
-                sleepTimerElement &&
-                !sleepTimerElement.contains(e.target as Node)
-            ) {
-                showSleepTimerMenu = false;
-            }
-        };
 
         window.addEventListener("mousemove", handleGlobalMouseMove);
         window.addEventListener("mouseup", handleGlobalMouseUp);
-        document.addEventListener("mousedown", handleDocumentMouseDown);
 
         // Register UI slots
         if (slotStart)
@@ -258,7 +277,6 @@
         return () => {
             window.removeEventListener("mousemove", handleGlobalMouseMove);
             window.removeEventListener("mouseup", handleGlobalMouseUp);
-            document.removeEventListener("mousedown", handleDocumentMouseDown);
 
             // Unregister slots
             uiSlotManager.unregisterContainer("playerbar:left");
@@ -361,10 +379,10 @@
                             width="20"
                             height="20"
                             fill={isCurrentLiked
-                                ? "var(--accent-color, #1db954)"
+                                ? "var(--accent-primary, #1db954)"
                                 : "none"}
                             stroke={isCurrentLiked
-                                ? "var(--accent-color, #1db954)"
+                                ? "var(--accent-primary, #1db954)"
                                 : "currentColor"}
                             stroke-width="2"
                         >
@@ -385,9 +403,9 @@
                 >
                     <button
                         class="mini-btn connect-btn"
-                        class:active={connectedDevices > 0}
+                        class:active={connectedDevices > 0 || squeezeConnected}
                         on:click|stopPropagation={() => (showConnectPanel = !showConnectPanel)}
-                        title="Connect to a device"
+                        title={deviceTooltip}
                     >
                         <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22">
                             <path d="M19,2H5A3,3,0,0,0,2,5V15a3,3,0,0,0,3,3H9.17l-1.42,1.41a1,1,0,0,0,0,1.42,1,1,0,0,0,1.42,0L11,18.99,12.83,20.83a1,1,0,0,0,1.42,0,1,1,0,0,0,0-1.42L12.83,18H19a3,3,0,0,0,3-3V5A3,3,0,0,0,19,2Zm1,13a1,1,0,0,1-1,1H5a1,1,0,0,1-1-1V5A1,1,0,0,1,5,4H19a1,1,0,0,1,1,1Z"/>
@@ -435,7 +453,13 @@
         <!-- Track info -->
         <div class="track-info desktop-track-info">
             {#if $currentTrack}
-                <div class="album-art">
+                <div class="album-art" role="button" tabindex="0"
+                    on:click|stopPropagation={() => {
+                        if ($currentTrack?.album_id) goToAlbumDetail($currentTrack.album_id);
+                    }}
+                    on:keydown={(e) => {
+                        if (e.key === "Enter" && $currentTrack?.album_id) goToAlbumDetail($currentTrack.album_id);
+                    }}>
                     {#if albumArt && !imageLoadFailed}
                         <img
                             src={albumArt}
@@ -460,6 +484,18 @@
                 </div>
                 <div class="track-details">
                     <span class="track-title truncate"
+                        role="button"
+                        tabindex="0"
+                        on:click|stopPropagation={() => {
+                            if ($currentTrack?.album_id) {
+                                goToAlbumDetail($currentTrack.album_id);
+                            }
+                        }}
+                        on:keydown={(e) => {
+                            if (e.key === "Enter" && $currentTrack?.album_id) {
+                                goToAlbumDetail($currentTrack.album_id);
+                            }
+                        }}
                         >{$currentTrack.title || "Unknown Title"}</span
                     >
                     <span
@@ -477,6 +513,21 @@
                             }
                         }}>{$currentTrack.artist || "Unknown Artist"}</span
                     >
+                    {#if currentTrackAudioInfo?.format || currentTrackAudioInfo?.sampleRate || currentTrackAudioInfo?.bitDepth || currentTrackAudioInfo?.bitrate}
+                        <div class="player-audio-chips">
+                            {#if currentTrackAudioInfo?.format}
+                                <span class="player-audio-chip format">{currentTrackAudioInfo.format}</span>
+                            {/if}
+                            {#if currentTrackAudioInfo?.sampleRate}
+                                <span class="player-audio-chip">{fmtSampleRate(currentTrackAudioInfo.sampleRate)}</span>
+                            {/if}
+                            {#if currentTrackAudioInfo?.bitDepth}
+                                <span class="player-audio-chip">{currentTrackAudioInfo.bitDepth}bit</span>
+                            {:else if currentTrackAudioInfo?.bitrate}
+                                <span class="player-audio-chip">{currentTrackAudioInfo.bitrate}kbps</span>
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
 
                 <!-- Like button (desktop) -->
@@ -494,10 +545,10 @@
                         width="16"
                         height="16"
                         fill={isCurrentLiked
-                            ? "var(--accent-color, #1db954)"
+                            ? "var(--accent-primary, #1db954)"
                             : "none"}
                         stroke={isCurrentLiked
-                            ? "var(--accent-color, #1db954)"
+                            ? "var(--accent-primary, #1db954)"
                             : "currentColor"}
                         stroke-width="2"
                     >
@@ -620,28 +671,38 @@
                     >
                 {:else}
                     <span class="time">{formatDuration($currentTime)}</span>
-                    <div
-                        class="progress-bar"
-                        bind:this={seekBarElement}
-                        on:mousedown={handleSeekStart}
-                        role="slider"
-                        aria-label="Seek"
-                        aria-valuenow={Math.round($progress * 100)}
-                        aria-valuemin="0"
-                        aria-valuemax="100"
-                        tabindex="0"
-                    >
-                        <div class="progress-track">
+                    {#if isLocalTrack || $activeBackend === 'squeeze'}
+                        <div class="waveform-container">
+                            <WaveformSeekBar
+                                track={$currentTrack}
+                                progress={$progress}
+                                onSeek={seek}
+                            />
+                        </div>
+                    {:else}
+                        <div
+                            class="progress-bar"
+                            bind:this={seekBarElement}
+                            on:mousedown={handleSeekStart}
+                            role="slider"
+                            aria-label="Seek"
+                            aria-valuenow={Math.round($progress * 100)}
+                            aria-valuemin="0"
+                            aria-valuemax="100"
+                            tabindex="0"
+                        >
+                            <div class="progress-track">
+                                <div
+                                    class="progress-fill"
+                                    style="width: {$progress * 100}%"
+                                ></div>
+                            </div>
                             <div
-                                class="progress-fill"
-                                style="width: {$progress * 100}%"
+                                class="progress-thumb"
+                                style="left: {$progress * 100}%"
                             ></div>
                         </div>
-                        <div
-                            class="progress-thumb"
-                            style="left: {$progress * 100}%"
-                        ></div>
-                    </div>
+                    {/if}
                     <span class="time">{formatDuration($duration)}</span>
                 {/if}
             </div>
@@ -656,77 +717,17 @@
                 <!-- Connect button moved into utility group -->
                 <button
                     class="icon-btn connect-btn"
-                    class:active={connectedDevices > 0}
+                    class:active={connectedDevices > 0 || squeezeConnected}
                     on:click={() => (showConnectPanel = !showConnectPanel)}
-                    title="Connect to a device"
+                    title={deviceTooltip}
                 >
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
                         <path d="M19,2H5A3,3,0,0,0,2,5V15a3,3,0,0,0,3,3H9.17l-1.42,1.41a1,1,0,0,0,0,1.42,1,1,0,0,0,1.42,0L11,18.99,12.83,20.83a1,1,0,0,0,1.42,0,1,1,0,0,0,0-1.42L12.83,18H19a3,3,0,0,0,3-3V5A3,3,0,0,0,19,2Zm1,13a1,1,0,0,1-1,1H5a1,1,0,0,1-1-1V5A1,1,0,0,1,5,4H19a1,1,0,0,1,1,1Z"/>
                     </svg>
-                    {#if connectedDevices > 0}
+                    {#if connectedDevices > 0 || squeezeConnected}
                         <div class="device-dot"></div>
                     {/if}
                 </button>
-                <div class="sleep-timer" bind:this={sleepTimerElement}>
-                    <button
-                        class="icon-btn"
-                        class:active={$sleepTimerActive}
-                        on:click={toggleSleepTimerMenu}
-                        title={$sleepTimerActive
-                            ? `Sleep timer: ${formatSleepTimerRemaining($sleepTimerRemainingMs)} remaining`
-                            : "Sleep timer"}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="20"
-                            height="20"
-                        >
-                            <path
-                                d="M9.37 5.51A7 7 0 0 0 18.5 14.63a8 8 0 1 1-9.13-9.12z"
-                            />
-                        </svg>
-                    </button>
-
-                    {#if showSleepTimerMenu}
-                        <div class="sleep-timer-menu">
-                            <div class="sleep-timer-header">
-                                <span class="sleep-timer-title">Sleep timer</span>
-                                {#if $sleepTimerActive}
-                                    <span class="sleep-timer-remaining"
-                                        >{formatSleepTimerRemaining(
-                                            $sleepTimerRemainingMs,
-                                        )}</span
-                                    >
-                                {/if}
-                            </div>
-
-                            <div class="sleep-timer-presets">
-                                {#each SLEEP_TIMER_PRESETS as minutes}
-                                    <button
-                                        class="sleep-preset-btn"
-                                        class:active={
-                                            $sleepTimerLastDurationMinutes ===
-                                            minutes
-                                        }
-                                        on:click={() => setSleepTimer(minutes)}
-                                    >
-                                        {minutes}m
-                                    </button>
-                                {/each}
-                            </div>
-
-                            {#if $sleepTimerActive}
-                                <button
-                                    class="sleep-cancel-btn"
-                                    on:click={cancelSleepTimer}
-                                >
-                                    Cancel timer
-                                </button>
-                            {/if}
-                        </div>
-                    {/if}
-                </div>
 
                 <button
                     class="icon-btn"
@@ -739,25 +740,101 @@
                     </svg>
                 </button>
                 <button
-                    class="icon-btn"
+                    class="icon-btn lyrics-btn"
                     class:active={$lyricsVisible}
+                    class:has-lyrics={$lyricsData != null}
                     on:click={toggleLyrics}
                     title="Lyrics (L)"
                 >
                     <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
                         <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6zm-2 16c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
                     </svg>
+                    {#if $lyricsData != null}
+                        <span class="lyrics-dot"></span>
+                    {/if}
                 </button>
-                <button
-                    class="icon-btn"
-                    class:active={$pluginDrawerOpen}
-                    on:click={() => pluginDrawerOpen.set(true)}
-                    title="Plugin Actions"
-                >
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
-                        <path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z" />
-                    </svg>
-                </button>
+
+                <!-- Sleep Timer -->
+                <div class="sleep-timer">
+                    <button
+                        class="icon-btn"
+                        class:active={$sleepTimerActive || $sleepTimerTriggerMode !== 'time'}
+                        on:click={() => (showSleepMenu = !showSleepMenu)}
+                        title="Sleep Timer"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+                            <path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm1-8h4v2h-6V7h2v5z"/>
+                        </svg>
+                        {#if $sleepTimerActive}
+                            <span class="sleep-remaining">{sleepRemaining}</span>
+                        {/if}
+                    </button>
+
+                    {#if showSleepMenu}
+                        <!-- svelte-ignore a11y-click-events-have-key-events -->
+                        <!-- svelte-ignore a11y-no-static-element-interactions -->
+                        <div
+                            class="sleep-timer-menu"
+                            on:click|stopPropagation
+                            role="menu"
+                        >
+                            <div class="sleep-timer-header">
+                                <span class="sleep-timer-title">Sleep Timer</span>
+                                {#if sleepRemaining}
+                                    <span class="sleep-timer-remaining">{sleepRemaining}</span>
+                                {/if}
+                            </div>
+                            <div class="sleep-timer-presets">
+                                {#each SLEEP_TIMER_PRESETS as minutes}
+                                    <button
+                                        class="sleep-preset-btn"
+                                        on:click={() => {
+                                            startSleepTimer(minutes);
+                                            showSleepMenu = false;
+                                        }}
+                                    >
+                                        {minutes} min
+                                    </button>
+                                {/each}
+                                <button
+                                    class="sleep-preset-btn"
+                                    class:active={$sleepTimerTriggerMode === 'track_end'}
+                                    on:click={() => {
+                                        armTrackEndTimer();
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    End of Track
+                                </button>
+                                <button
+                                    class="sleep-preset-btn"
+                                    class:active={$sleepTimerTriggerMode === 'album_end'}
+                                    on:click={() => {
+                                        if ($currentTrack?.album_id != null) {
+                                            armAlbumEndTimer($currentTrack.album_id);
+                                        } else {
+                                            armAlbumEndTimer(null);
+                                        }
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    End of Album
+                                </button>
+                            </div>
+                            {#if $sleepTimerActive || $sleepTimerTriggerMode !== 'time'}
+                                <button
+                                    class="sleep-cancel-btn"
+                                    on:click={() => {
+                                        stopSleepTimer(true);
+                                        showSleepMenu = false;
+                                    }}
+                                >
+                                    Cancel Timer
+                                </button>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
             </div>
 
             <div class="volume-controls-main">
@@ -801,6 +878,17 @@
                         </svg>
                     {/if}
                 </button>
+                {#if $activeBackend === 'squeeze'}
+                    <button
+                        class="icon-btn vol-step-btn"
+                        on:click={() => setVolume(squeezeVolStep(-1))}
+                        title="Volume −1%"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                            <path d="M19 13H5v-2h14v2z"/>
+                        </svg>
+                    </button>
+                {/if}
                 <div
                     class="volume-bar"
                     bind:this={volumeBarElement}
@@ -822,6 +910,20 @@
                     </div>
                     <div class="volume-thumb" style="left: {$volume * 100}%"></div>
                 </div>
+                {#if $activeBackend === 'squeeze'}
+                    <button
+                        class="icon-btn vol-step-btn"
+                        on:click={() => setVolume(squeezeVolStep(1))}
+                        title="Volume +1%"
+                    >
+                        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+                            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                        </svg>
+                    </button>
+                    <span class="vol-db-label" title="Volume">
+                        {Math.round($volume * 100)}%
+                    </span>
+                {/if}
             </div>
 
             <div class="view-controls">
@@ -861,7 +963,7 @@
 
 <style>
     .player-bar {
-        height: var(--player-height);
+        height: calc(var(--player-height) + 60px);
         background-color: var(--bg-elevated);
         border-top: 1px solid var(--border-color);
         display: grid;
@@ -883,7 +985,7 @@
     .track-info {
         display: flex;
         align-items: center;
-        gap: var(--spacing-sm);
+        gap: 12px;
         min-width: 0;
         overflow: hidden;
     }
@@ -893,8 +995,8 @@
     }
 
     .album-art {
-        width: 54px;
-        height: 54px;
+        width: 96px;
+        height: 96px;
         border-radius: var(--radius-md);
         overflow: hidden;
         flex-shrink: 0;
@@ -929,7 +1031,7 @@
     }
 
     .track-title {
-        font-size: 0.875rem;
+        font-size: 1.32rem;
         font-weight: 500;
     }
 
@@ -940,7 +1042,7 @@
     }
 
     .track-artist {
-        font-size: 0.75rem;
+        font-size: 1.12rem;
         color: var(--text-secondary);
     }
 
@@ -948,6 +1050,44 @@
         color: var(--text-primary);
         text-decoration: underline;
         cursor: pointer;
+    }
+
+    .track-album-link {
+        color: var(--text-subdued);
+        cursor: pointer;
+    }
+
+    .track-album-link:hover {
+        color: var(--text-primary);
+        text-decoration: underline;
+    }
+
+    .player-audio-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+        margin-top: 4px;
+    }
+
+    .player-audio-chip {
+        display: inline-flex;
+        align-items: center;
+        font-size: 0.6rem;
+        font-weight: 600;
+        line-height: 1;
+        letter-spacing: 0.03em;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: var(--bg-highlight);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-color);
+        white-space: nowrap;
+    }
+
+    .player-audio-chip.format {
+        background: color-mix(in oklab, var(--accent-primary) 15%, transparent);
+        color: var(--accent-primary);
+        border-color: color-mix(in oklab, var(--accent-primary) 40%, transparent);
     }
 
     .no-track {
@@ -977,7 +1117,22 @@
     }
 
     .icon-btn.active {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
+    }
+
+    .lyrics-btn {
+        position: relative;
+    }
+
+    .lyrics-dot {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 6px;
+        height: 6px;
+        background: var(--accent-primary, #1db954);
+        border-radius: 50%;
+        pointer-events: none;
     }
 
     .connect-btn {
@@ -990,13 +1145,13 @@
         right: 4px;
         width: 6px;
         height: 6px;
-        background: var(--accent-color, #1db954);
+        background: var(--accent-primary, #1db954);
         border-radius: 50%;
-        box-shadow: 0 0 5px var(--accent-color, #1db954);
+        box-shadow: 0 0 5px var(--accent-primary, #1db954);
     }
 
     .like-btn.liked {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     .like-btn.liked:hover {
@@ -1022,7 +1177,7 @@
     }
 
     .mini-like-btn.liked {
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     /* Playback controls */
@@ -1030,9 +1185,15 @@
         display: flex;
         flex-direction: column;
         align-items: center;
+        justify-content: center;
+        width: calc(100% + 60px);
+        margin-left: -30px;
+        padding: 0;
+        box-sizing: border-box;
         gap: var(--spacing-xs);
         min-width: 0;
         overflow: visible;
+        height: 100%;
     }
 
     .controls-buttons {
@@ -1118,7 +1279,6 @@
         align-items: center;
         gap: var(--spacing-md);
         width: 100%;
-        max-width: 600px;
     }
 
     .time {
@@ -1135,6 +1295,11 @@
         align-items: center;
         cursor: pointer;
         position: relative;
+    }
+
+    .waveform-container {
+        flex: 1;
+        height: 44px;
     }
 
     .volume-bar {
@@ -1247,7 +1412,7 @@
         min-width: 0;
     }
 
-    /* Live progress bar — non-interactive, steady glow */
+    /* Live progress bar â€” non-interactive, steady glow */
     .live-bar {
         cursor: default;
     }
@@ -1330,8 +1495,23 @@
 
     .sleep-timer-remaining {
         font-size: 0.72rem;
-        color: var(--accent-color, #1db954);
+        color: var(--accent-primary, #1db954);
         font-weight: 600;
+    }
+
+    .sleep-remaining {
+        position: absolute;
+        top: -2px;
+        right: -4px;
+        font-size: 0.55rem;
+        font-weight: 700;
+        color: var(--accent-primary, #1db954);
+        background: var(--bg-elevated);
+        border-radius: 4px;
+        padding: 0 3px;
+        line-height: 1.2;
+        white-space: nowrap;
+        pointer-events: none;
     }
 
     .sleep-timer-presets {
@@ -1354,13 +1534,13 @@
 
     .sleep-preset-btn:hover,
     .sleep-cancel-btn:hover {
-        border-color: var(--accent-color, #1db954);
+        border-color: var(--accent-primary, #1db954);
         color: var(--text-primary);
     }
 
     .sleep-preset-btn.active {
-        border-color: var(--accent-color, #1db954);
-        color: var(--accent-color, #1db954);
+        border-color: var(--accent-primary, #1db954);
+        color: var(--accent-primary, #1db954);
     }
 
     .sleep-cancel-btn {
@@ -1372,6 +1552,31 @@
         display: flex;
         align-items: center;
         gap: 4px;
+    }
+
+    .vol-step-btn {
+        width: 22px;
+        height: 22px;
+        min-width: 22px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        opacity: 0.7;
+    }
+
+    .vol-step-btn:hover {
+        opacity: 1;
+    }
+
+    .vol-db-label {
+        font-size: 10px;
+        color: var(--text-secondary);
+        min-width: 38px;
+        text-align: center;
+        white-space: nowrap;
+        user-select: none;
     }
 
     .view-controls {

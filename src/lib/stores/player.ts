@@ -1,27 +1,64 @@
 // Player store - manages audio playback state
-import { writable, derived, get } from 'svelte/store';
-import { wsStore } from './websocket';
-import type { Track } from '$lib/api/tauri';
+import { writable, derived, get } from "svelte/store";
+import { wsStore } from "./websocket";
+import type { Track } from "$lib/api/tauri";
 import {
-    getAudioSrc,
-    getAlbumArtSrc,
-    getTrackCoverSrc,
-    convertFileSrc,
-    listen,
-    initWindowsThumbar,
-    updateWindowsThumbarState
-} from '$lib/api/tauri';
-import { invoke } from '@tauri-apps/api/core';
-import { addToast } from '$lib/stores/toast';
-import { EventEmitter, type PluginEvents } from '$lib/plugins/event-emitter';
-import { tracks as libraryTracks, getFullTrack, getAlbumCoverFromTracks, updateTrackCover, getTrackByIdSync } from '$lib/stores/library';
-import { fetchTrackCover } from '$lib/services/cover-fetcher';
-import { appSettings } from '$lib/stores/settings';
-import { equalizer, EQ_FREQUENCIES, type EqualizerState } from '$lib/stores/equalizer';
-import { pluginStore } from '$lib/stores/plugin-store';
-import { recordTrackPlay } from '$lib/stores/activity';
-import { submitListenbrainzListen } from '$lib/api/tauri';
-import { activeRemoteDevice } from '$lib/stores/websocket';
+  getAudioSrc,
+  getAlbumArtSrc,
+  getTrackCoverSrc,
+  convertFileSrc,
+  listen,
+  initWindowsThumbar,
+  updateWindowsThumbarState,
+} from "$lib/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
+import { addToast } from "$lib/stores/toast";
+import {
+  handleSleepTimerCheck,
+  isTimerModeTrackOrAlbumEnd,
+  isTimerModeAlbumEnd,
+  stopSleepTimer,
+} from "./sleepTimer";
+import { EventEmitter, type PluginEvents } from "$lib/plugins/event-emitter";
+import {
+  tracks as libraryTracks,
+  getFullTrack,
+  getAlbumCoverFromTracks,
+  updateTrackCover,
+  getTrackByIdSync,
+  incrementPlayCount,
+} from "$lib/stores/library";
+import { fetchTrackCover } from "$lib/services/cover-fetcher";
+import { appSettings } from "$lib/stores/settings";
+import {
+  equalizer,
+  EQ_FREQUENCIES,
+  type EqualizerState,
+} from "$lib/stores/equalizer";
+import { pluginStore } from "$lib/stores/plugin-store";
+import { recordTrackPlay } from "$lib/stores/activity";
+import { submitListenbrainzListen } from "$lib/api/tauri";
+import { activeRemoteDevice } from "$lib/stores/websocket";
+import {
+  activeSqueezePlayer,
+  squeezePlayerState,
+  setSqueezeVolumeCooldown,
+  invalidateSqueezePollOwnership,
+} from "$lib/stores/squeeze";
+import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
+import {
+  squeezePause,
+  squeezeResume,
+  squeezeNext,
+  squeezePrevious,
+  squeezeSeek,
+  squeezeSetVolume,
+  squeezeSetShuffle,
+  squeezeSetRepeat,
+  squeezePlay,
+  squeezeInsertQueue,
+  squeezeUpdateQueue,
+} from "$lib/api/tauri";
 
 // =============================================================================
 // NATIVE AUDIO BACKEND
@@ -31,24 +68,36 @@ import { activeRemoteDevice } from '$lib/stores/websocket';
 // EQ is applied consistently across both playback pipelines.
 // =============================================================================
 import {
-    nativeAudioPlay,
-    nativeAudioPreload,
-    nativeAudioPause,
-    nativeAudioResume,
-    nativeAudioStop,
-    nativeAudioSetVolume,
-    nativeAudioSeek,
-    nativeAudioGetState,
-    nativeAudioSetRepeatOne,
-    nativeAudioPollEvent,
-    type AudioEventType,
-    nativeAudioSetEq,
-    shouldUseNativeAudio,
-    type NativePlaybackState
-} from '$lib/services/native-audio';
+  nativeAudioPlay,
+  nativeAudioPreload,
+  nativeAudioPause,
+  nativeAudioResume,
+  nativeAudioStop,
+  nativeAudioSetVolume,
+  nativeAudioSeek,
+  nativeAudioGetState,
+  nativeAudioSetRepeatOne,
+  nativeAudioPollEvent,
+  type AudioEventType,
+  nativeAudioSetEq,
+  shouldUseNativeAudio,
+  type NativePlaybackState,
+} from "$lib/services/native-audio";
 
 // Interval for polling native playback state
 let nativeStatePoller: ReturnType<typeof setInterval> | null = null;
+
+// Watchdog: if the native backend reports the position stuck at/past the
+// track duration while still "playing", the TrackFinished event has been
+// lost (or never fired for this format) and we must manually advance the
+// queue. Reset on every new track and when an explicit end event arrives.
+let pendingForcedEnd: ReturnType<typeof setTimeout> | null = null;
+function clearPendingForcedEnd() {
+  if (pendingForcedEnd !== null) {
+    clearTimeout(pendingForcedEnd);
+    pendingForcedEnd = null;
+  }
+}
 
 // HTML5 Audio element for streaming (initialized lazily)
 let html5Audio: HTMLAudioElement | null = null;
@@ -64,303 +113,352 @@ let lastEqBypassWarningHost: string | null = null;
 let dashPlayer: any | null = null;
 
 // Track which backend is currently active ('native', 'html5', 'remote', or 'none')
-export type ActiveBackend = 'native' | 'html5' | 'remote' | 'none';
-export const activeBackend = writable<ActiveBackend>('none');
+export type ActiveBackend = "native" | "html5" | "remote" | "squeeze" | "none";
+export const activeBackend = writable<ActiveBackend>("none");
+// Squeeze polling uses an epoch in addition to current store values so an
+// A -> other -> A transition cannot let an old request publish.
+activeBackend.subscribe(() => invalidateSqueezePollOwnership());
 
 // Track if we should use native audio based on platform/settings
 let nativeAudioUsed = false;
 
-type AudioPathKind = 'local' | 'stream' | 'blob' | 'custom-scheme';
+type AudioPathKind = "local" | "stream" | "blob" | "custom-scheme";
 
 function classifyAudioPath(path: string): AudioPathKind {
-    if (path.startsWith('blob:')) return 'blob';
-    if (path.startsWith('http://') || path.startsWith('https://')) return 'stream';
-    if (path.startsWith('file://') || path.startsWith('asset://') || path.startsWith('tauri://')) return 'local';
-    if (path.includes('://')) return 'custom-scheme';
-    return 'local'; // absolute/relative filesystem path
+  if (path.startsWith("blob:")) return "blob";
+  if (path.startsWith("http://") || path.startsWith("https://"))
+    return "stream";
+  if (
+    path.startsWith("file://") ||
+    path.startsWith("asset://") ||
+    path.startsWith("tauri://")
+  )
+    return "local";
+  if (path.includes("://")) return "custom-scheme";
+  return "local"; // absolute/relative filesystem path
 }
 
 // Lazily load dash.js and create a player instance
 async function getDashPlayer(): Promise<any> {
-    if (typeof window === 'undefined') throw new Error('No window');
+  if (typeof window === "undefined") throw new Error("No window");
 
-    // Load dash.js from CDN if not already loaded
-    if (!(window as any).dashjs) {
-        await new Promise<void>((resolve, reject) => {
-            const script = document.createElement('script');
-            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/dashjs/4.7.4/dash.all.min.js';
-            script.onload = () => resolve();
-            script.onerror = () => reject(new Error('Failed to load dash.js'));
-            document.head.appendChild(script);
-        });
-    }
-
-    return (window as any).dashjs;
-}
-
-async function playWithDash(blobUrl: string, audioElement: HTMLAudioElement): Promise<void> {
-
-    if (dashPlayer) {
-        try { dashPlayer.destroy(); } catch (_) { }
-        dashPlayer = null;
-    }
-
-    const mpdText = await fetch(blobUrl).then(r => r.text());
-    URL.revokeObjectURL(blobUrl);
-
-    const bytes = new TextEncoder().encode(mpdText);
-    const binary = Array.from(bytes).reduce((acc, byte) => acc + String.fromCharCode(byte), '');
-    const dataUrl = 'data:application/dash+xml;base64,' + btoa(binary);
-
-    const dashjs = await getDashPlayer();
-    dashPlayer = dashjs.MediaPlayer().create();
-    dashPlayer.initialize(audioElement, dataUrl, true);
-
-    dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
-        console.error('[Player] dash.js error:', e);
-        addToast(`Hi-Res playback error: ${e.error?.message || 'Unknown error'}`, 'error');
+  // Load dash.js from CDN if not already loaded
+  if (!(window as any).dashjs) {
+    await new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src =
+        "https://cdnjs.cloudflare.com/ajax/libs/dashjs/4.7.4/dash.all.min.js";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Failed to load dash.js"));
+      document.head.appendChild(script);
     });
+  }
+
+  return (window as any).dashjs;
 }
 
+async function playWithDash(
+  blobUrl: string,
+  audioElement: HTMLAudioElement,
+): Promise<void> {
+  if (dashPlayer) {
+    try {
+      dashPlayer.destroy();
+    } catch (_) {}
+    dashPlayer = null;
+  }
+
+  const mpdText = await fetch(blobUrl).then((r) => r.text());
+  URL.revokeObjectURL(blobUrl);
+
+  const bytes = new TextEncoder().encode(mpdText);
+  const binary = Array.from(bytes).reduce(
+    (acc, byte) => acc + String.fromCharCode(byte),
+    "",
+  );
+  const dataUrl = "data:application/dash+xml;base64," + btoa(binary);
+
+  const dashjs = await getDashPlayer();
+  dashPlayer = dashjs.MediaPlayer().create();
+  dashPlayer.initialize(audioElement, dataUrl, true);
+
+  dashPlayer.on(dashjs.MediaPlayer.events.ERROR, (e: any) => {
+    console.error("[Player] dash.js error:", e);
+    addToast(
+      `Hi-Res playback error: ${e.error?.message || "Unknown error"}`,
+      "error",
+    );
+  });
+}
 
 function getHtml5Audio(): HTMLAudioElement {
-    if (!html5Audio && typeof window !== 'undefined') {
-        html5Audio = new Audio();
-        setupHtml5AudioListeners(html5Audio);
-    }
-    return html5Audio!;
+  if (!html5Audio && typeof window !== "undefined") {
+    html5Audio = new Audio();
+    setupHtml5AudioListeners(html5Audio);
+  }
+  return html5Audio!;
 }
 
 function cleanupHtml5EqGraph(): void {
-    if (html5AudioSourceNode) {
-        try { html5AudioSourceNode.disconnect(); } catch (_) { }
-        html5AudioSourceNode = null;
-    }
-    html5EqFilters.forEach((filter) => {
-        try { filter.disconnect(); } catch (_) { }
-    });
-    html5EqFilters = [];
-    if (html5EqGainNode) {
-        try { html5EqGainNode.disconnect(); } catch (_) { }
-        html5EqGainNode = null;
-    }
-    if (html5AudioContext) {
-        html5AudioContext.close().catch(() => { });
-        html5AudioContext = null;
-    }
+  if (html5AudioSourceNode) {
+    try {
+      html5AudioSourceNode.disconnect();
+    } catch (_) {}
+    html5AudioSourceNode = null;
+  }
+  html5EqFilters.forEach((filter) => {
+    try {
+      filter.disconnect();
+    } catch (_) {}
+  });
+  html5EqFilters = [];
+  if (html5EqGainNode) {
+    try {
+      html5EqGainNode.disconnect();
+    } catch (_) {}
+    html5EqGainNode = null;
+  }
+  if (html5AudioContext) {
+    html5AudioContext.close().catch(() => {});
+    html5AudioContext = null;
+  }
 }
 
 function recreateHtml5AudioElement(): HTMLAudioElement {
-    if (html5Audio) {
-        html5Audio.pause();
-        html5Audio.src = '';
-    }
+  if (html5Audio) {
+    html5Audio.pause();
+    html5Audio.src = "";
+  }
 
-    cleanupHtml5EqGraph();
+  cleanupHtml5EqGraph();
 
-    html5Audio = new Audio();
-    setupHtml5AudioListeners(html5Audio);
-    return html5Audio;
+  html5Audio = new Audio();
+  setupHtml5AudioListeners(html5Audio);
+  return html5Audio;
 }
 
 function canUseHtml5EqForPath(path: string): boolean {
-    if (typeof window === 'undefined') return false;
+  if (typeof window === "undefined") return false;
 
-    const kind = classifyAudioPath(path);
-    if (kind === 'local' || kind === 'blob') return true;
-    if (kind !== 'stream') return true;
+  const kind = classifyAudioPath(path);
+  if (kind === "local" || kind === "blob") return true;
+  if (kind !== "stream") return true;
 
-    // Cross-origin streams often block WebAudio processing without CORS headers.
-    // To avoid silent playback, only allow same-origin streams in EQ graph.
-    try {
-        const url = new URL(path);
-        return url.origin === window.location.origin;
-    } catch {
-        return false;
-    }
+  // Cross-origin streams often block WebAudio processing without CORS headers.
+  // To avoid silent playback, only allow same-origin streams in EQ graph.
+  try {
+    const url = new URL(path);
+    return url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
 }
 
-async function prepareHtml5AudioForPath(audio: HTMLAudioElement, path: string): Promise<HTMLAudioElement> {
-    const eqEnabled = get(equalizer).enabled;
-    const canUseEq = canUseHtml5EqForPath(path);
+async function prepareHtml5AudioForPath(
+  audio: HTMLAudioElement,
+  path: string,
+): Promise<HTMLAudioElement> {
+  const eqEnabled = get(equalizer).enabled;
+  const canUseEq = canUseHtml5EqForPath(path);
 
-    if (eqEnabled && canUseEq) {
-        if (classifyAudioPath(path) === 'stream') {
-            audio.crossOrigin = 'anonymous';
-        }
-        ensureHtml5EqGraph(audio);
-        await resumeHtml5AudioContext();
-        return audio;
+  if (eqEnabled && canUseEq) {
+    if (classifyAudioPath(path) === "stream") {
+      audio.crossOrigin = "anonymous";
     }
-
-    // If this element is already attached to a WebAudio source node, it will stay routed
-    // through that graph. Recreate the element to restore direct output when EQ must be bypassed.
-    if (html5AudioSourceNode) {
-        const next = recreateHtml5AudioElement();
-        next.volume = audio.volume;
-        audio = next;
-    }
-
-    if (eqEnabled && !canUseEq && classifyAudioPath(path) === 'stream') {
-        try {
-            const host = new URL(path).host;
-            if (lastEqBypassWarningHost !== host) {
-                lastEqBypassWarningHost = host;
-                addToast('EQ is bypassed for this stream due to CORS restrictions', 'warning');
-            }
-        } catch {
-            addToast('EQ is bypassed for this stream due to CORS restrictions', 'warning');
-        }
-    }
-
+    ensureHtml5EqGraph(audio);
+    await resumeHtml5AudioContext();
     return audio;
+  }
+
+  // If this element is already attached to a WebAudio source node, it will stay routed
+  // through that graph. Recreate the element to restore direct output when EQ must be bypassed.
+  if (html5AudioSourceNode) {
+    const next = recreateHtml5AudioElement();
+    next.volume = audio.volume;
+    audio = next;
+  }
+
+  if (eqEnabled && !canUseEq && classifyAudioPath(path) === "stream") {
+    try {
+      const host = new URL(path).host;
+      if (lastEqBypassWarningHost !== host) {
+        lastEqBypassWarningHost = host;
+        addToast(
+          "EQ is bypassed for this stream due to CORS restrictions",
+          "warning",
+        );
+      }
+    } catch {
+      addToast(
+        "EQ is bypassed for this stream due to CORS restrictions",
+        "warning",
+      );
+    }
+  }
+
+  return audio;
 }
 
 function ensureHtml5EqGraph(audio: HTMLAudioElement): void {
-    if (typeof window === 'undefined') return;
-    if (html5AudioSourceNode && html5EqGainNode && html5EqFilters.length > 0) return;
+  if (typeof window === "undefined") return;
+  if (html5AudioSourceNode && html5EqGainNode && html5EqFilters.length > 0)
+    return;
+
+  try {
+    if (!html5AudioContext) {
+      const AudioContextCtor =
+        (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextCtor) {
+        console.warn("[EQ] WebAudio AudioContext is not available");
+        return;
+      }
+      html5AudioContext = new AudioContextCtor();
+    }
+    const ctx = html5AudioContext;
+    if (!ctx) return;
+
+    if (!html5AudioSourceNode) {
+      html5AudioSourceNode = ctx.createMediaElementSource(audio);
+    }
+
+    if (!html5EqGainNode) {
+      html5EqGainNode = ctx.createGain();
+      html5EqGainNode.gain.value = 1;
+    }
+
+    if (html5EqFilters.length === 0) {
+      html5EqFilters = EQ_FREQUENCIES.map((freq) => {
+        const filter = ctx.createBiquadFilter();
+        filter.type = "peaking";
+        filter.frequency.value = freq;
+        filter.Q.value = 1.41;
+        filter.gain.value = 0;
+        return filter;
+      });
+    }
 
     try {
-        if (!html5AudioContext) {
-            const AudioContextCtor = (window as any).AudioContext || (window as any).webkitAudioContext;
-            if (!AudioContextCtor) {
-                console.warn('[EQ] WebAudio AudioContext is not available');
-                return;
-            }
-            html5AudioContext = new AudioContextCtor();
-        }
-        const ctx = html5AudioContext;
-        if (!ctx) return;
+      html5AudioSourceNode.disconnect();
+    } catch (_) {}
+    html5EqFilters.forEach((filter) => {
+      try {
+        filter.disconnect();
+      } catch (_) {}
+    });
+    try {
+      html5EqGainNode.disconnect();
+    } catch (_) {}
 
-        if (!html5AudioSourceNode) {
-            html5AudioSourceNode = ctx.createMediaElementSource(audio);
-        }
-
-        if (!html5EqGainNode) {
-            html5EqGainNode = ctx.createGain();
-            html5EqGainNode.gain.value = 1;
-        }
-
-        if (html5EqFilters.length === 0) {
-            html5EqFilters = EQ_FREQUENCIES.map((freq) => {
-                const filter = ctx.createBiquadFilter();
-                filter.type = 'peaking';
-                filter.frequency.value = freq;
-                filter.Q.value = 1.41;
-                filter.gain.value = 0;
-                return filter;
-            });
-        }
-
-        try { html5AudioSourceNode.disconnect(); } catch (_) { }
-        html5EqFilters.forEach((filter) => {
-            try { filter.disconnect(); } catch (_) { }
-        });
-        try { html5EqGainNode.disconnect(); } catch (_) { }
-
-        html5AudioSourceNode.connect(html5EqFilters[0]);
-        for (let i = 0; i < html5EqFilters.length - 1; i++) {
-            html5EqFilters[i].connect(html5EqFilters[i + 1]);
-        }
-        html5EqFilters[html5EqFilters.length - 1].connect(html5EqGainNode);
-        html5EqGainNode.connect(ctx.destination);
-
-        applyHtml5EqState(equalizer.getState());
-    } catch (err) {
-        console.error('[EQ] Failed to initialize HTML5 EQ graph:', err);
-        html5AudioSourceNode = null;
-        html5EqFilters = [];
-        html5EqGainNode = null;
+    html5AudioSourceNode.connect(html5EqFilters[0]);
+    for (let i = 0; i < html5EqFilters.length - 1; i++) {
+      html5EqFilters[i].connect(html5EqFilters[i + 1]);
     }
+    html5EqFilters[html5EqFilters.length - 1].connect(html5EqGainNode);
+    html5EqGainNode.connect(ctx.destination);
+
+    applyHtml5EqState(equalizer.getState());
+  } catch (err) {
+    console.error("[EQ] Failed to initialize HTML5 EQ graph:", err);
+    html5AudioSourceNode = null;
+    html5EqFilters = [];
+    html5EqGainNode = null;
+  }
 }
 
 function applyHtml5EqState(state: EqualizerState): void {
-    if (!html5AudioContext || html5EqFilters.length === 0) return;
+  if (!html5AudioContext || html5EqFilters.length === 0) return;
 
-    const now = html5AudioContext.currentTime;
-    for (let i = 0; i < html5EqFilters.length; i++) {
-        const gain = state.enabled ? (state.bands[i]?.gain ?? 0) : 0;
-        html5EqFilters[i].gain.cancelScheduledValues(now);
-        html5EqFilters[i].gain.setTargetAtTime(gain, now, 0.01);
-    }
+  const now = html5AudioContext.currentTime;
+  for (let i = 0; i < html5EqFilters.length; i++) {
+    const gain = state.enabled ? (state.bands[i]?.gain ?? 0) : 0;
+    html5EqFilters[i].gain.cancelScheduledValues(now);
+    html5EqFilters[i].gain.setTargetAtTime(gain, now, 0.01);
+  }
 }
 
 async function resumeHtml5AudioContext(): Promise<void> {
-    if (!html5AudioContext || html5AudioContext.state !== 'suspended') return;
+  if (!html5AudioContext || html5AudioContext.state !== "suspended") return;
 
-    try {
-        await html5AudioContext.resume();
-    } catch (err) {
-        console.warn('[EQ] Failed to resume HTML5 AudioContext:', err);
-    }
+  try {
+    await html5AudioContext.resume();
+  } catch (err) {
+    console.warn("[EQ] Failed to resume HTML5 AudioContext:", err);
+  }
 }
 
 function setupHtml5AudioListeners(audio: HTMLAudioElement): void {
-    audio.addEventListener('timeupdate', () => {
-        if (get(activeBackend) === 'html5') {
-            currentTime.set(audio.currentTime);
-        }
-    });
+  audio.addEventListener("timeupdate", () => {
+    if (get(activeBackend) === "html5") {
+      currentTime.set(audio.currentTime);
+    }
+  });
 
-    audio.addEventListener('durationchange', () => {
-        if (get(activeBackend) === 'html5') {
-            if (audio.duration && !isNaN(audio.duration)) {
-                duration.set(audio.duration);
-            }
-        }
-    });
+  audio.addEventListener("durationchange", () => {
+    if (get(activeBackend) === "html5") {
+      if (audio.duration && !isNaN(audio.duration)) {
+        duration.set(audio.duration);
+      }
+    }
+  });
 
-    audio.addEventListener('play', () => {
-        if (get(activeBackend) === 'html5') {
-            isPlaying.set(true);
-            updateMediaSessionPlaybackState('playing');
-        }
-    });
+  audio.addEventListener("play", () => {
+    if (get(activeBackend) === "html5") {
+      isPlaying.set(true);
+      updateMediaSessionPlaybackState("playing");
+    }
+  });
 
-    audio.addEventListener('pause', () => {
-        if (get(activeBackend) === 'html5') {
-            isPlaying.set(false);
-            updateMediaSessionPlaybackState('paused');
-        }
-    });
+  audio.addEventListener("pause", () => {
+    if (get(activeBackend) === "html5") {
+      isPlaying.set(false);
+      updateMediaSessionPlaybackState("paused");
+    }
+  });
 
-    audio.addEventListener('ended', () => {
-        if (get(activeBackend) === 'html5') {
-            handleTrackEnd();
-        }
-    });
+  audio.addEventListener("ended", () => {
+    if (get(activeBackend) === "html5") {
+      handleTrackEnd();
+    }
+  });
 
-    audio.addEventListener('error', (e) => {
-        if (get(activeBackend) === 'html5') {
-            console.error('[Player] HTML5 audio error:', audio.error);
-            addToast(`Streaming playback failed: ${audio.error?.message || 'Unknown error'}`, 'error');
-        }
-    });
+  audio.addEventListener("error", (e) => {
+    if (get(activeBackend) === "html5") {
+      console.error("[Player] HTML5 audio error:", audio.error);
+      addToast(
+        `Streaming playback failed: ${audio.error?.message || "Unknown error"}`,
+        "error",
+      );
+    }
+  });
 }
 
 /**
  * Detect if a track needs HTML5 streaming or native local playback
  */
 export function isStreaming(track: Track): boolean {
-    // 1. Explicitly local sources (by type or path)
-    if (track.source_type === 'local' || track.local_src) return false;
+  // 1. Explicitly local sources (by type or path)
+  if (track.source_type === "local" || track.local_src) return false;
 
-    if (track.path) {
-        // Tauri local protocols are always local
-        if (track.path.startsWith('file://') || track.path.startsWith('asset://') || track.path.startsWith('tauri://')) {
-            return false;
-        }
-        // Explicitly streaming protocols
-        if (track.path.startsWith('http://') || track.path.startsWith('https://')) {
-            return true;
-        }
+  if (track.path) {
+    // Tauri local protocols are always local
+    if (
+      track.path.startsWith("file://") ||
+      track.path.startsWith("asset://") ||
+      track.path.startsWith("tauri://")
+    ) {
+      return false;
     }
+    // Explicitly streaming protocols
+    if (track.path.startsWith("http://") || track.path.startsWith("https://")) {
+      return true;
+    }
+  }
 
-    // 3. Known external source types (Tidal, etc.)
-    if (track.source_type && track.source_type !== 'local') return true;
+  // 3. Known external source types (Tidal, etc.)
+  if (track.source_type && track.source_type !== "local") return true;
 
-    // 4. Default to local for anything else (safer for absolute paths)
-    return false;
+  // 4. Default to local for anything else (safer for absolute paths)
+  return false;
 }
 
 // =============================================================================
@@ -372,21 +470,21 @@ export function isStreaming(track: Track): boolean {
 // =============================================================================
 
 /** Known playlist file extensions that need resolution */
-const PLAYLIST_EXTENSIONS = ['.m3u', '.m3u8', '.pls'];
+const PLAYLIST_EXTENSIONS = [".m3u", ".m3u8", ".pls"];
 
 /**
  * Check if a URL points to a playlist file that needs resolution.
  * Strips query strings and fragments before checking the extension.
  */
 function isPlaylistUrl(url: string): boolean {
-    try {
-        const pathname = new URL(url).pathname.toLowerCase();
-        return PLAYLIST_EXTENSIONS.some(ext => pathname.endsWith(ext));
-    } catch {
-        // Fallback for malformed URLs: check the raw string
-        const lower = url.toLowerCase().split('?')[0].split('#')[0];
-        return PLAYLIST_EXTENSIONS.some(ext => lower.endsWith(ext));
-    }
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    return PLAYLIST_EXTENSIONS.some((ext) => pathname.endsWith(ext));
+  } catch {
+    // Fallback for malformed URLs: check the raw string
+    const lower = url.toLowerCase().split("?")[0].split("#")[0];
+    return PLAYLIST_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  }
 }
 
 /**
@@ -394,14 +492,14 @@ function isPlaylistUrl(url: string): boolean {
  * PLS format: INI-like with File1=<url>, File2=<url>, etc.
  */
 function parsePlsPlaylist(text: string): string | null {
-    for (const line of text.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        const match = trimmed.match(/^File\d+\s*=\s*(.+)$/i);
-        if (match && match[1].startsWith('http')) {
-            return match[1].trim();
-        }
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const match = trimmed.match(/^File\d+\s*=\s*(.+)$/i);
+    if (match && match[1].startsWith("http")) {
+      return match[1].trim();
     }
-    return null;
+  }
+  return null;
 }
 
 /**
@@ -411,20 +509,24 @@ function parsePlsPlaylist(text: string): string | null {
  * often handle HLS natively.
  */
 function parseM3uPlaylist(text: string): string | null {
-    const lines = text.split(/\r?\n/);
+  const lines = text.split(/\r?\n/);
 
-    // Detect true HLS manifests — these should be played directly
-    const isHls = lines.some(l => l.trim().startsWith('#EXT-X-'));
-    if (isHls) return null; // Let the browser handle HLS natively
+  // Detect true HLS manifests — these should be played directly
+  const isHls = lines.some((l) => l.trim().startsWith("#EXT-X-"));
+  if (isHls) return null; // Let the browser handle HLS natively
 
-    // Simple M3U: find the first http(s) URL line
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith('#') && (trimmed.startsWith('http://') || trimmed.startsWith('https://'))) {
-            return trimmed;
-        }
+  // Simple M3U: find the first http(s) URL line
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (
+      trimmed &&
+      !trimmed.startsWith("#") &&
+      (trimmed.startsWith("http://") || trimmed.startsWith("https://"))
+    ) {
+      return trimmed;
     }
-    return null;
+  }
+  return null;
 }
 
 /**
@@ -433,44 +535,50 @@ function parseM3uPlaylist(text: string): string | null {
  * original URL unchanged so playback can still be attempted.
  */
 async function resolvePlaylistUrl(url: string): Promise<string> {
-    if (!isPlaylistUrl(url)) return url;
+  if (!isPlaylistUrl(url)) return url;
 
-    console.log(`[Player] Resolving playlist URL: ${url}`);
+  console.log(`[Player] Resolving playlist URL: ${url}`);
 
-    try {
-        const response = await fetch(url, {
-            signal: AbortSignal.timeout(8000), // 8s timeout for slow servers
-        });
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(8000), // 8s timeout for slow servers
+    });
 
-        if (!response.ok) {
-            console.warn(`[Player] Playlist fetch failed (${response.status}), using original URL`);
-            return url;
-        }
-
-        const text = await response.text();
-        const lower = url.toLowerCase().split('?')[0].split('#')[0];
-        let resolved: string | null = null;
-
-        if (lower.endsWith('.pls')) {
-            resolved = parsePlsPlaylist(text);
-        } else {
-            // .m3u or .m3u8
-            resolved = parseM3uPlaylist(text);
-        }
-
-        if (resolved) {
-            console.log(`[Player] Resolved playlist URL: ${url} → ${resolved}`);
-            return resolved;
-        }
-
-        // Could be HLS or empty playlist — use original URL
-        console.log(`[Player] Playlist did not yield a direct URL (may be HLS), using original`);
-        return url;
-
-    } catch (err) {
-        console.warn(`[Player] Playlist resolution failed, using original URL:`, err);
-        return url;
+    if (!response.ok) {
+      console.warn(
+        `[Player] Playlist fetch failed (${response.status}), using original URL`,
+      );
+      return url;
     }
+
+    const text = await response.text();
+    const lower = url.toLowerCase().split("?")[0].split("#")[0];
+    let resolved: string | null = null;
+
+    if (lower.endsWith(".pls")) {
+      resolved = parsePlsPlaylist(text);
+    } else {
+      // .m3u or .m3u8
+      resolved = parseM3uPlaylist(text);
+    }
+
+    if (resolved) {
+      console.log(`[Player] Resolved playlist URL: ${url} → ${resolved}`);
+      return resolved;
+    }
+
+    // Could be HLS or empty playlist — use original URL
+    console.log(
+      `[Player] Playlist did not yield a direct URL (may be HLS), using original`,
+    );
+    return url;
+  } catch (err) {
+    console.warn(
+      `[Player] Playlist resolution failed, using original URL:`,
+      err,
+    );
+    return url;
+  }
 }
 
 // Plugin event emitter (global singleton for plugin system)
@@ -479,20 +587,19 @@ export const pluginEvents = new EventEmitter<PluginEvents>();
 // Playback Context Tracking
 // source from which tracks are being played.
 export interface PlaybackContext {
+  type: "playlist" | "album" | "artist";
 
-    type: 'playlist' | 'album' | 'artist';
+  /** For playlists: playlist ID */
+  playlistId?: number;
 
-    /** For playlists: playlist ID */
-    playlistId?: number;
+  /** For albums: album ID */
+  albumId?: number;
 
-    /** For albums: album ID */
-    albumId?: number;
+  /** For artists: artist name */
+  artistName?: string;
 
-    /** For artists: artist name */
-    artistName?: string;
-
-    /** Display name for UI */
-    displayName?: string;
+  /** Display name for UI */
+  displayName?: string;
 }
 
 /**
@@ -503,25 +610,22 @@ export const playbackContext = writable<PlaybackContext | null>(null);
 /**
  * Current playlist ID (if playing from a playlist)
  */
-export const currentPlaylistId = derived(
-    playbackContext,
-    ($ctx) => ($ctx?.type === 'playlist' ? $ctx.playlistId ?? null : null)
+export const currentPlaylistId = derived(playbackContext, ($ctx) =>
+  $ctx?.type === "playlist" ? ($ctx.playlistId ?? null) : null,
 );
 
 /**
  * Current album ID (if playing from an album)
  */
-export const currentAlbumId = derived(
-    playbackContext,
-    ($ctx) => ($ctx?.type === 'album' ? $ctx.albumId ?? null : null)
+export const currentAlbumId = derived(playbackContext, ($ctx) =>
+  $ctx?.type === "album" ? ($ctx.albumId ?? null) : null,
 );
 
 /**
  * Current artist name (if playing from an artist)
  */
-export const currentArtistName = derived(
-    playbackContext,
-    ($ctx) => ($ctx?.type === 'artist' ? $ctx.artistName ?? null : null)
+export const currentArtistName = derived(playbackContext, ($ctx) =>
+  $ctx?.type === "artist" ? ($ctx.artistName ?? null) : null,
 );
 
 // Current track
@@ -550,14 +654,14 @@ export const volume = writable(0.7);
 // Using: audioVolume = sliderValue^2 (quadratic approximation of log curve)
 // This makes the slider feel more natural
 export function sliderToAudioVolume(sliderValue: number): number {
-    // Quadratic curve: softer at low end, more range at high end
-    // Alternative: Math.pow(sliderValue, 2.5) for steeper curve
-    return Math.pow(sliderValue, 2);
+  // Quadratic curve: softer at low end, more range at high end
+  // Alternative: Math.pow(sliderValue, 2.5) for steeper curve
+  return Math.pow(sliderValue, 2);
 }
 
 // Convert audio volume back to slider value (for display if needed)
 export function audioVolumeToSlider(audioVolume: number): number {
-    return Math.sqrt(audioVolume);
+  return Math.sqrt(audioVolume);
 }
 
 // Playback session tracking
@@ -566,371 +670,521 @@ let currentSessionId = 0;
 // Track play start time for accurate duration recording
 let playStartTime: number = 0;
 
+// Track the last preloaded path so handleGaplessAdvance can detect mismatches
+let lastPreloadedPath: string | null = null;
+
 // Current time and duration
 export const currentTime = writable(0);
 export const duration = writable(0);
 
 // Shuffle and repeat
 export const shuffle = writable(false);
-export const repeat = writable<'none' | 'one' | 'all'>('none');
+export const repeat = writable<"none" | "one" | "all">("none");
 
 // Subscribe to EQ changes to update native backend
 // Debounced subscription: batch rapid EQ changes and avoid thrashing
 let _eqApplyTimer: ReturnType<typeof setTimeout> | null = null;
 let _latestEqState: any = null;
 equalizer.subscribe((state) => {
-    _latestEqState = state;
+  _latestEqState = state;
 
-    // Apply immediately to HTML5 WebAudio graph when available
-    applyHtml5EqState(state);
+  // Apply immediately to HTML5 WebAudio graph when available
+  applyHtml5EqState(state);
 
-    // Only attempt to apply when native backend is active
-    if (get(activeBackend) !== 'native') return;
+  // Only attempt to apply when native backend is active
+  if (get(activeBackend) !== "native") return;
 
-    // Debounce rapid updates (200ms)
-    if (_eqApplyTimer) clearTimeout(_eqApplyTimer);
-    _eqApplyTimer = setTimeout(async () => {
-        try {
-            await nativeAudioSetEq(_latestEqState);
-        } catch (err) {
-            console.error('[EQ] Failed to apply settings:', err);
-        } finally {
-            _eqApplyTimer = null;
-        }
-    }, 200);
+  // Debounce rapid updates (200ms)
+  if (_eqApplyTimer) clearTimeout(_eqApplyTimer);
+  _eqApplyTimer = setTimeout(async () => {
+    try {
+      await nativeAudioSetEq(_latestEqState);
+    } catch (err) {
+      console.error("[EQ] Failed to apply settings:", err);
+    } finally {
+      _eqApplyTimer = null;
+    }
+  }, 200);
 });
 
 // =============================================================================
 // BACKEND INITIALIZATION
 // =============================================================================
 export async function initAudioBackend(): Promise<void> {
-    console.log('[Player] Initializing audio backend');
+  console.log("[Player] Initializing audio backend");
 
-    // Check if we should use native audio
-    nativeAudioUsed = await shouldUseNativeAudio();
-    console.log(`[Player] Native audio preferred: ${nativeAudioUsed}`);
+  // Check if we should use native audio
+  nativeAudioUsed = await shouldUseNativeAudio();
+  console.log(`[Player] Native audio preferred: ${nativeAudioUsed}`);
 
-    // Start/stop poller based on playback state and notify remote devices
-    isPlaying.subscribe((playing) => {
-        updateWindowsThumbarState(playing).catch(() => { });
+  // Start/stop poller based on playback state and notify remote devices
+  isPlaying.subscribe((playing) => {
+    updateWindowsThumbarState(playing).catch(() => {});
 
-        // Force an immediate broadcast when play/pause state changes
-        // so remote Connect Panels stay perfectly in sync
-        broadcastState(true);
-        if (playing) {
-            startStatePoller();
-        } else {
-            stopStatePoller();
-        }
-    });
+    // Force an immediate broadcast when play/pause state changes
+    // so remote Connect Panels stay perfectly in sync
+    broadcastState(true);
+    const backend = get(activeBackend);
+    if (playing) {
+      if (backend !== "remote" && backend !== "squeeze") {
+        startStatePoller();
+      }
+    } else {
+      stopStatePoller();
+    }
+  });
 
-    // Also force broadcast when the actual track changes regardless of play state
-    currentTrack.subscribe(() => {
-        broadcastState(true);
-    });
+  // Also force broadcast when the actual track changes regardless of play state
+  currentTrack.subscribe(() => {
+    broadcastState(true);
+  });
 
-    // Subscribe to volume changes to keep backends in sync
-    volume.subscribe((val) => {
-        const audioVol = sliderToAudioVolume(val);
+  // Subscribe to volume changes to keep backends in sync
+  volume.subscribe((val) => {
+    const backend = get(activeBackend);
+    if (backend === "squeeze" || backend === "remote") return;
 
-        // Update HTML5 backend
-        if (html5Audio) {
-            html5Audio.volume = audioVol;
-        }
+    const audioVol = sliderToAudioVolume(val);
 
-        // Update Native backend
-        if (nativeAudioUsed) {
-            nativeAudioSetVolume(audioVol).catch(err => {
-                console.warn('[Player] Failed to set native volume:', err);
-            });
-        }
-    });
-
-    // Force sync initial volume to native backend so it matches
-    // the frontend's logarithmic curve from the start, before any track plays.
-    if (nativeAudioUsed) {
-        nativeAudioSetVolume(sliderToAudioVolume(get(volume))).catch(err => {
-            console.warn('[Player] Failed to set initial native volume:', err);
-        });
+    // Update HTML5 backend
+    if (html5Audio) {
+      html5Audio.volume = audioVol;
     }
 
-    // If native backend is available, apply current EQ state once to ensure
-    // native side has the latest settings (prevents mismatch / thrash on first play)
+    // Update Native backend
     if (nativeAudioUsed) {
-        try {
-            // Use equalizer.getState() to get the current stored state
-            const state = equalizer.getState();
-            nativeAudioSetRepeatOne(get(repeat) === 'one').catch(console.error);
-            await nativeAudioSetEq(state);
-            console.log('[Player] Applied initial EQ settings to native backend');
-        } catch (err) {
-            console.warn('[Player] Failed to apply initial EQ settings:', err);
-        }
+      nativeAudioSetVolume(audioVol).catch((err) => {
+        console.warn("[Player] Failed to set native volume:", err);
+      });
     }
+  });
 
-    // Subscribe to WebSocket messages
-    wsStore.onMessage((type, payload) => {
-        switch (type) {
-            case 'transfer_playback':
-                transferPlayback(payload);
-                break;
-            case 'remote_command':
-                handleRemoteCommand(payload);
-                break;
-            case 'player_state':
-                handleRemotePlayerState(payload);
-                break;
-        }
+  // Force sync initial volume to native backend so it matches
+  // the frontend's logarithmic curve from the start, before any track plays.
+  if (nativeAudioUsed) {
+    nativeAudioSetVolume(sliderToAudioVolume(get(volume))).catch((err) => {
+      console.warn("[Player] Failed to set initial native volume:", err);
     });
+  }
 
-    // Sub due to initialization of active setting
-    activeBackend.subscribe(b => {
-        if (b === 'remote') {
-            stopStatePoller(); // Ensure local poller is off
-        }
-    });
+  // If native backend is available, apply current EQ state once to ensure
+  // native side has the latest settings (prevents mismatch / thrash on first play)
+  if (nativeAudioUsed) {
+    try {
+      // Use equalizer.getState() to get the current stored state
+      const state = equalizer.getState();
+      nativeAudioSetRepeatOne(get(repeat) === "one").catch(console.error);
+      await nativeAudioSetEq(state);
+      console.log("[Player] Applied initial EQ settings to native backend");
+    } catch (err) {
+      console.warn("[Player] Failed to apply initial EQ settings:", err);
+    }
+  }
 
-    await initWindowsThumbarIntegration();
+  // Subscribe to WebSocket messages
+  wsStore.onMessage((type, payload) => {
+    switch (type) {
+      case "transfer_playback":
+        transferPlayback(payload);
+        break;
+      case "remote_command":
+        handleRemoteCommand(payload);
+        break;
+      case "player_state":
+        handleRemotePlayerState(payload);
+        break;
+    }
+  });
+
+  // Sub due to initialization of active setting
+  activeBackend.subscribe((b) => {
+    if (b === "remote" || b === "squeeze") {
+      stopStatePoller();
+    }
+  });
+
+  await initWindowsThumbarIntegration();
 }
 
 function handleRemotePlayerState(payload: any) {
-    const isLocalPlaying = get(isPlaying) && get(activeBackend) !== 'remote';
+  const isLocalPlaying = get(isPlaying) && get(activeBackend) !== "remote";
 
-    // Auto-switch to tracking the remote device if we are idle and it's playing
-    if (!isLocalPlaying && payload.isPlaying && payload.deviceId) {
-        if (get(activeBackend) !== 'remote') {
-            activeBackend.set('remote');
-            activeRemoteDevice.set(payload.deviceId);
-            console.log(`[Player] Auto-switched to remote session for device: ${payload.deviceId}`);
+  // Auto-switch to tracking the remote device if we are idle and it's playing
+  if (!isLocalPlaying && payload.isPlaying && payload.deviceId) {
+    if (get(activeBackend) !== "remote") {
+      activeBackend.set("remote");
+      activeRemoteDevice.set(payload.deviceId);
+      console.log(
+        `[Player] Auto-switched to remote session for device: ${payload.deviceId}`,
+      );
+    }
+  }
+
+  // If we are tracking THIS remote device, pipe the state into the local UI variables
+  if (
+    get(activeBackend) === "remote" &&
+    get(activeRemoteDevice) === payload.deviceId
+  ) {
+    if (payload.track) {
+      const remoteTrack = payload.track;
+      const currentObj = get(currentTrack);
+      const remoteTrackId = Number(remoteTrack.id);
+
+      if (!currentObj || Number(currentObj.id) !== remoteTrackId) {
+        // Try to resolve track locally for better cover art (Fast O(1) lookup)
+        let localTrack: any = getTrackByIdSync(remoteTrackId);
+
+        // Falling back to O(N) search only if ID fails (rare in synced libraries)
+        if (!localTrack) {
+          const $library = get(libraryTracks);
+          localTrack = $library.find(
+            (t) =>
+              t.title === remoteTrack.title && t.artist === remoteTrack.artist,
+          );
         }
+
+        currentTrack.set({
+          ...remoteTrack,
+          ...(localTrack || {}),
+          id: remoteTrackId, // Ensure ID is a number
+          track_cover: localTrack
+            ? getTrackCoverSrc(localTrack)
+            : remoteTrack.coverUrl,
+        } as any);
+      }
+    } else {
+      if (get(currentTrack) !== null) currentTrack.set(null);
     }
 
-    // If we are tracking THIS remote device, pipe the state into the local UI variables
-    if (get(activeBackend) === 'remote' && get(activeRemoteDevice) === payload.deviceId) {
-        if (payload.track) {
-            const remoteTrack = payload.track;
-            const currentObj = get(currentTrack);
-            const remoteTrackId = Number(remoteTrack.id);
+    // Only update these if they changed to prevent spamming subscribers
+    if (get(isPlaying) !== payload.isPlaying) isPlaying.set(payload.isPlaying);
 
-            if (!currentObj || Number(currentObj.id) !== remoteTrackId) {
-                // Try to resolve track locally for better cover art (Fast O(1) lookup)
-                let localTrack: any = getTrackByIdSync(remoteTrackId);
-
-                // Falling back to O(N) search only if ID fails (rare in synced libraries)
-                if (!localTrack) {
-                    const $library = get(libraryTracks);
-                    localTrack = $library.find(t =>
-                        t.title === remoteTrack.title &&
-                        t.artist === remoteTrack.artist
-                    );
-                }
-
-                currentTrack.set({
-                    ...remoteTrack,
-                    ...(localTrack || {}),
-                    id: remoteTrackId, // Ensure ID is a number
-                    track_cover: localTrack ? getTrackCoverSrc(localTrack) : remoteTrack.coverUrl,
-                } as any);
-            }
-        } else {
-            if (get(currentTrack) !== null) currentTrack.set(null);
-        }
-
-        // Only update these if they changed to prevent spamming subscribers
-        if (get(isPlaying) !== payload.isPlaying) isPlaying.set(payload.isPlaying);
-
-        // Only update time if the difference is significant (>250ms or specifically requested)
-        const currentT = get(currentTime);
-        if (Math.abs(currentT - payload.currentTime) > 0.25 || payload.isPlaying === false) {
-            currentTime.set(payload.currentTime);
-        }
-
-        if (get(duration) !== payload.duration) duration.set(payload.duration);
-
-        if (payload.volume !== undefined && get(volume) !== payload.volume) volume.set(payload.volume);
-        if (payload.shuffle !== undefined && get(shuffle) !== payload.shuffle) shuffle.set(payload.shuffle);
-        if (payload.repeat !== undefined && get(repeat) !== payload.repeat) repeat.set(payload.repeat);
+    // Only update time if the difference is significant (>250ms or specifically requested)
+    const currentT = get(currentTime);
+    if (
+      Math.abs(currentT - payload.currentTime) > 0.25 ||
+      payload.isPlaying === false
+    ) {
+      currentTime.set(payload.currentTime);
     }
+
+    if (get(duration) !== payload.duration) duration.set(payload.duration);
+
+    if (payload.volume !== undefined && get(volume) !== payload.volume)
+      volume.set(payload.volume);
+    if (payload.shuffle !== undefined && get(shuffle) !== payload.shuffle)
+      shuffle.set(payload.shuffle);
+    if (payload.repeat !== undefined && get(repeat) !== payload.repeat)
+      repeat.set(payload.repeat);
+  }
 }
 
 // Poll the native backend for state changes (only while playing)
 const POLL_INTERVAL_MS = 50;
 
 function startStatePoller(): void {
-    if (nativeStatePoller) return;
+  if (nativeStatePoller) return;
 
-    nativeStatePoller = setInterval(async () => {
-        try {
-            const track = get(currentTrack);
-            if (!track) return;
+  nativeStatePoller = setInterval(async () => {
+    try {
+      const track = get(currentTrack);
+      if (!track) return;
 
-            if (get(activeBackend) === 'native') {
-                const state = await nativeAudioGetState();
+      if (get(activeBackend) === "native") {
+        const state = await nativeAudioGetState();
+        const uiDuration = get(duration);
 
-                currentTime.set(state.position);
-                if (state.duration > 0) {
-                    duration.set(state.duration);
-                } else {
-                    console.warn('[Poller] Native backend reported 0 duration for track at:', state.position);
-                }
-
-                // Poll for audio events 
-                const event = await nativeAudioPollEvent();
-
-                if (event.type === 'TrackFinished') {
-                    // Track ended naturally, nothing was preloaded.
-
-                    handleTrackEnd();
-                } else if (event.type === 'TrackAdvanced') {
-                    // Gapless advance: audio backend already moved to the next track.
-                    // We must NOT call nativeAudioPlay() — that would restart it.
-                    // Just advance the UI queue index and update metadata.
-                    handleGaplessAdvance();
-                } else if (event.type === 'StateChanged') {
-                    // Backend confirmed a seek or loop — update UI immediately
-                    currentTime.set(event.data.position);
-                    if (event.data.position === 0) {
-                        // repeat-one loop — reset isPlaying to true in case UI lost sync
-                        isPlaying.set(true);
-                        updateMediaSessionPlaybackState('playing');
-                    }
-                }
-
-
-                // Sync isPlaying state — ignore false when duration is 0 (track still loading)
-                if (state.is_playing !== get(isPlaying)) {
-                    if (state.is_playing === false && state.duration === 0 && state.position === 0) {
-                        // Backend hasn't loaded track yet, don't trust this state
-                    } else {
-                        isPlaying.set(state.is_playing);
-                        updateMediaSessionPlaybackState(state.is_playing ? 'playing' : 'paused');
-                    }
-                }
-
-                // Emit time update for plugins
-                pluginEvents.emit('timeUpdate', {
-                    currentTime: state.position,
-                    duration: state.duration
-                });
-            } else if (get(activeBackend) === 'html5' && html5Audio) {
-                const pos = html5Audio.currentTime;
-                const dur = html5Audio.duration || 0;
-
-                currentTime.set(pos);
-                if (dur > 0 && !isNaN(dur)) {
-                    duration.set(dur);
-                }
-
-                // Sync isPlaying state (HTML5 events should handle this, but poller is a good fallback)
-                const playing = !html5Audio.paused && !html5Audio.ended;
-                if (playing !== get(isPlaying)) {
-                    // Do not sync HTML5 state if activeBackend changed
-                    if (get(activeBackend) === 'html5') {
-                        isPlaying.set(playing);
-                        updateMediaSessionPlaybackState(playing ? 'playing' : 'paused');
-                    }
-                }
-
-                // Emit time update for plugins
-                pluginEvents.emit('timeUpdate', {
-                    currentTime: pos,
-                    duration: dur
-                });
-            } else if (get(activeBackend) === 'remote') {
-                // If remote, do NOT poll native audio. We rely purely on WebSocket pushes.
-            }
-
-            // Sync Media Session position if something is playing
-            if (get(isPlaying)) {
-                updateMediaSessionPosition();
-            }
-
-            // Broadcast state to WebSocket (throttled to ~2s)
-            broadcastState();
-
-        } catch (e) {
-            console.error('[Player] Poller error:', e);
+        // Only advance currentTime while the backend reports playback.
+        // Otherwise we can keep pushing the position past duration when the
+        // last track of an album has ended but the UI hasn't caught up yet,
+        // making the counter appear to run to infinity.
+        //
+        // Clamp to the UI duration (from the database) so the counter never
+        // runs past the displayed end. The Rust backend can fail to detect a
+        // file's duration (e.g. some VBR MP3s return n_frames=None), in
+        // which case position_secs() in audio.rs is unclamped and grows
+        // indefinitely — without this clamp the counter visibly counts to
+        // infinity on the last track of an album.
+        if (state.is_playing) {
+          currentTime.set(
+            uiDuration > 0 ? Math.min(state.position, uiDuration) : state.position,
+          );
+        } else if (
+          get(isPlaying) &&
+          ((state.duration > 0 && state.position >= state.duration) ||
+            (uiDuration > 0 && state.position >= uiDuration))
+        ) {
+          // Backend stopped at/past the end — snap UI to track end.
+          currentTime.set(state.duration > 0 ? state.duration : uiDuration);
         }
-    }, POLL_INTERVAL_MS);
+        if (state.duration > 0) {
+          duration.set(state.duration);
+        } else if (uiDuration > 0) {
+          // Backend has no duration but the DB does — keep the UI duration
+          // we already trust so the progress bar / counter remain stable.
+          duration.set(uiDuration);
+        } else {
+          console.warn(
+            "[Poller] Native backend reported 0 duration for track at:",
+            state.position,
+          );
+        }
+
+        // Watchdog: if the backend keeps reporting is_playing=true with the
+        // position stuck at/past the track end, the TrackFinished event has
+        // been lost (e.g. last track of an album where the rodio queue never
+        // completes for some formats). Schedule a forced end-of-track after a
+        // short delay so the counter doesn't run to infinity and the queue
+        // actually advances / stops.
+        //
+        // Fall back to the UI duration when the backend couldn't determine
+        // the file's duration — otherwise the watchdog never fires for those
+        // files and the counter is left running past the end.
+        const effectiveDuration =
+          state.duration > 0 ? state.duration : uiDuration;
+        if (
+          state.is_playing &&
+          effectiveDuration > 0 &&
+          state.position >= effectiveDuration - 0.05 // tiny tolerance
+        ) {
+          if (pendingForcedEnd === null) {
+            pendingForcedEnd = setTimeout(() => {
+              pendingForcedEnd = null;
+              if (get(activeBackend) !== "native") return;
+              const st = get(currentTime);
+              const du = get(duration);
+              if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
+                console.warn(
+                  "[Player] Forced track end via watchdog (backend missed TrackFinished event)",
+                );
+                // Make sure the native backend actually stops playing — if
+                // it's stuck emitting silence past the end, this is the only
+                // way to make the queue advance to the next track (or stop).
+                nativeAudioStop().catch(console.error);
+                handleTrackEnd();
+              }
+            }, 400);
+          }
+        } else {
+          clearPendingForcedEnd();
+        }
+
+        // Poll for audio events
+        const event = await nativeAudioPollEvent();
+
+        if (event.type === "TrackFinished") {
+          // Track ended naturally, nothing was preloaded.
+          clearPendingForcedEnd();
+          handleTrackEnd();
+        } else if (event.type === "TrackAdvanced") {
+          // Gapless advance: audio backend already moved to the next track.
+          // We must NOT call nativeAudioPlay() — that would restart it.
+          // Just advance the UI queue index and update metadata.
+          clearPendingForcedEnd();
+          handleGaplessAdvance();
+        } else if (event.type === "StateChanged") {
+          // Backend confirmed a seek or loop — update UI immediately
+          currentTime.set(event.data.position);
+          if (event.data.position === 0) {
+            // repeat-one loop — reset isPlaying to true in case UI lost sync
+            isPlaying.set(true);
+            updateMediaSessionPlaybackState("playing");
+          }
+        }
+
+        // Sync isPlaying state — ignore false when duration is 0 (track still loading)
+        if (state.is_playing !== get(isPlaying)) {
+          if (
+            state.is_playing === false &&
+            state.duration === 0 &&
+            state.position === 0
+          ) {
+            // Backend hasn't loaded track yet, don't trust this state
+          } else {
+            isPlaying.set(state.is_playing);
+            updateMediaSessionPlaybackState(
+              state.is_playing ? "playing" : "paused",
+            );
+          }
+        }
+
+        // Emit time update for plugins
+        pluginEvents.emit("timeUpdate", {
+          currentTime: state.position,
+          duration: state.duration,
+        });
+      } else if (get(activeBackend) === "html5" && html5Audio) {
+        const pos = html5Audio.currentTime;
+        const dur = html5Audio.duration || 0;
+        const uiDuration = get(duration);
+
+        // Sync isPlaying state (HTML5 events should handle this, but poller is a good fallback)
+        const playing = !html5Audio.paused && !html5Audio.ended;
+        if (playing !== get(isPlaying)) {
+          // Do not sync HTML5 state if activeBackend changed
+          if (get(activeBackend) === "html5") {
+            isPlaying.set(playing);
+            updateMediaSessionPlaybackState(playing ? "playing" : "paused");
+          }
+        }
+
+        // Only advance currentTime while the audio is actually playing.
+        // If the track has ended (or stalled past duration) we MUST NOT keep
+        // pushing the position forward — that's what caused the "counter
+        // counts to infinity on the last track of an album" bug when the
+        // `ended` event was missed or delayed.
+        //
+        // Clamp to the UI duration (from the database) for live streams and
+        // formats where audio.duration is 0/Infinity — otherwise the counter
+        // runs past the displayed end.
+        if (playing) {
+          currentTime.set(uiDuration > 0 ? Math.min(pos, uiDuration) : pos);
+        } else if (get(isPlaying) && (html5Audio.ended || (dur > 0 && pos >= dur))) {
+          // Audio finished but UI still thinks we're playing — snap to end.
+          currentTime.set(dur > 0 ? dur : pos);
+        }
+        if (dur > 0 && !isNaN(dur)) {
+          duration.set(dur);
+        } else if (uiDuration > 0) {
+          duration.set(uiDuration);
+        }
+
+        // Watchdog: same as the native branch — if the browser hasn't fired
+        // `ended` but the position is stuck at/past duration, force the end.
+        // Fall back to the UI duration for streams/odd formats where
+        // audio.duration is 0.
+        const effectiveDuration = dur > 0 ? dur : uiDuration;
+        if (playing && effectiveDuration > 0 && pos >= effectiveDuration - 0.05) {
+          if (pendingForcedEnd === null) {
+            pendingForcedEnd = setTimeout(() => {
+              pendingForcedEnd = null;
+              if (get(activeBackend) !== "html5" || !html5Audio) return;
+              const st = get(currentTime);
+              const du = get(duration);
+              if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
+                console.warn(
+                  "[Player] Forced track end via watchdog (HTML5 missed `ended` event)",
+                );
+                html5Audio.pause();
+                html5Audio.currentTime = 0;
+                handleTrackEnd();
+              }
+            }, 400);
+          }
+        } else {
+          clearPendingForcedEnd();
+        }
+
+        // Emit time update for plugins
+        pluginEvents.emit("timeUpdate", {
+          currentTime: pos,
+          duration: dur,
+        });
+      } else if (get(activeBackend) === "remote") {
+        // If remote, do NOT poll native audio. We rely purely on WebSocket pushes.
+      } else if (get(activeBackend) === "squeeze") {
+        // Squeeze store handles time updates via polling.
+      }
+
+      // Sync Media Session position if something is playing
+      if (get(isPlaying)) {
+        updateMediaSessionPosition();
+      }
+
+      // Broadcast state to WebSocket (throttled to ~2s)
+      broadcastState();
+    } catch (e) {
+      console.error("[Player] Poller error:", e);
+    }
+  }, POLL_INTERVAL_MS);
 }
 
 let lastBroadcast = 0;
 function broadcastState(force = false) {
-    // CRITICAL: Do not broadcast if this device is not the owner of the playback.
-    // This prevents infinite state "echo" loops across devices.
-    if (get(activeBackend) === 'remote') return;
+  // CRITICAL: Do not broadcast if this device is not the owner of the playback.
+  // This prevents infinite state "echo" loops across devices.
+  if (get(activeBackend) === "remote" || get(activeBackend) === "squeeze")
+    return;
 
-    const now = Date.now();
-    if (!force && now - lastBroadcast < 2000) return;
+  const now = Date.now();
+  if (!force && now - lastBroadcast < 2000) return;
 
-    const track = get(currentTrack);
-    const playing = get(isPlaying);
-    const pos = get(currentTime);
-    const dur = get(duration);
+  const track = get(currentTrack);
+  const playing = get(isPlaying);
+  const pos = get(currentTime);
+  const dur = get(duration);
 
-    if (track || lastBroadcast === 0) {
-        wsStore.send('player_state', {
-            track: track ? {
-                id: track.id,
-                title: track.title,
-                artist: track.artist,
-                album: track.album,
-                coverUrl: getTrackCoverSrc(track)
-            } : null,
-            isPlaying: playing,
-            currentTime: pos,
-            duration: dur,
-            volume: get(volume),
-            shuffle: get(shuffle),
-            repeat: get(repeat)
-        });
-        lastBroadcast = now;
-    }
+  if (track || lastBroadcast === 0) {
+    wsStore.send("player_state", {
+      track: track
+        ? {
+            id: track.id,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            coverUrl: getTrackCoverSrc(track),
+          }
+        : null,
+      isPlaying: playing,
+      currentTime: pos,
+      duration: dur,
+      volume: get(volume),
+      shuffle: get(shuffle),
+      repeat: get(repeat),
+    });
+    lastBroadcast = now;
+  }
 }
 
 function stopStatePoller(): void {
-    if (nativeStatePoller) {
-        clearInterval(nativeStatePoller);
-        nativeStatePoller = null;
-    }
+  if (nativeStatePoller) {
+    clearInterval(nativeStatePoller);
+    nativeStatePoller = null;
+  }
 }
 
 // cleanup function for app unmount or hot reload
 export function cleanupPlayer(): void {
-    console.log('[Player] Cleaning up player resources');
-    stopStatePoller();
-    nativeAudioStop().catch(console.error);
+  console.log("[Player] Cleaning up player resources");
+  stopStatePoller();
+  nativeAudioStop().catch(console.error);
 
-    if (dashPlayer) {
-        try { dashPlayer.destroy(); } catch (_) { }
-        dashPlayer = null;
+  if (dashPlayer) {
+    try {
+      dashPlayer.destroy();
+    } catch (_) {}
+    dashPlayer = null;
+  }
+
+  // Cleanup HTML5
+  if (html5Audio) {
+    html5Audio.pause();
+    html5Audio.src = "";
+  }
+
+  // Cleanup HTML5 WebAudio EQ graph
+  cleanupHtml5EqGraph();
+
+  // Reset stores
+  activeBackend.set("none");
+  isPlaying.set(false);
+  currentTrack.set(null);
+  currentTime.set(0);
+  duration.set(0);
+
+  // Clear Media Session
+  updateMediaSessionPlaybackState("none");
+  if ("mediaSession" in navigator) {
+    try {
+      navigator.mediaSession.metadata = null;
+    } catch (_) {
+      /* ignore */
     }
-
-    // Cleanup HTML5
-    if (html5Audio) {
-        html5Audio.pause();
-        html5Audio.src = '';
-    }
-
-    // Cleanup HTML5 WebAudio EQ graph
-    cleanupHtml5EqGraph();
-
-    // Reset stores
-    activeBackend.set('none');
-    isPlaying.set(false);
-    currentTrack.set(null);
-    currentTime.set(0);
-    duration.set(0);
-
-    // Clear Media Session
-    updateMediaSessionPlaybackState('none');
-    if ('mediaSession' in navigator) {
-        try { navigator.mediaSession.metadata = null; } catch (_) { /* ignore */ }
-    }
+  }
 }
 
 export function shutdownPlayer(): void {
-    cleanupPlayer();
+  cleanupPlayer();
 }
 
 // ── Media Session API (Now Playing notification / lock screen controls) ──
@@ -943,424 +1197,527 @@ let mediaSessionInitialized = false;
 let windowsThumbarInitialized = false;
 
 async function initWindowsThumbarIntegration(): Promise<void> {
-    if (windowsThumbarInitialized) return;
+  if (windowsThumbarInitialized) return;
 
-    try {
-        const initialized = await initWindowsThumbar();
-        if (!initialized) return;
+  try {
+    const initialized = await initWindowsThumbar();
+    if (!initialized) return;
 
-        await listen<{ action?: string }>('windows://thumbar-action', ({ payload }) => {
-            const action = payload?.action;
-            if (!action) return;
+    await listen<{ action?: string }>(
+      "windows://thumbar-action",
+      ({ payload }) => {
+        const action = payload?.action;
+        if (!action) return;
 
-            switch (action) {
-                case 'previous':
-                    void previousTrack();
-                    break;
-                case 'toggle_play_pause':
-                    void togglePlay();
-                    break;
-                case 'next':
-                    nextTrack();
-                    break;
-            }
-        });
+        switch (action) {
+          case "previous":
+            void previousTrack();
+            break;
+          case "toggle_play_pause":
+            void togglePlay();
+            break;
+          case "next":
+            nextTrack();
+            break;
+        }
+      },
+    );
 
-        windowsThumbarInitialized = true;
-        await updateWindowsThumbarState(get(isPlaying));
-        console.log('[Player] Windows taskbar thumbar initialized');
-    } catch (err) {
-        console.warn('[Player] Windows thumbar init failed:', err);
-    }
+    windowsThumbarInitialized = true;
+    await updateWindowsThumbarState(get(isPlaying));
+    console.log("[Player] Windows taskbar thumbar initialized");
+  } catch (err) {
+    console.warn("[Player] Windows thumbar init failed:", err);
+  }
 }
 
 function initMediaSessionHandlers(): void {
-    if (mediaSessionInitialized || !('mediaSession' in navigator)) return;
+  if (mediaSessionInitialized || !("mediaSession" in navigator)) return;
 
-    const ms = navigator.mediaSession;
+  const ms = navigator.mediaSession;
 
-    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
-        try {
-            ms.setActionHandler(action, handler);
-        } catch (err) {
-            // Some environments/WebViews don't support every action.
-            // Keep registering the rest instead of aborting initialization.
-            console.debug(`[MediaSession] Action not supported: ${action}`, err);
-        }
-    };
+  const setHandler = (
+    action: MediaSessionAction,
+    handler: MediaSessionActionHandler | null,
+  ) => {
+    try {
+      ms.setActionHandler(action, handler);
+    } catch (err) {
+      // Some environments/WebViews don't support every action.
+      // Keep registering the rest instead of aborting initialization.
+      console.debug(`[MediaSession] Action not supported: ${action}`, err);
+    }
+  };
 
-    // IMPORTANT: use explicit pause/resume handlers (not toggle).
-    // Some Bluetooth headsets can emit repeated pause events; toggle would
-    // accidentally resume playback and make pause appear broken.
-    setHandler('play', () => { void resume(); });
-    setHandler('pause', () => { void pause(); });
-    setHandler('stop', () => { void pause(); });
-    setHandler('previoustrack', () => { void previousTrack(); });
-    setHandler('nexttrack', () => { void nextTrack(); });
-    setHandler('seekto', (details) => {
-        if (details.seekTime != null) {
-            const dur = get(duration);
-            if (dur > 0) {
-                nativeAudioSeek(details.seekTime / dur).catch(console.error);
-            }
-        }
-    });
-    setHandler('seekbackward', (details) => {
-        const offset = details.seekOffset || 10;
-        const cur = get(currentTime);
-        const dur = get(duration);
-        if (dur > 0) {
-            nativeAudioSeek(Math.max(0, cur - offset) / dur).catch(console.error);
-        }
-    });
-    setHandler('seekforward', (details) => {
-        const offset = details.seekOffset || 10;
-        const cur = get(currentTime);
-        const dur = get(duration);
-        if (dur > 0) {
-            nativeAudioSeek(Math.min(dur, cur + offset) / dur).catch(console.error);
-        }
-    });
+  // IMPORTANT: use explicit pause/resume handlers (not toggle).
+  // Some Bluetooth headsets can emit repeated pause events; toggle would
+  // accidentally resume playback and make pause appear broken.
+  setHandler("play", () => {
+    void resume();
+  });
+  setHandler("pause", () => {
+    void pause();
+  });
+  setHandler("stop", () => {
+    void pause();
+  });
+  setHandler("previoustrack", () => {
+    void previousTrack();
+  });
+  setHandler("nexttrack", () => {
+    void nextTrack();
+  });
+  setHandler("seekto", (details) => {
+    if (details.seekTime != null) {
+      const dur = get(duration);
+      if (dur > 0) {
+        nativeAudioSeek(details.seekTime / dur).catch(console.error);
+      }
+    }
+  });
+  setHandler("seekbackward", (details) => {
+    const offset = details.seekOffset || 10;
+    const cur = get(currentTime);
+    const dur = get(duration);
+    if (dur > 0) {
+      nativeAudioSeek(Math.max(0, cur - offset) / dur).catch(console.error);
+    }
+  });
+  setHandler("seekforward", (details) => {
+    const offset = details.seekOffset || 10;
+    const cur = get(currentTime);
+    const dur = get(duration);
+    if (dur > 0) {
+      nativeAudioSeek(Math.min(dur, cur + offset) / dur).catch(console.error);
+    }
+  });
 
-    mediaSessionInitialized = true;
-    console.log('[Player] MediaSession action handlers registered');
+  mediaSessionInitialized = true;
+  console.log("[Player] MediaSession action handlers registered");
 }
 
 async function updateMediaSessionMetadata(track: Track): Promise<void> {
-    if (!('mediaSession' in navigator)) return;
+  if (!("mediaSession" in navigator)) return;
 
-    // Initialize handlers on first use (needs user gesture context)
-    initMediaSessionHandlers();
+  // Initialize handlers on first use (needs user gesture context)
+  initMediaSessionHandlers();
 
-    console.log('[MediaSession] Updating metadata for:', track.title);
+  console.log("[MediaSession] Updating metadata for:", track.title);
 
-    // Resolve artwork URL
-    const artworkSources: MediaImage[] = [];
+  // Resolve artwork URL
+  const artworkSources: MediaImage[] = [];
 
-    // Specifically for MediaSession, we want to avoid asset:// URLs if possible
-    // because Android's system notification usually can't resolve them.
-    // AND we want to avoid large Base64 strings to avoid Binder limit crashes.
-    let artUrl: string | null = null;
+  // Specifically for MediaSession, we want to avoid asset:// URLs if possible
+  // because Android's system notification usually can't resolve them.
+  // AND we want to avoid large Base64 strings to avoid Binder limit crashes.
+  let artUrl: string | null = null;
 
-    if (track.track_cover && track.track_cover.startsWith('data:')) {
-        try {
-            console.log('[MediaSession] Saving Base64 artwork to temp file...');
-            const tempPath = await invoke<string>('save_notification_image', { dataUri: track.track_cover });
-            artUrl = convertFileSrc(tempPath);
-            console.log('[MediaSession] Artwork saved to:', artUrl);
-        } catch (e) {
-            console.error('[MediaSession] Failed to save notification image:', e);
-            // Fallback to Base64 if saving fails (might still crash if too big)
-            artUrl = track.track_cover;
-        }
-    } else {
-        artUrl = getTrackCoverSrc(track);
-    }
-
-    // Also try album cover as fallback if still no art
-    if (!artUrl && track.album_id) {
-        artUrl = getAlbumCoverFromTracks(track.album_id);
-    }
-
-    if (artUrl) {
-        console.log('[MediaSession] Setting artwork src:', artUrl.substring(0, 50) + '...');
-        artworkSources.push(
-            { src: artUrl, sizes: '512x512', type: 'image/jpeg' }
-        );
-    }
-
+  if (track.track_cover && track.track_cover.startsWith("data:")) {
     try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-            title: track.title || 'Unknown Title',
-            artist: track.artist || 'Unknown Artist',
-            album: track.album || '',
-            artwork: artworkSources,
-        });
-        console.log('[MediaSession] Metadata set successfully');
-    } catch (err) {
-        console.warn('[Player] Failed to set MediaSession metadata:', err);
+      console.log("[MediaSession] Saving Base64 artwork to temp file...");
+      const tempPath = await invoke<string>("save_notification_image", {
+        dataUri: track.track_cover,
+      });
+      artUrl = convertFileSrc(tempPath);
+      console.log("[MediaSession] Artwork saved to:", artUrl);
+    } catch (e) {
+      console.error("[MediaSession] Failed to save notification image:", e);
+      // Fallback to Base64 if saving fails (might still crash if too big)
+      artUrl = track.track_cover;
     }
+  } else {
+    artUrl = getTrackCoverSrc(track);
+  }
+
+  // Also try album cover as fallback if still no art
+  if (!artUrl && track.album_id) {
+    artUrl = getAlbumCoverFromTracks(track.album_id);
+  }
+
+  if (artUrl) {
+    console.log(
+      "[MediaSession] Setting artwork src:",
+      artUrl.substring(0, 50) + "...",
+    );
+    artworkSources.push({ src: artUrl, sizes: "512x512", type: "image/jpeg" });
+  }
+
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track.title || "Unknown Title",
+      artist: track.artist || "Unknown Artist",
+      album: track.album || "",
+      artwork: artworkSources,
+    });
+    console.log("[MediaSession] Metadata set successfully");
+  } catch (err) {
+    console.warn("[Player] Failed to set MediaSession metadata:", err);
+  }
 }
 
-function updateMediaSessionPlaybackState(state: 'playing' | 'paused' | 'none'): void {
-    if (!('mediaSession' in navigator)) return;
-    try {
-        navigator.mediaSession.playbackState = state;
-    } catch (err) {
-        // Ignore — some environments don't support playbackState setter
-    }
+function updateMediaSessionPlaybackState(
+  state: "playing" | "paused" | "none",
+): void {
+  if (!("mediaSession" in navigator)) return;
+  try {
+    navigator.mediaSession.playbackState = state;
+  } catch (err) {
+    // Ignore — some environments don't support playbackState setter
+  }
 }
 
 function updateMediaSessionPosition(): void {
-    if (!('mediaSession' in navigator)) return;
+  if (!("mediaSession" in navigator)) return;
 
-    let dur = get(duration);
-    let pos = get(currentTime);
-    let rate = 1;
+  let dur = get(duration);
+  let pos = get(currentTime);
+  let rate = 1;
 
-    // Basic validity check
-    if (!dur || !isFinite(dur) || isNaN(dur)) {
-        // Only log if it's 0 after playback started (might be intentional for a moment)
-        return;
-    }
+  // Basic validity check
+  if (!dur || !isFinite(dur) || isNaN(dur)) {
+    // Only log if it's 0 after playback started (might be intentional for a moment)
+    return;
+  }
 
-    try {
-        // Ensure position is within bounds [0, duration]
-        const safePos = Math.max(0, Math.min(pos, dur));
+  try {
+    // Ensure position is within bounds [0, duration]
+    const safePos = Math.max(0, Math.min(pos, dur));
 
-        navigator.mediaSession.setPositionState({
-            duration: dur,
-            playbackRate: rate,
-            position: safePos,
-        });
-    } catch (err) {
-        console.error('[MediaSession] setPositionState failed:', err);
-    }
+    navigator.mediaSession.setPositionState({
+      duration: dur,
+      playbackRate: rate,
+      position: safePos,
+    });
+  } catch (err) {
+    console.error("[MediaSession] setPositionState failed:", err);
+  }
+}
+
+export interface SqueezePlayCommit {
+  track: Track;
+  startTime: number;
+  sessionId: number;
+  isCurrentSession: () => boolean;
+  commit: () => void;
+}
+
+/**
+ * Issue a Squeeze play request and commit optimistic state only on success.
+ * The callback keeps this seam independent from the rest of the audio setup,
+ * while the session predicate prevents an older successful request winning.
+ */
+export async function playTrackOnSqueeze(
+  mac: string,
+  trackIds: number[],
+  startIndex: number,
+  commit: SqueezePlayCommit,
+): Promise<"played" | "failed" | "superseded"> {
+  try {
+    await squeezePlay(mac, trackIds, startIndex);
+  } catch (err) {
+    console.error("[Player] Squeeze play failed:", err);
+    addToast(
+      `Squeeze playback failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      "error",
+    );
+    return "failed";
+  }
+
+  if (!commit.isCurrentSession()) return "superseded";
+  commit.commit();
+  return "played";
 }
 
 // Play a specific track
-export async function playTrack(track: Track, skipLocalSrc = false, startTime = 0): Promise<void> {
-    const previousTrackObj = get(currentTrack);
-    const sessionId = ++currentSessionId;
+export async function playTrack(
+  track: Track,
+  skipLocalSrc = false,
+  startTime = 0,
+): Promise<void> {
+  const previousTrackObj = get(currentTrack);
+  const sessionId = ++currentSessionId;
 
-    // Record play for the previous track (if any)
-    if (previousTrackObj && playStartTime > 0) {
-        const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
-        if (durationPlayed > 5) { // Only record if played for more than 5 seconds
-            recordTrackPlay(previousTrackObj.id, previousTrackObj.album_id ?? null, durationPlayed);
-            // ListenBrainz: scrobble if >= 50 % of track duration or 4 minutes played
-            const trackDuration = previousTrackObj.duration ?? 0;
-            if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
-                const threshold = Math.min(Math.floor(trackDuration / 2), 240);
-                if (durationPlayed >= threshold) {
-                    submitListenbrainzListen(
-                        previousTrackObj.artist ?? 'Unknown Artist',
-                        previousTrackObj.title ?? 'Unknown',
-                        previousTrackObj.album,
-                        previousTrackObj.duration,
-                        false,
-                    ).catch(e => console.warn('[ListenBrainz] Scrobble failed:', e));
-                }
-            }
+  // Reset playStartTime — play counting only happens on natural track completion
+  // (handleTrackEnd / handleGaplessAdvance), not on manual skip/play.
+  playStartTime = Date.now();
+  clearPendingForcedEnd();
+
+  // ListenBrainz: notify 'playing_now'
+  if (get(appSettings).listenBrainzEnabled) {
+    submitListenbrainzListen(
+      track.artist ?? "Unknown Artist",
+      track.title ?? "Unknown",
+      track.album,
+      track.duration,
+      true,
+    ).catch((e) => console.warn("[ListenBrainz] Now-playing failed:", e));
+  }
+
+  // Get full track with base64 data URI for plugins
+  const fullTrack = await getFullTrack(track.id, true);
+
+  // Check session ID before proceeding after await
+  if (sessionId !== currentSessionId) return;
+
+  const trackForPlugins = fullTrack || track;
+  pluginEvents.emit("trackChange", {
+    track: trackForPlugins,
+    previousTrack: previousTrackObj,
+  });
+
+  // Update Media Session early so the UI reflects the change immediately
+  // even if the audio engine takes a moment to initialize or resolve streams.
+  console.log(
+    "[Player] Preparing MediaSession metadata for:",
+    trackForPlugins.title,
+  );
+  await updateMediaSessionMetadata(trackForPlugins);
+
+  // AUTO-FETCH COVER LOGIC
+  // If the track is missing a cover, attempt to fetch it from an external source.
+  // This runs asynchronously and does not block playback.
+  if (!track.track_cover_path && !track.cover_url) {
+    fetchTrackCover(track)
+      .then(async (newCoverUrl) => {
+        if (newCoverUrl) {
+          console.log(
+            `[Player] Auto-fetched cover for "${track.title}": ${newCoverUrl}`,
+          );
+
+          // 1. Persist to Backend Database
+          try {
+            await invoke("update_track_cover_url", {
+              trackId: track.id,
+              coverUrl: newCoverUrl,
+            });
+          } catch (e) {
+            console.error(
+              "[Player] Failed to persist fetched cover to database:",
+              e,
+            );
+          }
+
+          // 2. Update reactive library store (metadata, cache, and main list)
+          updateTrackCover(track.id, newCoverUrl);
+
+          // 3. Update current player state if still playing the same track
+          const current = get(currentTrack);
+          if (current && current.id === track.id) {
+            currentTrack.update((t) =>
+              t ? { ...t, cover_url: newCoverUrl } : t,
+            );
+
+            // 4. Update Media Session (system notification) immediately with new art
+            updateMediaSessionMetadata({
+              ...track,
+              cover_url: newCoverUrl,
+            }).catch(() => {});
+          }
         }
+      })
+      .catch((err) => {
+        console.error("[Player] Failed to auto-fetch cover:", err);
+      });
+  }
+
+  if (sessionId !== currentSessionId) {
+    console.log(
+      "[Player] Session changed during metadata update, aborting playback",
+    );
+    return;
+  }
+
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      const q = get(queue);
+      const idx = get(queueIndex);
+      const trackIds = q.length > 0 ? q.map((t) => t.id) : [track.id];
+      const startIdx = q.length > 0 ? idx : 0;
+      await playTrackOnSqueeze(mac, trackIds, startIdx, {
+        track: trackForPlugins,
+        startTime,
+        sessionId,
+        isCurrentSession: () => sessionId === currentSessionId,
+        commit: () => {
+          currentTrack.set(trackForPlugins);
+          currentTime.set(startTime);
+          duration.set(track.duration || 0);
+          isPlaying.set(true);
+        },
+      });
     }
-    playStartTime = Date.now();
+    return;
+  }
 
-    // ListenBrainz: notify 'playing_now'
-    if (get(appSettings).listenBrainzEnabled) {
-        submitListenbrainzListen(
-            track.artist ?? 'Unknown Artist',
-            track.title ?? 'Unknown',
-            track.album,
-            track.duration,
-            true,
-        ).catch(e => console.warn('[ListenBrainz] Now-playing failed:', e));
-    }
+  try {
+    let audioPath = track.local_src || track.path;
 
-    // Get full track with base64 data URI for plugins
-    const fullTrack = await getFullTrack(track.id, true);
-
-    // Check session ID before proceeding after await
-    if (sessionId !== currentSessionId) return;
-
-    const trackForPlugins = fullTrack || track;
-    pluginEvents.emit('trackChange', { track: trackForPlugins, previousTrack: previousTrackObj });
-
-    // Update Media Session early so the UI reflects the change immediately
-    // even if the audio engine takes a moment to initialize or resolve streams.
-    console.log('[Player] Preparing MediaSession metadata for:', trackForPlugins.title);
-    await updateMediaSessionMetadata(trackForPlugins);
-
-    // AUTO-FETCH COVER LOGIC
-    // If the track is missing a cover, attempt to fetch it from an external source.
-    // This runs asynchronously and does not block playback.
-    if (!track.track_cover_path && !track.cover_url) {
-        fetchTrackCover(track).then(async (newCoverUrl) => {
-            if (newCoverUrl) {
-                console.log(`[Player] Auto-fetched cover for "${track.title}": ${newCoverUrl}`);
-
-                // 1. Persist to Backend Database
-                try {
-                    await invoke('update_track_cover_url', { trackId: track.id, coverUrl: newCoverUrl });
-                } catch (e) {
-                    console.error('[Player] Failed to persist fetched cover to database:', e);
-                }
-
-                // 2. Update reactive library store (metadata, cache, and main list)
-                updateTrackCover(track.id, newCoverUrl);
-
-                // 3. Update current player state if still playing the same track
-                const current = get(currentTrack);
-                if (current && current.id === track.id) {
-                    currentTrack.update(t => t ? { ...t, cover_url: newCoverUrl } : t);
-
-                    // 4. Update Media Session (system notification) immediately with new art
-                    updateMediaSessionMetadata({ ...track, cover_url: newCoverUrl }).catch(() => { });
-                }
-            }
-        }).catch(err => {
-            console.error('[Player] Failed to auto-fetch cover:', err);
-        });
+    // Fallback for plugins using stream_url
+    if (!audioPath && (track as any).stream_url) {
+      audioPath = (track as any).stream_url;
     }
 
-    if (sessionId !== currentSessionId) {
-        console.log('[Player] Session changed during metadata update, aborting playback');
-        return;
+    // Fallback for plugins using external_id as URL (common in radio plugins)
+    if (
+      !audioPath &&
+      track.external_id &&
+      (track.external_id.startsWith("http://") ||
+        track.external_id.startsWith("https://"))
+    ) {
+      audioPath = track.external_id;
     }
 
-    try {
-        let audioPath = track.local_src || track.path;
+    const streaming = isStreaming(track) || !!(track as any).stream_url;
 
-        // Fallback for plugins using stream_url
-        if (!audioPath && (track as any).stream_url) {
-            audioPath = (track as any).stream_url;
-        }
+    // Prep the backends
+    if (streaming) {
+      // Ensure we have a valid path
+      if (!audioPath) {
+        throw new Error("No audio path or stream URL found for track");
+      }
 
-        // Fallback for plugins using external_id as URL (common in radio plugins)
-        if (!audioPath && track.external_id && (track.external_id.startsWith('http://') || track.external_id.startsWith('https://'))) {
-            audioPath = track.external_id;
-        }
+      // Stop native audio
+      await nativeAudioStop().catch(() => {});
 
-        const streaming = isStreaming(track) || !!(track as any).stream_url;
-
-        // Prep the backends
-        if (streaming) {
-            // Ensure we have a valid path
-            if (!audioPath) {
-                throw new Error('No audio path or stream URL found for track');
-            }
-
-            // Stop native audio
-            await nativeAudioStop().catch(() => { });
-
-            // Resolve custom schemes (like tidal://) to HTTP or blob URLs
-            if (classifyAudioPath(audioPath) === 'custom-scheme') {
-                const runtime = pluginStore.getRuntime();
-                if (runtime) {
-                    const sourceType = track.source_type;
-                    const externalId = track.external_id;
-                    if (sourceType && externalId) {
-                        console.log(`[Player] Resolving custom scheme: ${audioPath}`);
-                        const resolved = await runtime.resolveStreamUrl(sourceType, externalId, { track: trackForPlugins });
-                        if (resolved) {
-                            audioPath = resolved;
-                        } else {
-                            throw new Error(`Failed to resolve stream URL for ${sourceType}`);
-                        }
-                    }
-                }
-            }
-
-            // Start HTML5
-            let audio = getHtml5Audio();
-
-            // Reset src to avoid overlap issues
-            audio.pause();
-
-            // Destroy any existing dash player before switching tracks
-            if (dashPlayer) {
-                try { dashPlayer.destroy(); } catch (_) { }
-                dashPlayer = null;
-            }
-
-            const finalKind = classifyAudioPath(audioPath);
-
-            if (finalKind === 'blob') {
-                audio = await prepareHtml5AudioForPath(audio, audioPath);
-                audio.volume = sliderToAudioVolume(get(volume));
-
-                await playWithDash(audioPath, audio);
-                console.log('[Player] dash.js DASH streaming started:', track.title);
+      // Resolve custom schemes (like tidal://) to HTTP or blob URLs
+      if (classifyAudioPath(audioPath) === "custom-scheme") {
+        const runtime = pluginStore.getRuntime();
+        if (runtime) {
+          const sourceType = track.source_type;
+          const externalId = track.external_id;
+          if (sourceType && externalId) {
+            console.log(`[Player] Resolving custom scheme: ${audioPath}`);
+            const resolved = await runtime.resolveStreamUrl(
+              sourceType,
+              externalId,
+              { track: trackForPlugins },
+            );
+            if (resolved) {
+              audioPath = resolved;
             } else {
-                // Resolve playlist-format URLs (.m3u, .pls, .m3u8) to direct stream URLs
-                audioPath = await resolvePlaylistUrl(audioPath);
-                audio = await prepareHtml5AudioForPath(audio, audioPath);
-
-                audio.src = audioPath;
-                audio.volume = sliderToAudioVolume(get(volume));
-
-                // Wrap play in a handler to catch AbortError (common with rapid skipping)
-                try {
-                    await audio.play();
-                } catch (err) {
-                    if (err instanceof DOMException && err.name === 'AbortError') {
-                        console.warn('[Player] Playback aborted (likely replaced by new track)', err);
-                    } else {
-                        throw err;
-                    }
-                }
-
-                if (startTime > 0) {
-                    audio.currentTime = startTime;
-                }
-
-                console.log('[Player] HTML5 streaming started:', track.title);
+              throw new Error(`Failed to resolve stream URL for ${sourceType}`);
             }
+          }
+        }
+      }
 
-            activeBackend.set('html5');
-        } else {
-            if (!audioPath) {
-                throw new Error('No local audio path found for track');
-            }
+      // Start HTML5
+      let audio = getHtml5Audio();
 
-            if (nativeAudioUsed) {
-                // Stop HTML5 audio
-                if (html5Audio) {
-                    html5Audio.pause();
-                    html5Audio.src = '';
-                }
+      // Reset src to avoid overlap issues
+      audio.pause();
 
-                // Play via native backend
-                await nativeAudioPlay(audioPath, (track as any).replay_gain_db ?? null);
+      // Destroy any existing dash player before switching tracks
+      if (dashPlayer) {
+        try {
+          dashPlayer.destroy();
+        } catch (_) {}
+        dashPlayer = null;
+      }
 
-                // Sync volume
-                const vol = sliderToAudioVolume(get(volume));
-                await nativeAudioSetVolume(vol);
+      const finalKind = classifyAudioPath(audioPath);
 
-                // Seek if starting from a specific position (for playback transfer)
-                if (startTime > 0 && track.duration) {
-                    await nativeAudioSeek(startTime / track.duration);
-                }
+      if (finalKind === "blob") {
+        audio = await prepareHtml5AudioForPath(audio, audioPath);
+        audio.volume = sliderToAudioVolume(get(volume));
 
-                // Preload next track for gapless playback
-                _schedulePreload();
+        await playWithDash(audioPath, audio);
+        console.log("[Player] dash.js DASH streaming started:", track.title);
+      } else {
+        // Resolve playlist-format URLs (.m3u, .pls, .m3u8) to direct stream URLs
+        audioPath = await resolvePlaylistUrl(audioPath);
+        audio = await prepareHtml5AudioForPath(audio, audioPath);
 
-                activeBackend.set('native');
-                console.log('[Player] Native playback started:', track.title);
-            } else {
-                // Fallback to HTML5 via convertFileSrc if native is disabled (e.g. on macOS)
-                let audio = getHtml5Audio();
-                audio = await prepareHtml5AudioForPath(audio, audioPath);
-                audio.pause();
+        audio.src = audioPath;
+        audio.volume = sliderToAudioVolume(get(volume));
 
-                // Use convertFileSrc to get a URL that the browser can play
-                audio.src = convertFileSrc(audioPath);
-                audio.volume = sliderToAudioVolume(get(volume));
-
-                await audio.play();
-                if (startTime > 0) {
-                    audio.currentTime = startTime;
-                }
-                activeBackend.set('html5');
-                console.log('[Player] Local playback started via HTML5:', track.title);
-            }
+        // Wrap play in a handler to catch AbortError (common with rapid skipping)
+        try {
+          await audio.play();
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") {
+            console.warn(
+              "[Player] Playback aborted (likely replaced by new track)",
+              err,
+            );
+          } else {
+            throw err;
+          }
         }
 
-        currentTrack.set(trackForPlugins);
-        currentTime.set(startTime);
-        duration.set(track.duration || 0);
-        isPlaying.set(true);
+        if (startTime > 0) {
+          audio.currentTime = startTime;
+        }
 
-        // Update Media Session state and position (metadata was updated earlier)
-        updateMediaSessionPlaybackState('playing');
-        updateMediaSessionPosition();
+        console.log("[Player] HTML5 streaming started:", track.title);
+      }
 
-    } catch (err) {
-        console.error('[Player] Playback failed:', err);
-        addToast(`Playback failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      activeBackend.set("html5");
+    } else {
+      if (!audioPath) {
+        throw new Error("No local audio path found for track");
+      }
+
+      if (nativeAudioUsed) {
+        // Stop HTML5 audio
+        if (html5Audio) {
+          html5Audio.pause();
+          html5Audio.src = "";
+        }
+
+        // Play via native backend
+        await nativeAudioPlay(audioPath, (track as any).replay_gain_db ?? null);
+
+        // Sync volume
+        const vol = sliderToAudioVolume(get(volume));
+        await nativeAudioSetVolume(vol);
+
+        // Seek if starting from a specific position (for playback transfer)
+        if (startTime > 0 && track.duration) {
+          await nativeAudioSeek(startTime / track.duration);
+        }
+
+        // Preload next track for gapless playback
+        _schedulePreload();
+
+        activeBackend.set("native");
+        console.log("[Player] Native playback started:", track.title);
+      } else {
+        // Fallback to HTML5 via convertFileSrc if native is disabled (e.g. on macOS)
+        let audio = getHtml5Audio();
+        audio = await prepareHtml5AudioForPath(audio, audioPath);
+        audio.pause();
+
+        // Use convertFileSrc to get a URL that the browser can play
+        audio.src = convertFileSrc(audioPath);
+        audio.volume = sliderToAudioVolume(get(volume));
+
+        await audio.play();
+        if (startTime > 0) {
+          audio.currentTime = startTime;
+        }
+        activeBackend.set("html5");
+        console.log("[Player] Local playback started via HTML5:", track.title);
+      }
     }
+
+    currentTrack.set(trackForPlugins);
+    currentTime.set(startTime);
+    duration.set(track.duration || 0);
+    isPlaying.set(true);
+
+    // Update Media Session state and position (metadata was updated earlier)
+    updateMediaSessionPlaybackState("playing");
+    updateMediaSessionPosition();
+  } catch (err) {
+    console.error("[Player] Playback failed:", err);
+    addToast(
+      `Playback failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      "error",
+    );
+  }
 }
-
 
 // Shuffled Queue State
 export const shuffledIndices = writable<number[]>([]);
@@ -1368,154 +1725,184 @@ export const shuffledIndex = writable<number>(0);
 
 // Helper to shuffle array (Fisher-Yates)
 function shuffleArray<T>(array: T[]): T[] {
-    const arr = [...array];
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 // Play a list of tracks starting at index
 export function playTracks(
-    tracks: Track[],
-    startIndex: number = 0,
-    context?: PlaybackContext
+  tracks: Track[],
+  startIndex: number = 0,
+  context?: PlaybackContext,
 ): void {
-    const currentQueue = get(queue);
+  const currentQueue = get(queue);
 
-    // Check if the new tracks are effectively the same as the current queue
-    // usage of JSON.stringify is a simple way to check deep equality for arrays of objects
-    // optimization: check length and first/last ID first to avoid expensive stringify
-    let isSameQueue = false;
+  // Check if the new tracks are effectively the same as the current queue
+  // usage of JSON.stringify is a simple way to check deep equality for arrays of objects
+  // optimization: check length and first/last ID first to avoid expensive stringify
+  let isSameQueue = false;
 
-    if (tracks.length === currentQueue.length) {
-        if (tracks.length === 0) {
-            isSameQueue = true;
-        } else {
-            // Check first and last ID match
-            if (tracks[0].id === currentQueue[0].id &&
-                tracks[tracks.length - 1].id === currentQueue[currentQueue.length - 1].id) {
-                // If ends match, do a full check to be sure (or just trust it for performance?)
-                // Let's do a quick ID check
-                isSameQueue = tracks.every((t, i) => t.id === currentQueue[i].id);
-            }
-        }
+  if (tracks.length === currentQueue.length) {
+    if (tracks.length === 0) {
+      isSameQueue = true;
+    } else {
+      // Check first and last ID match
+      if (
+        tracks[0].id === currentQueue[0].id &&
+        tracks[tracks.length - 1].id ===
+          currentQueue[currentQueue.length - 1].id
+      ) {
+        // If ends match, do a full check to be sure (or just trust it for performance?)
+        // Let's do a quick ID check
+        isSameQueue = tracks.every((t, i) => t.id === currentQueue[i].id);
+      }
     }
+  }
 
-    // Update queue only if different (though setting it again might be harmless store-update-wise, 
-    // we want to know if it CHANGED for shuffle logic)
-    if (!isSameQueue) {
-        queue.set(tracks);
-    }
+  // Update queue only if different (though setting it again might be harmless store-update-wise,
+  // we want to know if it CHANGED for shuffle logic)
+  if (!isSameQueue) {
+    queue.set(tracks);
+  }
 
-    queueIndex.set(startIndex);
-    userQueueCount.set(0); // Reset user queue when starting fresh context
+  queueIndex.set(startIndex);
+  userQueueCount.set(0); // Reset user queue when starting fresh context
 
-    // Set playback context
-    playbackContext.set(context ?? null);
+  // Set playback context
+  playbackContext.set(context ?? null);
 
-    // Shuffle Logic
-    if (get(shuffle)) {
-        // FORCE START Logic:
-        // When user plays a track (even if it's in the same queue), we want that track to play NOW,
-        // and we want ALL OTHER tracks to be in the "Next Up" queue (shuffled).
-        // We do NOT want to preserve the old shuffle order because jumping to a track "late" in the 
-        // shuffle order causes all previous tracks to be "skipped" into history.
+  // Shuffle Logic
+  if (get(shuffle)) {
+    // FORCE START Logic:
+    // When user plays a track (even if it's in the same queue), we want that track to play NOW,
+    // and we want ALL OTHER tracks to be in the "Next Up" queue (shuffled).
+    // We do NOT want to preserve the old shuffle order because jumping to a track "late" in the
+    // shuffle order causes all previous tracks to be "skipped" into history.
 
-        // 1. Get all indices
-        const allIndices = tracks.map((_, i) => i);
+    // 1. Get all indices
+    const allIndices = tracks.map((_, i) => i);
 
-        // 2. Remove startIndex (the track we want to play)
-        const otherIndices = allIndices.filter(i => i !== startIndex);
+    // 2. Remove startIndex (the track we want to play)
+    const otherIndices = allIndices.filter((i) => i !== startIndex);
 
-        // 3. Shuffle the rest
-        const shuffledOthers = shuffleArray(otherIndices);
+    // 3. Shuffle the rest
+    const shuffledOthers = shuffleArray(otherIndices);
 
-        // 4. Construct new order: [startIndex, ...shuffledRest]
-        const newShuffledIndices = [startIndex, ...shuffledOthers];
+    // 4. Construct new order: [startIndex, ...shuffledRest]
+    const newShuffledIndices = [startIndex, ...shuffledOthers];
 
-        console.log(`Regenerating shuffle with forced start: ${startIndex}`);
-        shuffledIndices.set(newShuffledIndices);
+    console.log(`Regenerating shuffle with forced start: ${startIndex}`);
+    shuffledIndices.set(newShuffledIndices);
 
-        // 5. Set cursor to 0 (since our track is now at index 0)
-        shuffledIndex.set(0);
-    }
+    // 5. Set cursor to 0 (since our track is now at index 0)
+    shuffledIndex.set(0);
+  }
 
-    // Emit queueChange event for plugins
-    // If same queue, we might still want to emit if the logical "context" changed, 
-    // but usually plugins care about the list content.
-    // If we filtered or sorted the SAME list, isSameQueue might be false (order matters).
-    // Our ID check strictly checks order. So sorting changes the queue.
-    pluginEvents.emit('queueChange', { queue: tracks, index: startIndex });
+  // Emit queueChange event for plugins
+  // If same queue, we might still want to emit if the logical "context" changed,
+  // but usually plugins care about the list content.
+  // If we filtered or sorted the SAME list, isSameQueue might be false (order matters).
+  // Our ID check strictly checks order. So sorting changes the queue.
+  pluginEvents.emit("queueChange", { queue: tracks, index: startIndex });
 
-    if (tracks.length > 0 && startIndex < tracks.length) {
-        playTrack(tracks[startIndex]);
-    }
+  if (tracks.length > 0 && startIndex < tracks.length) {
+    playTrack(tracks[startIndex]);
+  }
 }
 
 export async function togglePlay(): Promise<void> {
-    if (get(isPlaying)) {
-        await pause();
-    } else {
-        await resume();
-    }
+  if (get(isPlaying)) {
+    await pause();
+  } else {
+    await resume();
+  }
 }
 
 export async function pause(): Promise<void> {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            sendRemoteCommand(targetId, 'pause');
-        }
-        return;
-    }
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) squeezePause(mac).catch(console.error);
+    return;
+  }
 
-    try {
-        if (get(activeBackend) === 'html5') {
-            getHtml5Audio().pause();
-        } else if (get(activeBackend) === 'native') {
-            await nativeAudioPause();
-        }
-        isPlaying.set(false);
-        updateMediaSessionPlaybackState('paused');
-    } catch (err) {
-        console.error('[Player] Pause failed:', err);
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      sendRemoteCommand(targetId, "pause");
     }
+    return;
+  }
+
+  try {
+    if (get(activeBackend) === "html5") {
+      getHtml5Audio().pause();
+    } else if (get(activeBackend) === "native") {
+      await nativeAudioPause();
+    }
+    isPlaying.set(false);
+    updateMediaSessionPlaybackState("paused");
+  } catch (err) {
+    console.error("[Player] Pause failed:", err);
+  }
 }
 
 export async function resume(): Promise<void> {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            sendRemoteCommand(targetId, 'resume');
-        }
-        return;
-    }
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (!mac) return;
 
-    try {
-        const track = get(currentTrack);
-        if (!track) return;
-
-        if (get(currentTime) >= get(duration) && get(duration) > 0) {
-            await playTrack(track);
-        } else if (get(activeBackend) === 'none') {
-            // App just opened, no audio loaded yet - start playback from saved position
-            await playTrack(track, false, get(currentTime));
-        } else if (get(activeBackend) === 'html5') {
-            await resumeHtml5AudioContext();
-            await getHtml5Audio().play();
-            isPlaying.set(true);
-            updateMediaSessionPlaybackState('playing');
-        } else if (get(activeBackend) === 'native') {
-            await nativeAudioResume();
-            isPlaying.set(true);
-            updateMediaSessionPlaybackState('playing');
-        }
-        updateMediaSessionPosition();
-    } catch (err) {
-        console.error('[Player] Resume failed:', err);
+    const state = get(squeezePlayerState);
+    if (state?.current_track) {
+      squeezeResume(mac).catch(console.error);
+    } else {
+      const q = get(queue);
+      const idx = get(queueIndex);
+      const track = get(currentTrack);
+      if (q.length > 0) {
+        const trackIds = q.map((t) => t.id);
+        squeezePlay(mac, trackIds, idx).catch(console.error);
+      } else if (track) {
+        squeezePlay(mac, [track.id], 0).catch(console.error);
+      }
     }
+    return;
+  }
+
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      sendRemoteCommand(targetId, "resume");
+    }
+    return;
+  }
+
+  try {
+    const track = get(currentTrack);
+    if (!track) return;
+
+    if (get(currentTime) >= get(duration) && get(duration) > 0) {
+      await playTrack(track);
+    } else if (get(activeBackend) === "none") {
+      // App just opened, no audio loaded yet - start playback from saved position
+      await playTrack(track, false, get(currentTime));
+    } else if (get(activeBackend) === "html5") {
+      await resumeHtml5AudioContext();
+      await getHtml5Audio().play();
+      isPlaying.set(true);
+      updateMediaSessionPlaybackState("playing");
+    } else if (get(activeBackend) === "native") {
+      await nativeAudioResume();
+      isPlaying.set(true);
+      updateMediaSessionPlaybackState("playing");
+    }
+    updateMediaSessionPosition();
+  } catch (err) {
+    console.error("[Player] Resume failed:", err);
+  }
 }
 
 // =============================================================================
@@ -1531,396 +1918,569 @@ export async function resume(): Promise<void> {
  *              Used by _schedulePreload() to peek ahead.
  */
 function _advanceQueueIndex(dry = false): number | null {
-    const q = get(queue);
-    const rep = get(repeat);
-    const shuf = get(shuffle);
-    const userCount = get(userQueueCount);
-    const settings = get(appSettings);
-    let idx = get(queueIndex);
+  const q = get(queue);
+  const rep = get(repeat);
+  const shuf = get(shuffle);
+  const userCount = get(userQueueCount);
+  const settings = get(appSettings);
+  let idx = get(queueIndex);
 
-    if (q.length === 0) return null;
+  if (q.length === 0) return null;
 
-    // Check if we have user-queued tracks to play first
-    if (userCount > 0) {
-        // Play next user-queued track sequentially (always sequential for user queue)
-        // User queue tracks are inserted directly after current track in the main queue list.
-        // So we just increment normal index.
-        idx = idx + 1;
-        if (!dry) userQueueCount.update(c => Math.max(0, c - 1));
+  // Check if we have user-queued tracks to play first
+  if (userCount > 0) {
+    // Play next user-queued track sequentially (always sequential for user queue)
+    // User queue tracks are inserted directly after current track in the main queue list.
+    // So we just increment normal index.
+    idx = idx + 1;
+    if (!dry) userQueueCount.update((c) => Math.max(0, c - 1));
+  } else if (shuf) {
+    const shufIndices = get(shuffledIndices);
+    let shufIdx = get(shuffledIndex) + 1;
 
-    } else if (shuf) {
-        const shufIndices = get(shuffledIndices);
-        let shufIdx = get(shuffledIndex) + 1;
-
-        if (shufIdx >= shufIndices.length) {
-            if (rep === 'all') {
-                shufIdx = 0;
-            } else {
-                // End of shuffle — caller decides autoplay/stop
-                return null;
-            }
-        }
-
-        if (!dry) shuffledIndex.set(shufIdx);
-        idx = shufIndices[shufIdx];
-    } else {
-        idx = idx + 1;
-
-        if (idx >= q.length) {
-            if (rep === 'all') {
-                idx = 0;
-            } else {
-                // End of queue — caller decides autoplay/stop
-                return null;
-            }
-        }
+    if (shufIdx >= shufIndices.length) {
+      if (rep === "all") {
+        shufIdx = 0;
+      } else {
+        // End of shuffle — caller decides autoplay/stop
+        return null;
+      }
     }
 
-    return idx;
+    if (!dry) shuffledIndex.set(shufIdx);
+    idx = shufIndices[shufIdx];
+  } else {
+    idx = idx + 1;
+
+    if (idx >= q.length) {
+      if (rep === "all") {
+        idx = 0;
+      } else {
+        // End of queue — caller decides autoplay/stop
+        return null;
+      }
+    }
+  }
+
+  return idx;
 }
 
 // Next track
 export function nextTrack(): void {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            sendRemoteCommand(targetId, 'next');
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) squeezeNext(mac).catch(console.error);
+    return;
+  }
+
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      sendRemoteCommand(targetId, "next");
+    }
+    return;
+  }
+
+  const q = get(queue);
+  const settings = get(appSettings);
+
+  if (q.length === 0) {
+    if (settings.autoplay) playRandomFromLibrary();
+    return;
+  }
+
+  const idx = _advanceQueueIndex();
+
+  if (idx === null) {
+    // End of queue — check if we should remove from listen-later
+    const ctx = get(playbackContext);
+    if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
+      console.log(
+        "[Player] Album finished, removing from listen-later:",
+        ctx.albumId,
+      );
+      void toggleListenLater(ctx.albumId);
     }
 
-    const q = get(queue);
-    const settings = get(appSettings);
-
-    if (q.length === 0) {
-        if (settings.autoplay) playRandomFromLibrary();
-        return;
+    // End of queue/shuffle with no repeat
+    if (settings.autoplay) {
+      playRandomFromLibrary();
+    } else {
+      // Stop playback completely
+      if (get(activeBackend) === "native") {
+        nativeAudioStop().catch(console.error);
+      } else if (get(activeBackend) === "html5" && html5Audio) {
+        html5Audio.pause();
+        html5Audio.currentTime = 0;
+      }
+      isPlaying.set(false);
+      currentTime.set(0);
+      updateMediaSessionPlaybackState("paused");
     }
+    return;
+  }
 
-    const idx = _advanceQueueIndex();
-
-    if (idx === null) {
-        // End of queue/shuffle with no repeat
-        if (settings.autoplay) {
-            playRandomFromLibrary();
-        } else {
-            // Stop at end
-            isPlaying.set(false);
-        }
-        return;
-    }
-
-    queueIndex.set(idx);
-    playTrack(q[idx]);
+  queueIndex.set(idx);
+  playTrack(q[idx]);
 }
 
 // Play a random track from the library (for autoplay feature)
 function playRandomFromLibrary(): void {
-    const allTracks = get(libraryTracks);
-    if (allTracks.length === 0) {
-        isPlaying.set(false);
-        return;
-    }
+  const allTracks = get(libraryTracks);
+  if (allTracks.length === 0) {
+    isPlaying.set(false);
+    return;
+  }
 
-    // Pick a random track, avoiding the current one if possible
-    const current = get(currentTrack);
-    let availableTracks = allTracks;
+  // Pick a random track, avoiding the current one if possible
+  const current = get(currentTrack);
+  let availableTracks = allTracks;
 
-    if (current && allTracks.length > 1) {
-        availableTracks = allTracks.filter(t => t.id !== current.id);
-    }
+  if (current && allTracks.length > 1) {
+    availableTracks = allTracks.filter((t) => t.id !== current.id);
+  }
 
-    const randomIndex = Math.floor(Math.random() * availableTracks.length);
-    const randomTrack = availableTracks[randomIndex];
+  const randomIndex = Math.floor(Math.random() * availableTracks.length);
+  const randomTrack = availableTracks[randomIndex];
 
-    // Add to queue and play
-    queue.update(q => [...q, randomTrack]);
-    const newQueue = get(queue);
-    queueIndex.set(newQueue.length - 1);
+  // Add to queue and play
+  queue.update((q) => [...q, randomTrack]);
+  const newQueue = get(queue);
+  queueIndex.set(newQueue.length - 1);
 
-    playTrack(randomTrack);
+  playTrack(randomTrack);
 }
 
 // Previous track
 export async function previousTrack(): Promise<void> {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            sendRemoteCommand(targetId, 'previous');
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) squeezePrevious(mac).catch(console.error);
+    return;
+  }
+
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      sendRemoteCommand(targetId, "previous");
+    }
+    return;
+  }
+
+  const q = get(queue);
+  const shuf = get(shuffle);
+  let idx = get(queueIndex);
+
+  if (q.length === 0) return;
+
+  // If more than 3 seconds in, restart current track
+  try {
+    let pos = get(currentTime);
+
+    if (pos > 3) {
+      if (get(activeBackend) === "html5") {
+        getHtml5Audio().currentTime = 0;
+      } else if (get(activeBackend) === "native") {
+        await nativeAudioSeek(0);
+      }
+      return;
+    }
+  } catch (err) {
+    console.error("[Player] Restart track failed:", err);
+  }
+
+  if (shuf) {
+    // Persistent Shuffle Previous
+    const shufIndices = get(shuffledIndices);
+    let shufIdx = get(shuffledIndex);
+
+    shufIdx = shufIdx - 1;
+    if (shufIdx < 0) {
+      shufIdx = get(repeat) === "all" ? shufIndices.length - 1 : 0;
     }
 
-    const q = get(queue);
-    const shuf = get(shuffle);
-    let idx = get(queueIndex);
-
-    if (q.length === 0) return;
-
-    // If more than 3 seconds in, restart current track
-    try {
-        let pos = get(currentTime);
-
-        if (pos > 3) {
-            if (get(activeBackend) === 'html5') {
-                getHtml5Audio().currentTime = 0;
-            } else if (get(activeBackend) === 'native') {
-                await nativeAudioSeek(0);
-            }
-            return;
-        }
-    } catch (err) {
-        console.error('[Player] Restart track failed:', err);
+    shuffledIndex.set(shufIdx);
+    idx = shufIndices[shufIdx];
+  } else {
+    idx = idx - 1;
+    if (idx < 0) {
+      idx = get(repeat) === "all" ? q.length - 1 : 0;
     }
+  }
 
-    if (shuf) {
-        // Persistent Shuffle Previous
-        const shufIndices = get(shuffledIndices);
-        let shufIdx = get(shuffledIndex);
-
-        shufIdx = shufIdx - 1;
-        if (shufIdx < 0) {
-            shufIdx = get(repeat) === 'all' ? shufIndices.length - 1 : 0;
-        }
-
-        shuffledIndex.set(shufIdx);
-        idx = shufIndices[shufIdx];
-    } else {
-        idx = idx - 1;
-        if (idx < 0) {
-            idx = get(repeat) === 'all' ? q.length - 1 : 0;
-        }
-    }
-
-    queueIndex.set(idx);
-    playTrack(q[idx]);
+  queueIndex.set(idx);
+  playTrack(q[idx]);
 }
 
 // Seek to position (0-1)
 export async function seek(position: number): Promise<void> {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            throttledRemoteCommand(targetId, 'seek', { position }, 100);
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      const posSeconds = position * get(duration);
+      squeezeSeek(mac, posSeconds).catch(console.error);
     }
+    return;
+  }
 
-    try {
-        if (get(activeBackend) === 'html5') {
-            const audio = getHtml5Audio();
-            if (audio.duration) {
-                audio.currentTime = position * audio.duration;
-            }
-        } else if (get(activeBackend) === 'native') {
-            await nativeAudioSeek(position);
-            // Update UI immediately — poller is stopped while paused
-            if (!get(isPlaying)) {
-                currentTime.set(position * get(duration));
-            }
-        }
-        updateMediaSessionPosition();
-    } catch (err) {
-        console.error('[Player] Seek failed:', err);
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      throttledRemoteCommand(targetId, "seek", { position }, 100);
     }
+    return;
+  }
+
+  try {
+    if (get(activeBackend) === "html5") {
+      const audio = getHtml5Audio();
+      if (audio.duration) {
+        audio.currentTime = position * audio.duration;
+      }
+    } else if (get(activeBackend) === "native") {
+      await nativeAudioSeek(position);
+      // Update UI immediately — poller is stopped while paused
+      if (!get(isPlaying)) {
+        currentTime.set(position * get(duration));
+      }
+    }
+    updateMediaSessionPosition();
+  } catch (err) {
+    console.error("[Player] Seek failed:", err);
+  }
 }
 
 // Set volume (slider value 0-1, will be converted to logarithmic for audio)
 export async function setVolume(sliderValue: number): Promise<void> {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            throttledRemoteCommand(targetId, 'volume', { volume: sliderValue }, 100);
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      volume.set(sliderValue);
+      setSqueezeVolumeCooldown();
+      throttledSqueezeVolume(mac, Math.round(sliderValue * 100));
     }
+    return;
+  }
 
-    volume.set(sliderValue);
-    const vol = sliderToAudioVolume(sliderValue);
-
-    try {
-        // Update HTML5 volume
-        if (html5Audio) {
-            html5Audio.volume = vol;
-        }
-        // Update native volume
-        if (nativeAudioUsed) {
-            await nativeAudioSetVolume(vol);
-        }
-    } catch (err) {
-        console.error('[Player] Volume set failed:', err);
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      throttledRemoteCommand(targetId, "volume", { volume: sliderValue }, 100);
     }
+    return;
+  }
+
+  volume.set(sliderValue);
+  const vol = sliderToAudioVolume(sliderValue);
+
+  try {
+    // Update HTML5 volume
+    if (html5Audio) {
+      html5Audio.volume = vol;
+    }
+    // Update native volume
+    if (nativeAudioUsed) {
+      await nativeAudioSetVolume(vol);
+    }
+  } catch (err) {
+    console.error("[Player] Volume set failed:", err);
+  }
 }
 
 // Toggle shuffle
 export function toggleShuffle(): void {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            sendRemoteCommand(targetId, 'shuffle', { shuffle: !get(shuffle) });
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) squeezeSetShuffle(mac, !get(shuffle)).catch(console.error);
+    return;
+  }
+
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      sendRemoteCommand(targetId, "shuffle", { shuffle: !get(shuffle) });
+    }
+    return;
+  }
+
+  shuffle.update((s) => {
+    const newState = !s;
+
+    if (newState) {
+      // Shuffle disables album-end mode (exploration R2).
+      // Shuffling would immediately change the next track's album,
+      // making album-end detection unreliable.
+      if (isTimerModeAlbumEnd()) {
+        stopSleepTimer(true);
+        addToast("Album-end mode disabled during shuffle", "info");
+      }
+
+      // Turn ON: Generate shuffled order
+      const q = get(queue);
+      const currentIdx = get(queueIndex);
+
+      // Create indices array
+      const indices = q.map((_, i) => i);
+      const shuffled = shuffleArray(indices);
+
+      // Set shuffled indices
+      console.log("Regenerating shuffle in toggleShuffle");
+      shuffledIndices.set(shuffled);
+
+      // Find current track in shuffled list to maintain continuity
+      const ptr = shuffled.indexOf(currentIdx);
+      shuffledIndex.set(ptr !== -1 ? ptr : 0);
+    } else {
+      // Turn OFF: Just stop using shuffle
+      // QueueIndex is already correct
     }
 
-    shuffle.update(s => {
-        const newState = !s;
-
-        if (newState) {
-            // Turn ON: Generate shuffled order
-            const q = get(queue);
-            const currentIdx = get(queueIndex);
-
-            // Create indices array
-            const indices = q.map((_, i) => i);
-            const shuffled = shuffleArray(indices);
-
-            // Set shuffled indices
-            console.log('Regenerating shuffle in toggleShuffle');
-            shuffledIndices.set(shuffled);
-
-            // Find current track in shuffled list to maintain continuity
-            const ptr = shuffled.indexOf(currentIdx);
-            shuffledIndex.set(ptr !== -1 ? ptr : 0);
-        } else {
-            // Turn OFF: Just stop using shuffle
-            // QueueIndex is already correct
-        }
-
-        return newState;
-    });
+    return newState;
+  });
 }
 
 // Cycle repeat mode
 export function cycleRepeat(): void {
-    if (get(activeBackend) === 'remote') {
-        const targetId = get(activeRemoteDevice);
-        if (targetId) {
-            const r = get(repeat);
-            const next = r === 'none' ? 'all' : r === 'all' ? 'one' : 'none';
-            sendRemoteCommand(targetId, 'repeat', { repeat: next });
-        }
-        return;
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      const r = get(repeat);
+      const next = r === "none" ? "all" : r === "all" ? "one" : "off";
+      squeezeSetRepeat(mac, next).catch(console.error);
     }
+    return;
+  }
 
-    repeat.update(r => {
-        const next = r === 'none' ? 'all' : r === 'all' ? 'one' : 'none';
-        if (get(activeBackend) === 'native') {
-            nativeAudioSetRepeatOne(next === 'one').catch(console.error);
-        }
-        return next;
-    });
+  if (get(activeBackend) === "remote") {
+    const targetId = get(activeRemoteDevice);
+    if (targetId) {
+      const r = get(repeat);
+      const next = r === "none" ? "all" : r === "all" ? "one" : "none";
+      sendRemoteCommand(targetId, "repeat", { repeat: next });
+    }
+    return;
+  }
+
+  repeat.update((r) => {
+    const next = r === "none" ? "all" : r === "all" ? "one" : "none";
+    if (get(activeBackend) === "native") {
+      nativeAudioSetRepeatOne(next === "one").catch(console.error);
+    }
+    return next;
+  });
 }
 
 // Handle track end
 function handleTrackEnd(): void {
-    // Record play for the track that just ended
-    const track = get(currentTrack);
-    if (track && playStartTime > 0) {
-        const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
-        if (durationPlayed > 5) {
-            recordTrackPlay(track.id, track.album_id ?? null, durationPlayed);
-            // ListenBrainz: scrobble if >= 50 % of duration or 4 minutes
-            const trackDuration = track.duration ?? 0;
-            if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
-                const threshold = Math.min(Math.floor(trackDuration / 2), 240);
-                if (durationPlayed >= threshold) {
-                    submitListenbrainzListen(
-                        track.artist ?? 'Unknown Artist',
-                        track.title ?? 'Unknown',
-                        track.album,
-                        track.duration,
-                        false,
-                    ).catch(e => console.warn('[ListenBrainz] Scrobble failed:', e));
-                }
-            }
+  // Record play for the track that just ended
+  const track = get(currentTrack);
+  if (track && playStartTime > 0) {
+    const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
+    if (durationPlayed > 5) {
+      console.log(
+        `[Player] Recording play for "${track.title}" (${durationPlayed}s)`,
+      );
+      recordTrackPlay(track.id, track.album_id ?? null, durationPlayed);
+      incrementPlayCount(track.id);
+      // ListenBrainz: scrobble if >= 50 % of duration or 4 minutes
+      const trackDuration = track.duration ?? 0;
+      if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
+        const threshold = Math.min(Math.floor(trackDuration / 2), 240);
+        if (durationPlayed >= threshold) {
+          submitListenbrainzListen(
+            track.artist ?? "Unknown Artist",
+            track.title ?? "Unknown",
+            track.album,
+            track.duration,
+            false,
+          ).catch((e) => console.warn("[ListenBrainz] Scrobble failed:", e));
         }
-        playStartTime = 0; // Reset so playTrack doesn't double-record
+      }
+    } else {
+      console.log(
+        `[Player] Track "${track.title}" played only ${durationPlayed}s, not recording`,
+      );
     }
+    playStartTime = 0;
+  }
 
-    // Repeat one logic for backends that don't handle it internally (like HTML5)
-    if (get(repeat) === 'one' && track) {
-        console.log('[Player] Repeat one: restarting current track');
-        playTrack(track).catch(console.error);
-        return;
+  // Sleep timer check — MUST precede repeat-one (AD3).
+  // If the timer is in track_end/album_end mode, it may pause playback
+  // and we must return early without advancing the queue.
+  if (isTimerModeTrackOrAlbumEnd()) {
+    // Dry-run to peek at the next track's album_id for album_end detection
+    let nextAlbumId: number | null = null;
+    const nextIdx = _advanceQueueIndex(true);
+    if (nextIdx !== null) {
+      const q = get(queue);
+      const nextTrack = q[nextIdx];
+      if (nextTrack) {
+        nextAlbumId = nextTrack.album_id ?? null;
+      }
     }
+    // nextAlbumId=null means: no next track (queue end) or next track has no album
+    if (handleSleepTimerCheck(track, nextAlbumId)) {
+      // Timer fired — stop here, don't advance or repeat-one
+      return;
+    }
+  }
 
-    nextTrack();
+  // Repeat one logic for backends that don't handle it internally (like HTML5)
+  if (get(repeat) === "one" && track) {
+    console.log("[Player] Repeat one: restarting current track");
+    playTrack(track).catch(console.error);
+    return;
+  }
+
+  nextTrack();
 }
 
 // Handle gapless advance — audio backend already playing the next track.
 function handleGaplessAdvance(): void {
-    const q = get(queue);
+  const q = get(queue);
 
-    // Record play for the track that just ended
-    const prevTrack = get(currentTrack);
-    if (prevTrack && playStartTime > 0) {
-        const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
-        if (durationPlayed > 5) {
-            recordTrackPlay(prevTrack.id, prevTrack.album_id ?? null, durationPlayed);
-            const trackDuration = prevTrack.duration ?? 0;
-            if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
-                const threshold = Math.min(Math.floor(trackDuration / 2), 240);
-                if (durationPlayed >= threshold) {
-                    submitListenbrainzListen(
-                        prevTrack.artist ?? 'Unknown Artist',
-                        prevTrack.title ?? 'Unknown',
-                        prevTrack.album,
-                        prevTrack.duration,
-                        false,
-                    ).catch(e => console.warn('[ListenBrainz] Scrobble failed:', e));
-                }
-            }
+  // Record play for the track that just ended
+  const prevTrack = get(currentTrack);
+  if (prevTrack && playStartTime > 0) {
+    const durationPlayed = Math.floor((Date.now() - playStartTime) / 1000);
+    if (durationPlayed > 5) {
+      console.log(
+        `[Player] Gapless: recording play for "${prevTrack.title}" (${durationPlayed}s)`,
+      );
+      recordTrackPlay(prevTrack.id, prevTrack.album_id ?? null, durationPlayed);
+      incrementPlayCount(prevTrack.id);
+      const trackDuration = prevTrack.duration ?? 0;
+      if (get(appSettings).listenBrainzEnabled && trackDuration > 0) {
+        const threshold = Math.min(Math.floor(trackDuration / 2), 240);
+        if (durationPlayed >= threshold) {
+          submitListenbrainzListen(
+            prevTrack.artist ?? "Unknown Artist",
+            prevTrack.title ?? "Unknown",
+            prevTrack.album,
+            prevTrack.duration,
+            false,
+          ).catch((e) => console.warn("[ListenBrainz] Scrobble failed:", e));
         }
+      }
+    } else {
+      console.log(
+        `[Player] Gapless: track "${prevTrack.title}" played only ${durationPlayed}s, not recording`,
+      );
     }
-    playStartTime = Date.now();
+  }
+  playStartTime = Date.now();
 
-    const idx = _advanceQueueIndex();
-    if (idx === null) {
-        // Nothing to advance to — treat as track finished
-        handleTrackEnd();
-        return;
+  // Sleep timer check — same as handleTrackEnd but for gapless transitions.
+  // The backend has already started playing the next track. If the timer
+  // fires, pause() stops the just-started next track.
+  if (isTimerModeTrackOrAlbumEnd()) {
+    let nextAlbumId: number | null = null;
+    const nextIdx = _advanceQueueIndex(true);
+    if (nextIdx !== null) {
+      const q2 = get(queue);
+      const nextTrack = q2[nextIdx];
+      if (nextTrack) {
+        nextAlbumId = nextTrack.album_id ?? null;
+      }
     }
+    if (handleSleepTimerCheck(prevTrack, nextAlbumId)) {
+      return;
+    }
+  }
 
-    queueIndex.set(idx);
-    const nextTrackObj = q[idx];
-    if (!nextTrackObj) return;
+  const idx = _advanceQueueIndex();
+  if (idx === null) {
+    // End of queue after gapless advance — play was already recorded above.
+    // Just handle queue end (listen-later removal, autoplay, stop).
+    playStartTime = 0;
+    const ctx = get(playbackContext);
+    if (ctx?.type === "album" && ctx.albumId && isInListenLater(ctx.albumId)) {
+      console.log(
+        "[Player] Album finished (gapless), removing from listen-later:",
+        ctx.albumId,
+      );
+      void toggleListenLater(ctx.albumId);
+    }
+    const settings = get(appSettings);
+    if (settings.autoplay) {
+      playRandomFromLibrary();
+    } else {
+      // Stop playback completely
+      if (get(activeBackend) === "native") {
+        nativeAudioStop().catch(console.error);
+      } else if (get(activeBackend) === "html5" && html5Audio) {
+        html5Audio.pause();
+        html5Audio.currentTime = 0;
+      }
+      isPlaying.set(false);
+      currentTime.set(0);
+      updateMediaSessionPlaybackState("paused");
+    }
+    return;
+  }
 
-    _advanceUiToTrack(nextTrackObj);
+  queueIndex.set(idx);
+  const nextTrackObj = q[idx];
+  if (!nextTrackObj) return;
+
+  // Check if the backend is playing the correct track.
+  // If the queue was modified (add/reorder/remove) after the preload,
+  // the backend may be playing the wrong track. In that case, force-play the correct one.
+  const expectedPath = nextTrackObj.local_src || nextTrackObj.path;
+  if (expectedPath && lastPreloadedPath && expectedPath !== lastPreloadedPath) {
+    console.log(
+      "[Player] Gapless mismatch: expected",
+      expectedPath,
+      "but preloaded",
+      lastPreloadedPath,
+    );
+    lastPreloadedPath = null;
+    playTrack(nextTrackObj).catch(console.error);
+    return;
+  }
+
+  _advanceUiToTrack(nextTrackObj);
 }
 
 // Update all UI state for a track without touching the audio backend.
 async function _advanceUiToTrack(track: Track): Promise<void> {
-    const previousTrackObj = get(currentTrack);
+  const previousTrackObj = get(currentTrack);
 
-    // Full track for plugins / cover art
-    const fullTrack = await getFullTrack(track.id, true);
-    const trackForPlugins = fullTrack || track;
+  // Full track for plugins / cover art
+  const fullTrack = await getFullTrack(track.id, true);
+  const trackForPlugins = fullTrack || track;
 
-    currentTrack.set(trackForPlugins);
-    currentTime.set(0);
-    duration.set(track.duration || 0);
-    isPlaying.set(true);
+  currentTrack.set(trackForPlugins);
+  currentTime.set(0);
+  duration.set(track.duration || 0);
+  isPlaying.set(true);
 
-    pluginEvents.emit('trackChange', { track: trackForPlugins, previousTrack: previousTrackObj });
-    pluginEvents.emit('queueChange', { queue: get(queue), index: get(queueIndex) });
+  pluginEvents.emit("trackChange", {
+    track: trackForPlugins,
+    previousTrack: previousTrackObj,
+  });
+  pluginEvents.emit("queueChange", {
+    queue: get(queue),
+    index: get(queueIndex),
+  });
 
-    await updateMediaSessionMetadata(trackForPlugins);
-    updateMediaSessionPlaybackState('playing');
-    updateMediaSessionPosition();
+  await updateMediaSessionMetadata(trackForPlugins);
+  updateMediaSessionPlaybackState("playing");
+  updateMediaSessionPosition();
 
-    // Schedule preload of the NEXT-next track to keep gapless chain alive
-    _schedulePreload();
+  // Schedule preload of the NEXT-next track to keep gapless chain alive
+  _schedulePreload();
 
-    // ListenBrainz now-playing
-    if (get(appSettings).listenBrainzEnabled) {
-        submitListenbrainzListen(
-            track.artist ?? 'Unknown Artist',
-            track.title ?? 'Unknown',
-            track.album,
-            track.duration,
-            true,
-        ).catch(e => console.warn('[ListenBrainz] Now-playing failed:', e));
-    }
+  // ListenBrainz now-playing
+  if (get(appSettings).listenBrainzEnabled) {
+    submitListenbrainzListen(
+      track.artist ?? "Unknown Artist",
+      track.title ?? "Unknown",
+      track.album,
+      track.duration,
+      true,
+    ).catch((e) => console.warn("[ListenBrainz] Now-playing failed:", e));
+  }
 }
 
 // =============================================================================
@@ -1936,419 +2496,658 @@ async function _advanceUiToTrack(track: Track): Promise<void> {
 // =============================================================================
 
 function _schedulePreload(): void {
-    if (get(activeBackend) !== 'native') return;
+  if (get(activeBackend) !== "native") return;
 
-    const q = get(queue);
-    const nextIdx = _advanceQueueIndex(true); // dry run — no store writes
+  const q = get(queue);
+  const nextIdx = _advanceQueueIndex(true); // dry run — no store writes
 
-    if (nextIdx === null || nextIdx >= q.length) return;
+  if (nextIdx === null || nextIdx >= q.length) {
+    lastPreloadedPath = null;
+    return;
+  }
 
-    const nextTrackObj = q[nextIdx];
-    if (!nextTrackObj || isStreaming(nextTrackObj)) return;
+  const nextTrackObj = q[nextIdx];
+  if (!nextTrackObj || isStreaming(nextTrackObj)) {
+    lastPreloadedPath = null;
+    return;
+  }
 
-    const nextPath = nextTrackObj.local_src || nextTrackObj.path;
-    if (!nextPath) return;
+  const nextPath = nextTrackObj.local_src || nextTrackObj.path;
+  if (!nextPath) {
+    lastPreloadedPath = null;
+    return;
+  }
 
-    nativeAudioPreload(nextPath, (nextTrackObj as any).replay_gain_db ?? null).catch(e => {
-        console.warn('[Player] Preload failed (non-fatal):', e);
-    });
+  lastPreloadedPath = nextPath;
+  nativeAudioPreload(
+    nextPath,
+    (nextTrackObj as any).replay_gain_db ?? null,
+  ).catch((e) => {
+    console.warn("[Player] Preload failed (non-fatal):", e);
+    lastPreloadedPath = null;
+  });
 }
 
 // Progress as percentage (0-1)
 export const progress = derived(
-    [currentTime, duration],
-    ([$currentTime, $duration]) => {
-        if (!$duration || $duration === 0) return 0;
-        return $currentTime / $duration;
-    }
+  [currentTime, duration],
+  ([$currentTime, $duration]) => {
+    if (!$duration || $duration === 0) return 0;
+    return $currentTime / $duration;
+  },
 );
 
 // Queue management functions
 
 // Add tracks to queue (Spotify-like: after current track + previously user-added tracks)
 export function addToQueue(tracks: Track[]): void {
-    const currentIdx = get(queueIndex);
-    const userCount = get(userQueueCount);
-    // Insert position: after current track + user-added tracks
-    const insertPosition = currentIdx + 1 + userCount;
-    const addedCount = tracks.length;
+  const currentIdx = get(queueIndex);
+  const userCount = get(userQueueCount);
+  // Insert position: after current track + user-added tracks
+  const insertPosition = currentIdx + 1 + userCount;
+  const addedCount = tracks.length;
 
-    queue.update(q => {
-        const newQueue = [...q];
-        newQueue.splice(insertPosition, 0, ...tracks);
+  queue.update((q) => {
+    const newQueue = [...q];
+    newQueue.splice(insertPosition, 0, ...tracks);
 
-        // Emit queueChange event for plugins
-        pluginEvents.emit('queueChange', { queue: newQueue, index: currentIdx });
+    // Emit queueChange event for plugins
+    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
 
-        return newQueue;
-    });
+    return newQueue;
+  });
 
-    // Update user queue count
-    userQueueCount.update(c => c + addedCount);
+  // Update user queue count
+  userQueueCount.update((c) => c + addedCount);
 
-    // Update shuffled indices to reflect the shift in queue
-    if (get(shuffle)) {
-        console.log('Updating shuffle in addToQueue');
-        shuffledIndices.update(indices => {
-            // 1. Shift existing indices that are after insertion point
-            const shifted = indices.map(i => i >= insertPosition ? i + addedCount : i);
-
-            // 2. Add new indices (we append them to the end of shuffled list to not disrupt current flow)
-            // The new tracks are at [insertPosition, insertPosition + addedCount - 1]
-            const newIndices = Array.from({ length: addedCount }, (_, i) => insertPosition + i);
-
-            // We could shuffle 'newIndices' before appending if we want them random
-            // But let's keep them together for now or shuffle them
-            // Let's shuffle the new batch so they are random relative to each other at least
-            const shuffledNew = shuffleArray(newIndices);
-
-            return [...shifted, ...shuffledNew];
-        });
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ).catch((e) =>
+        console.error("[Player] Failed to insert into squeeze queue:", e),
+      );
     }
+  } else {
+    // Re-schedule gapless preload so the native backend picks up the new next track
+    _schedulePreload();
+  }
+
+  // Update shuffled indices to reflect the shift in queue
+  if (get(shuffle)) {
+    console.log("Updating shuffle in addToQueue");
+    shuffledIndices.update((indices) => {
+      // 1. Shift existing indices that are after insertion point
+      const shifted = indices.map((i) =>
+        i >= insertPosition ? i + addedCount : i,
+      );
+
+      // 2. Add new indices (we append them to the end of shuffled list to not disrupt current flow)
+      // The new tracks are at [insertPosition, insertPosition + addedCount - 1]
+      const newIndices = Array.from(
+        { length: addedCount },
+        (_, i) => insertPosition + i,
+      );
+
+      // We could shuffle 'newIndices' before appending if we want them random
+      // But let's keep them together for now or shuffle them
+      // Let's shuffle the new batch so they are random relative to each other at least
+      const shuffledNew = shuffleArray(newIndices);
+
+      return [...shifted, ...shuffledNew];
+    });
+  }
+}
+
+// Append tracks to the END of the queue (after all existing tracks).
+// Unlike `addToQueue` (which inserts "up next"), this preserves whatever
+// is already playing and whatever is queued — the new tracks play last.
+export function appendToQueueEnd(tracks: Track[]): void {
+  if (tracks.length === 0) return;
+  const currentIdx = get(queueIndex);
+  const addedCount = tracks.length;
+  const insertPosition = currentIdx + 1 + get(userQueueCount);
+
+  queue.update((q) => {
+    const newQueue = [...q, ...tracks];
+
+    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
+    return newQueue;
+  });
+
+  // These tracks go to the end, so they're "user-added" but only after
+  // whatever user tracks are already pending. Bump userQueueCount by
+  // the new count.
+  userQueueCount.update((c) => c + addedCount);
+
+  // Sync to Squeeze backend (it has its own queue model).
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        // -1 means "append" in squeezeInsertQueue.
+        -1,
+      ).catch((e) =>
+        console.error("[Player] Failed to append to squeeze queue:", e),
+      );
+    }
+  } else {
+    _schedulePreload();
+  }
+
+  // Shuffle: append the new indices at the tail of the shuffled list
+  // so they play after everything else.
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => {
+      const start = indices.length > 0
+        ? Math.max(...indices) + 1
+        : currentIdx + 1;
+      const newIndices = Array.from(
+        { length: addedCount },
+        (_, i) => start + i,
+      );
+      return [...indices, ...newIndices];
+    });
+  }
+  void insertPosition;
+}
+
+// Insert tracks at currentIdx + 1 — plays immediately after the current track.
+// Does NOT increment userQueueCount (AD4). The track at currentIdx+1 is picked
+// up by normal sequential advancement (_advanceQueueIndex line 1925).
+//
+// Shuffle-aware: when shuffle is ON, indices are inserted at shuffledIndex+1
+// (not appended to end). The batch is internally shuffled so they are random
+// relative to each other while maintaining position.
+export function playNext(tracks: Track[]): void {
+  if (tracks.length === 0) return;
+  const currentIdx = get(queueIndex);
+  const addedCount = tracks.length;
+  // Insert at currentIdx+1 — directly after current track
+  const insertPosition = currentIdx + 1;
+
+  queue.update((q) => {
+    const newQueue = [...q];
+    newQueue.splice(insertPosition, 0, ...tracks);
+
+    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
+    return newQueue;
+  });
+
+  // Play Next does NOT increment userQueueCount.
+  // The inserted tracks sit at currentIdx+1 and are picked up by
+  // normal sequential advancement. Incrementing userQueueCount would
+  // shift _advanceQueueIndex into the user-queue decrement path (AD4).
+
+  // Sync to Squeeze backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ).catch((e) =>
+        console.error("[Player] Failed to insert into squeeze queue:", e),
+      );
+    }
+  } else {
+    _schedulePreload();
+  }
+
+  // Update shuffled indices — insert at shuffledIndex+1, NOT appended to end.
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => {
+      // 1. Shift existing indices at or after insertion point
+      const shifted = indices.map((i) =>
+        i >= insertPosition ? i + addedCount : i,
+      );
+
+      // 2. New indices for the inserted tracks
+      const newIndices = Array.from(
+        { length: addedCount },
+        (_, i) => insertPosition + i,
+      );
+
+      // 3. Shuffle the new batch internally so they are random relative
+      //    to each other while maintaining position
+      const shuffledNew = shuffleArray(newIndices);
+
+      // 4. Insert at shuffledIndex+1 (not append to end)
+      const shufIdx = get(shuffledIndex);
+      const insertAt = shufIdx + 1;
+
+      return [
+        ...shifted.slice(0, insertAt),
+        ...shuffledNew,
+        ...shifted.slice(insertAt),
+      ];
+    });
+  }
 }
 
 // Remove track from queue by index
 export function removeFromQueue(index: number): void {
-    const currentIdx = get(queueIndex);
+  const currentIdx = get(queueIndex);
 
-    queue.update(q => {
-        const newQueue = [...q];
-        newQueue.splice(index, 1);
-        return newQueue;
+  queue.update((q) => {
+    const newQueue = [...q];
+    newQueue.splice(index, 1);
+    return newQueue;
+  });
+
+  // Adjust current index if needed
+  if (index < currentIdx) {
+    queueIndex.update((i) => i - 1);
+  }
+
+  // Update shuffle indices
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => {
+      // Remove the deleted index and shift others
+      return indices
+        .filter((i) => i !== index)
+        .map((i) => (i > index ? i - 1 : i));
     });
 
-    // Adjust current index if needed
-    if (index < currentIdx) {
-        queueIndex.update(i => i - 1);
+    // Handle shuffledIndex pointer if strictly necessary (e.g. if we removed the current shuffled track)
+    // But usually queueIndex update handles the 'current track' logic.
+    // If we removed the track we were PLAYING, we might need to find where we are now.
+    // But the player usually keeps playing the same audio element until explicitly changed.
+
+    // Sync shuffledIndex to where currentIdx is now
+    const newCurrentIdx = index < currentIdx ? currentIdx - 1 : currentIdx;
+    // If we removed the current track (index === currentIdx), then we are now pointing to the next one (which shifted down)
+    // but queueIndex might still be pointing to the same slot number (if it wasn't last).
+
+    // Safest is to just re-find currentIdx in shuffled list?
+    // But wait, if we are playing, we want to stay consistent.
+    // Let's rely on 'nextTrack' logic to use the pointers.
+    // But we should ensure shuffledIndex points to the correct shuffled slot that corresponds to queueIndex.
+    // However, updating the list (filter/map) preserved relative order of remaining items.
+    // So the pointer `shuffledIndex` (which is an index into shuffledIndices array) should mostly be fine,
+    // UNLESS we removed an item *before* the current shuffled position in the SHUFFLED list.
+
+    // Actually, shuffledIndex is "index in the shuffled array".
+    // If we removed an item that was at shuffledIndices[0] and we are at shuffledIndices[5],
+    // then our pointer is now off by 1?
+    // YES. We need to know WHICH item in shuffledIndices was removed.
+    const ptr = get(shuffledIndex);
+    const indices = get(shuffledIndices); // This is the OLD list (before update runs technically, but inside update we return new)
+    // Wait, 'update' callback gets the old value.
+    // We can't easily sync the separate store 'shuffledIndex' inside 'shuffledIndices.update'.
+    // We should do it outside.
+  }
+
+  // Fix shuffledIndex pointer
+  if (get(shuffle)) {
+    // We need to find where the current track is now in the shuffled list
+    // The current track index in queue might have changed (handled above).
+    const actualCurrentQIdx = get(queueIndex);
+    const sIndices = get(shuffledIndices);
+    const ptr = sIndices.indexOf(actualCurrentQIdx);
+    if (ptr !== -1) {
+      shuffledIndex.set(ptr);
     }
+  }
 
-    // Update shuffle indices
-    if (get(shuffle)) {
-        shuffledIndices.update(indices => {
-            // Remove the deleted index and shift others
-            return indices
-                .filter(i => i !== index)
-                .map(i => i > index ? i - 1 : i);
-        });
-
-        // Handle shuffledIndex pointer if strictly necessary (e.g. if we removed the current shuffled track)
-        // But usually queueIndex update handles the 'current track' logic.
-        // If we removed the track we were PLAYING, we might need to find where we are now.
-        // But the player usually keeps playing the same audio element until explicitly changed.
-
-        // Sync shuffledIndex to where currentIdx is now
-        const newCurrentIdx = index < currentIdx ? currentIdx - 1 : currentIdx;
-        // If we removed the current track (index === currentIdx), then we are now pointing to the next one (which shifted down)
-        // but queueIndex might still be pointing to the same slot number (if it wasn't last).
-
-        // Safest is to just re-find currentIdx in shuffled list?
-        // But wait, if we are playing, we want to stay consistent.
-        // Let's rely on 'nextTrack' logic to use the pointers.
-        // But we should ensure shuffledIndex points to the correct shuffled slot that corresponds to queueIndex.
-        // However, updating the list (filter/map) preserved relative order of remaining items.
-        // So the pointer `shuffledIndex` (which is an index into shuffledIndices array) should mostly be fine,
-        // UNLESS we removed an item *before* the current shuffled position in the SHUFFLED list.
-
-        // Actually, shuffledIndex is "index in the shuffled array".
-        // If we removed an item that was at shuffledIndices[0] and we are at shuffledIndices[5],
-        // then our pointer is now off by 1?
-        // YES. We need to know WHICH item in shuffledIndices was removed.
-        const ptr = get(shuffledIndex);
-        const indices = get(shuffledIndices); // This is the OLD list (before update runs technically, but inside update we return new)
-        // Wait, 'update' callback gets the old value.
-        // We can't easily sync the separate store 'shuffledIndex' inside 'shuffledIndices.update'.
-        // We should do it outside.
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    const current = get(currentTrack);
+    if (mac && current) {
+      const q = get(queue);
+      squeezeUpdateQueue(
+        mac,
+        q.map((t) => t.id),
+        current.id,
+      ).catch((e) =>
+        console.error("[Player] Failed to update squeeze queue:", e),
+      );
     }
-
-    // Fix shuffledIndex pointer
-    if (get(shuffle)) {
-        // We need to find where the current track is now in the shuffled list
-        // The current track index in queue might have changed (handled above).
-        const actualCurrentQIdx = get(queueIndex);
-        const sIndices = get(shuffledIndices);
-        const ptr = sIndices.indexOf(actualCurrentQIdx);
-        if (ptr !== -1) {
-            shuffledIndex.set(ptr);
-        }
-    }
+  } else {
+    // Re-schedule gapless preload since queue changed
+    _schedulePreload();
+  }
 }
 
 // Reorder queue (move track from one position to another)
 export function reorderQueue(fromIndex: number, toIndex: number): void {
-    const currentIdx = get(queueIndex);
-    const isShuffle = get(shuffle);
+  const currentIdx = get(queueIndex);
+  const isShuffle = get(shuffle);
 
-    if (fromIndex === toIndex) return;
+  if (fromIndex === toIndex) return;
 
-    const queueBefore = get(queue);
-    if (
-        fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= queueBefore.length ||
-        toIndex >= queueBefore.length
-    ) {
-        return;
-    }
+  const queueBefore = get(queue);
+  if (
+    fromIndex < 0 ||
+    toIndex < 0 ||
+    fromIndex >= queueBefore.length ||
+    toIndex >= queueBefore.length
+  ) {
+    return;
+  }
 
-    queue.update(q => {
-        const newQueue = [...q];
-        const [removed] = newQueue.splice(fromIndex, 1);
-        newQueue.splice(toIndex, 0, removed);
-        return newQueue;
+  queue.update((q) => {
+    const newQueue = [...q];
+    const [removed] = newQueue.splice(fromIndex, 1);
+    newQueue.splice(toIndex, 0, removed);
+    return newQueue;
+  });
+
+  // Adjust current index
+  if (fromIndex === currentIdx) {
+    queueIndex.set(toIndex);
+  } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
+    queueIndex.update((i) => i - 1);
+  } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
+    queueIndex.update((i) => i + 1);
+  }
+
+  // Update shuffle indices
+  // This is tricky. An item moved from A to B.
+  // Indices between A and B shifted.
+  // The item at 'fromIndex' is now at 'toIndex'.
+  if (isShuffle) {
+    shuffledIndices.update((indices) => {
+      const fromPos = indices.indexOf(fromIndex);
+      const toPos = indices.indexOf(toIndex);
+
+      // First remap numeric queue indices so they still reference
+      // the same tracks after the queue array reorder.
+      const remapped = indices.map((i) => {
+        if (i === fromIndex) return toIndex;
+        if (fromIndex < toIndex) {
+          // Moved down: items between from+1 and to shift up (-1)
+          if (i > fromIndex && i <= toIndex) return i - 1;
+        } else {
+          // Moved up: items between to and from-1 shift down (+1)
+          if (i >= toIndex && i < fromIndex) return i + 1;
+        }
+        return i;
+      });
+
+      // Then reflect manual user intent in the visible shuffled order.
+      if (fromPos !== -1 && toPos !== -1 && fromPos !== toPos) {
+        const [moved] = remapped.splice(fromPos, 1);
+        remapped.splice(toPos, 0, moved);
+      }
+
+      return remapped;
     });
 
-    // Adjust current index
-    if (fromIndex === currentIdx) {
-        queueIndex.set(toIndex);
-    } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
-        queueIndex.update(i => i - 1);
-    } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
-        queueIndex.update(i => i + 1);
+    // Keep shuffled cursor aligned to the currently playing queue index.
+    const currentQueueIdx = get(queueIndex);
+    const ptr = get(shuffledIndices).indexOf(currentQueueIdx);
+    if (ptr !== -1) {
+      shuffledIndex.set(ptr);
     }
+  }
 
-    // Update shuffle indices
-    // This is tricky. An item moved from A to B.
-    // Indices between A and B shifted.
-    // The item at 'fromIndex' is now at 'toIndex'.
-    if (isShuffle) {
-        shuffledIndices.update(indices => {
-            const fromPos = indices.indexOf(fromIndex);
-            const toPos = indices.indexOf(toIndex);
+  pluginEvents.emit("queueChange", {
+    queue: get(queue),
+    index: get(queueIndex),
+  });
 
-            // First remap numeric queue indices so they still reference
-            // the same tracks after the queue array reorder.
-            const remapped = indices.map(i => {
-                if (i === fromIndex) return toIndex;
-                if (fromIndex < toIndex) {
-                    // Moved down: items between from+1 and to shift up (-1)
-                    if (i > fromIndex && i <= toIndex) return i - 1;
-                } else {
-                    // Moved up: items between to and from-1 shift down (+1)
-                    if (i >= toIndex && i < fromIndex) return i + 1;
-                }
-                return i;
-            });
-
-            // Then reflect manual user intent in the visible shuffled order.
-            if (fromPos !== -1 && toPos !== -1 && fromPos !== toPos) {
-                const [moved] = remapped.splice(fromPos, 1);
-                remapped.splice(toPos, 0, moved);
-            }
-
-            return remapped;
-        });
-
-        // Keep shuffled cursor aligned to the currently playing queue index.
-        const currentQueueIdx = get(queueIndex);
-        const ptr = get(shuffledIndices).indexOf(currentQueueIdx);
-        if (ptr !== -1) {
-            shuffledIndex.set(ptr);
-        }
+  // Sync queue change to the active backend
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    const current = get(currentTrack);
+    if (mac && current) {
+      const q = get(queue);
+      squeezeUpdateQueue(
+        mac,
+        q.map((t) => t.id),
+        current.id,
+      ).catch((e) =>
+        console.error("[Player] Failed to update squeeze queue:", e),
+      );
     }
-
-    pluginEvents.emit('queueChange', { queue: get(queue), index: get(queueIndex) });
+  } else {
     _schedulePreload();
+  }
 }
 
 // Clear upcoming queue (keep history)
 export function clearUpcoming(): void {
-    const currentIdx = get(queueIndex);
-    queue.update(q => q.slice(0, currentIdx + 1));
-    userQueueCount.set(0); // Clear user queue count
+  const currentIdx = get(queueIndex);
+  queue.update((q) => q.slice(0, currentIdx + 1));
+  userQueueCount.set(0); // Clear user queue count
 
-    // Update shuffle: remove indices that are now out of bounds
-    if (get(shuffle)) {
-        shuffledIndices.update(indices => indices.filter(i => i <= currentIdx));
-        // And reset/sync pointer
-        const ptr = get(shuffledIndices).indexOf(currentIdx);
-        shuffledIndex.set(ptr !== -1 ? ptr : 0);
-    }
+  // Update shuffle: remove indices that are now out of bounds
+  if (get(shuffle)) {
+    shuffledIndices.update((indices) => indices.filter((i) => i <= currentIdx));
+    // And reset/sync pointer
+    const ptr = get(shuffledIndices).indexOf(currentIdx);
+    shuffledIndex.set(ptr !== -1 ? ptr : 0);
+  }
 }
 
 // Play from specific index in queue
 export function playFromQueue(index: number): void {
-    const q = get(queue);
-    const currentIdx = get(queueIndex);
-    const userCount = get(userQueueCount);
+  const q = get(queue);
+  const currentIdx = get(queueIndex);
+  const userCount = get(userQueueCount);
 
-    if (index >= 0 && index < q.length) {
-        // Calculate how many user-queued tracks are being skipped
-        const userQueueEnd = currentIdx + 1 + userCount;
-        if (index > currentIdx && index <= userQueueEnd) {
-            // Skipping within user queue
-            const skipped = index - currentIdx;
-            userQueueCount.update(c => Math.max(0, c - skipped));
-        } else if (index > userQueueEnd) {
-            // Skipping past user queue entirely
-            userQueueCount.set(0);
-        }
-        // If jumping backwards, keep user queue count as is
-
-        queueIndex.set(index);
-        playTrack(q[index]);
-
-        // Sync shuffle pointer
-        if (get(shuffle)) {
-            const ptr = get(shuffledIndices).indexOf(index);
-            if (ptr !== -1) {
-                shuffledIndex.set(ptr);
-            } else {
-                // If not found in shuffle list (weird state), regenerate or append?
-                // Should be there.
-            }
-        }
+  if (index >= 0 && index < q.length) {
+    // Calculate how many user-queued tracks are being skipped
+    const userQueueEnd = currentIdx + 1 + userCount;
+    if (index > currentIdx && index <= userQueueEnd) {
+      // Skipping within user queue
+      const skipped = index - currentIdx;
+      userQueueCount.update((c) => Math.max(0, c - skipped));
+    } else if (index > userQueueEnd) {
+      // Skipping past user queue entirely
+      userQueueCount.set(0);
     }
+    // If jumping backwards, keep user queue count as is
+
+    queueIndex.set(index);
+    playTrack(q[index]);
+
+    // Sync shuffle pointer
+    if (get(shuffle)) {
+      const ptr = get(shuffledIndices).indexOf(index);
+      if (ptr !== -1) {
+        shuffledIndex.set(ptr);
+      } else {
+        // If not found in shuffle list (weird state), regenerate or append?
+        // Should be there.
+      }
+    }
+  }
 }
 
 /**
  * Helper to check if a specific playlist is currently playing
  */
 export function isPlaylistPlaying(playlistId: number): boolean {
-    const ctx = get(playbackContext);
-    return ctx?.type === 'playlist' && ctx.playlistId === playlistId;
+  const ctx = get(playbackContext);
+  return ctx?.type === "playlist" && ctx.playlistId === playlistId;
 }
 
 /**
  * Helper to check if a specific album is currently playing
  */
 export function isAlbumPlaying(albumId: number): boolean {
-    const ctx = get(playbackContext);
-    return ctx?.type === 'album' && ctx.albumId === albumId;
+  const ctx = get(playbackContext);
+  return ctx?.type === "album" && ctx.albumId === albumId;
 }
 
 /**
  * Helper to check if a specific artist is currently playing
  */
 export function isArtistPlaying(artistName: string): boolean {
-    const ctx = get(playbackContext);
-    return ctx?.type === 'artist' && ctx.artistName === artistName;
+  const ctx = get(playbackContext);
+  return ctx?.type === "artist" && ctx.artistName === artistName;
 }
 
 /**
  * Transfer playback from a remote device to this one.
  */
 export async function transferPlayback(state: any) {
-    if (!state || !state.track) return;
+  if (!state || !state.track) return;
 
-    console.log('[Player] Transferring playback to this device...', state.track.title);
+  console.log(
+    "[Player] Transferring playback to this device...",
+    state.track.title,
+  );
 
-    // 1. Stop remote playback (by sending a command to specific device)
-    if (state.deviceId) {
-        console.log('[Player] Pausing remote device:', state.deviceId);
-        sendRemoteCommand(state.deviceId, 'pause');
+  // 1. Stop remote playback (by sending a command to specific device)
+  if (state.deviceId) {
+    console.log("[Player] Pausing remote device:", state.deviceId);
+    sendRemoteCommand(state.deviceId, "pause");
+  }
+
+  // 2. Resolve the local track object if possible (Fast ID lookup first)
+  const remoteTrack = state.track;
+  let localTrack: any = getTrackByIdSync(Number(remoteTrack.id));
+
+  if (!localTrack) {
+    // Falling back to O(N) search
+    const $library = get(libraryTracks);
+    localTrack = $library.find(
+      (t) => t.title === remoteTrack.title && t.artist === remoteTrack.artist,
+    );
+  }
+
+  if (localTrack) {
+    // Use local cover for better reliability
+    // We spread localTrack to have full metadata (album_id, path, etc.)
+    const trackWithLocalCover = {
+      ...state.track,
+      ...localTrack,
+      coverUrl: getTrackCoverSrc(localTrack),
+    };
+
+    await playTrack(localTrack, false, state.currentTime);
+    if (!state.isPlaying) {
+      await pause();
     }
-
-    // 2. Resolve the local track object if possible (Fast ID lookup first)
-    const remoteTrack = state.track;
-    let localTrack: any = getTrackByIdSync(Number(remoteTrack.id));
-
-    if (!localTrack) {
-        // Falling back to O(N) search
-        const $library = get(libraryTracks);
-        localTrack = $library.find(t =>
-            t.title === remoteTrack.title &&
-            t.artist === remoteTrack.artist
-        );
-    }
-
-    if (localTrack) {
-        // Use local cover for better reliability
-        // We spread localTrack to have full metadata (album_id, path, etc.)
-        const trackWithLocalCover = {
-            ...state.track,
-            ...localTrack,
-            coverUrl: getTrackCoverSrc(localTrack)
-        };
-
-        await playTrack(localTrack, false, state.currentTime);
-        if (!state.isPlaying) {
-            await pause();
-        }
-    } else {
-        // If not found in local library, we might need to "External Track" play (later feature)
-        console.warn('[Player] Could not find local track for transfer:', state.track.title);
-        addToast(`Cannot transfer: "${state.track.title}" not found in local library`, 'error');
-    }
+  } else {
+    // If not found in local library, we might need to "External Track" play (later feature)
+    console.warn(
+      "[Player] Could not find local track for transfer:",
+      state.track.title,
+    );
+    addToast(
+      `Cannot transfer: "${state.track.title}" not found in local library`,
+      "error",
+    );
+  }
 }
 
 /**
  * Control a remote device.
  */
-export function sendRemoteCommand(targetDeviceId: string, command: string, data?: any) {
-    wsStore.send('remote_command', {
-        targetDeviceId,
-        command,
-        data
-    });
+export function sendRemoteCommand(
+  targetDeviceId: string,
+  command: string,
+  data?: any,
+) {
+  wsStore.send("remote_command", {
+    targetDeviceId,
+    command,
+    data,
+  });
 }
 
 /**
  * Throttled version of sendRemoteCommand for high-frequency events like seeking or volume slides.
  */
 let remoteThrottleTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-function throttledRemoteCommand(targetDeviceId: string, command: string, data: any, delay: number) {
-    const key = `${targetDeviceId}:${command}`;
-    if (remoteThrottleTimers[key]) return;
+function throttledRemoteCommand(
+  targetDeviceId: string,
+  command: string,
+  data: any,
+  delay: number,
+) {
+  const key = `${targetDeviceId}:${command}`;
+  if (remoteThrottleTimers[key]) return;
 
-    sendRemoteCommand(targetDeviceId, command, data);
+  sendRemoteCommand(targetDeviceId, command, data);
 
-    remoteThrottleTimers[key] = setTimeout(() => {
-        delete remoteThrottleTimers[key];
-    }, delay);
+  remoteThrottleTimers[key] = setTimeout(() => {
+    delete remoteThrottleTimers[key];
+  }, delay);
+}
+
+let squeezeVolumeTimer: ReturnType<typeof setTimeout> | null = null;
+let squeezeVolumePending: { mac: string; vol: number } | null = null;
+function throttledSqueezeVolume(mac: string, vol: number) {
+  squeezeVolumePending = { mac, vol };
+  if (squeezeVolumeTimer) return;
+  squeezeSetVolume(mac, vol).catch(console.error);
+  squeezeVolumeTimer = setTimeout(() => {
+    squeezeVolumeTimer = null;
+    if (squeezeVolumePending) {
+      squeezeSetVolume(
+        squeezeVolumePending.mac,
+        squeezeVolumePending.vol,
+      ).catch(console.error);
+      squeezeVolumePending = null;
+    }
+  }, 150);
 }
 
 /**
  * Handle a remote command received via WebSocket.
  */
 async function handleRemoteCommand(payload: any) {
-    const { command, data } = payload;
-    console.log('[Player] Received remote command:', command);
+  const { command, data } = payload;
+  console.log("[Player] Received remote command:", command);
 
-    switch (command) {
-        case 'resume':
-            await resume();
-            break;
-        case 'pause':
-            await pause();
-            break;
-        case 'next':
-            nextTrack();
-            break;
-        case 'previous':
-            previousTrack();
-            break;
-        case 'seek':
-            if (data?.position != null) {
-                seek(data.position);
-            }
-            break;
-        case 'volume':
-            if (data?.volume != null) {
-                setVolume(data.volume);
-            }
-            break;
-        case 'shuffle':
-            if (data?.shuffle != null) {
-                // If local, use toggleShuffle to handle index regeneration
-                if (get(activeBackend) !== 'remote') {
-                    if (get(shuffle) !== data.shuffle) toggleShuffle();
-                } else {
-                    shuffle.set(data.shuffle);
-                }
-            }
-            break;
-        case 'repeat':
-            if (data?.repeat != null) {
-                if (get(activeBackend) !== 'remote') {
-                    // Cycle until match? Or just set directly
-                    repeat.set(data.repeat);
-                    if (get(activeBackend) === 'native') {
-                        nativeAudioSetRepeatOne(data.repeat === 'one').catch(console.error);
-                    }
-                } else {
-                    repeat.set(data.repeat);
-                }
-            }
-            break;
-    }
+  switch (command) {
+    case "resume":
+      await resume();
+      break;
+    case "pause":
+      await pause();
+      break;
+    case "next":
+      nextTrack();
+      break;
+    case "previous":
+      previousTrack();
+      break;
+    case "seek":
+      if (data?.position != null) {
+        seek(data.position);
+      }
+      break;
+    case "volume":
+      if (data?.volume != null) {
+        setVolume(data.volume);
+      }
+      break;
+    case "shuffle":
+      if (data?.shuffle != null) {
+        // If local, use toggleShuffle to handle index regeneration
+        if (get(activeBackend) !== "remote") {
+          if (get(shuffle) !== data.shuffle) toggleShuffle();
+        } else {
+          shuffle.set(data.shuffle);
+        }
+      }
+      break;
+    case "repeat":
+      if (data?.repeat != null) {
+        if (get(activeBackend) !== "remote") {
+          // Cycle until match? Or just set directly
+          repeat.set(data.repeat);
+          if (get(activeBackend) === "native") {
+            nativeAudioSetRepeatOne(data.repeat === "one").catch(console.error);
+          }
+        } else {
+          repeat.set(data.repeat);
+        }
+      }
+      break;
+  }
 }

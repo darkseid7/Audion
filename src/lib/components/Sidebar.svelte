@@ -22,8 +22,10 @@
         goToPlugins,
         goToSettings,
         goToLikedSongs,
+        goToListenLater,
         goToListenBrainz,
         goToDiscover,
+        goToRecentlyPlayed,
     } from "$lib/stores/view";
     import {
         isSettingsOpen as isSettingsOpenUI,
@@ -32,6 +34,7 @@
     } from "$lib/stores/ui";
     import { appSettings } from "$lib/stores/settings";
     import { likedCount } from "$lib/stores/liked";
+    import { listenLaterCount } from "$lib/stores/listen-later";
     import {
         selectMusicFolder,
         addFolder,
@@ -47,6 +50,7 @@
     import {
         playTracks,
         addToQueue,
+        playNext,
         currentTrack,
         isPlaying,
         queue,
@@ -238,6 +242,17 @@
         }
     }
 
+    async function handlePlayNext(id: number) {
+        try {
+            const tracks = await getPlaylistTracks(id);
+            if (tracks.length > 0) {
+                playNext(tracks);
+            }
+        } catch (error) {
+            console.error("Failed to play playlist next:", error);
+        }
+    }
+
     async function handleDeletePlaylist(id: number, name: string) {
         if (
             !(await confirm(`Delete playlist "${name}"?`, {
@@ -273,6 +288,10 @@
                 {
                     label: "Play",
                     action: () => handlePlayPlaylist(playlist.id),
+                },
+                {
+                    label: $_('contextMenu.playNext'),
+                    action: () => handlePlayNext(playlist.id),
                 },
                 {
                     label: "Add to Queue",
@@ -430,6 +449,26 @@
                 <li>
                     <button
                         class="nav-item"
+                        class:active={isActive("albums")}
+                        on:click={() => navigateAndClose(goToAlbums)}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="24"
+                            height="24"
+                        >
+                            <path
+                                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
+                            />
+                        </svg>
+                        <span>{$_('sidebar.albums', { default: 'Albums' })}</span>
+                        <span class="nav-count">{$albumCount}</span>
+                    </button>
+                </li>
+                <li>
+                    <button
+                        class="nav-item"
                         class:active={isActive("liked-songs")}
                         on:click={() => navigateAndClose(goToLikedSongs)}
                     >
@@ -445,6 +484,45 @@
                         </svg>
                         <span>{$_('sidebar.likedSongs', { default: 'Liked Songs' })}</span>
                         <span class="nav-count">{$likedCount}</span>
+                    </button>
+                </li>
+                <li>
+                    <button
+                        class="nav-item"
+                        class:active={isActive("listen-later")}
+                        on:click={() => navigateAndClose(goToListenLater)}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="24"
+                            height="24"
+                        >
+                            <path
+                                d="M12 1.75A10.25 10.25 0 1 0 22.25 12 10.26 10.26 0 0 0 12 1.75zm0 18.5A8.25 8.25 0 1 1 20.25 12 8.26 8.26 0 0 1 12 20.25zm.75-13.25h-1.5v6l5 3 .75-1.23-4.25-2.52z"
+                            />
+                        </svg>
+                        <span>{$_('sidebar.listenLater', { default: 'Escuchar más tarde' })}</span>
+                        <span class="nav-count">{$listenLaterCount}</span>
+                    </button>
+                </li>
+                <li>
+                    <button
+                        class="nav-item"
+                        class:active={isActive("recently-played")}
+                        on:click={() => navigateAndClose(goToRecentlyPlayed)}
+                    >
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="currentColor"
+                            width="24"
+                            height="24"
+                        >
+                            <path
+                                d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"
+                            />
+                        </svg>
+                        <span>{$_('sidebar.thisWeek', { default: 'This Week' })}</span>
                     </button>
                 </li>
                 <li>
@@ -509,26 +587,6 @@
                         </svg>
                         <span>{$_('sidebar.allTracks', { default: 'All Tracks' })}</span>
                         <span class="nav-count">{$trackCount}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("albums")}
-                        on:click={() => navigateAndClose(goToAlbums)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.albums', { default: 'Albums' })}</span>
-                        <span class="nav-count">{$albumCount}</span>
                     </button>
                 </li>
                 <li>

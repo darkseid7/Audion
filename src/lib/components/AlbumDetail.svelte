@@ -9,12 +9,14 @@
         getTrackCoverSrc,
         formatDuration,
         getReleaseMbInfo,
+        enrichAlbumYear,
         type MbReleaseInfo,
     } from "$lib/api/tauri";
-    import { playTracks, currentTrack, isPlaying } from "$lib/stores/player";
-    import { goToAlbums, goToArtistDetail } from "$lib/stores/view";
-    import { loadLibrary, getAlbumCoverFromTracks } from "$lib/stores/library";
+    import { playTracks, currentTrack, isPlaying, appendToQueueEnd, playNext } from "$lib/stores/player";
+    import { goToAlbums, goToArtistDetail, goBack } from "$lib/stores/view";
+    import { loadLibrary, getAlbumCoverFromTracks, albums } from "$lib/stores/library";
     import TrackList from "./TrackList.svelte";
+    import AlbumInfoModal from "./AlbumInfoModal.svelte";
     import {
         downloadTracks,
         hasDownloadableTracks,
@@ -38,7 +40,80 @@
     let mbRelease: MbReleaseInfo | null = null;
     let mbReleaseLoading = false;
 
+    // Album Info modal
+    let infoOpen = false;
+
     $: totalDuration = tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+    type AlbumAudioInfo = {
+        format: string | null;
+        sampleRate: number | null;
+        bitDepth: number | null;
+    };
+
+    function normalizeFormat(format: string | null | undefined): string | null {
+        if (!format) return null;
+        const formatUpper = format.toUpperCase();
+        if (formatUpper.includes("HI_RES") || formatUpper.includes("HIRES")) {
+            return "HI-RES";
+        }
+        if (formatUpper.includes("LOSSLESS")) {
+            return "LOSSLESS";
+        }
+        return formatUpper.replace("MPEG", "MP3");
+    }
+
+    function parseTrackAudioMeta(track: Track): {
+        sampleRate: number | null;
+        bitDepth: number | null;
+    } {
+        if (!track.metadata_json) {
+            return { sampleRate: null, bitDepth: null };
+        }
+        try {
+            const meta = JSON.parse(track.metadata_json);
+            return {
+                sampleRate: meta["__sample_rate_hz"] ?? null,
+                bitDepth: meta["__bit_depth"] ?? null,
+            };
+        } catch {
+            return { sampleRate: null, bitDepth: null };
+        }
+    }
+
+    function mostCommonValue<T>(values: Array<T | null | undefined>): T | null {
+        const counts = new Map<T, number>();
+        for (const value of values) {
+            if (value === null || value === undefined) continue;
+            counts.set(value, (counts.get(value) || 0) + 1);
+        }
+        let best: T | null = null;
+        let bestCount = 0;
+        for (const [value, count] of counts.entries()) {
+            if (count > bestCount) {
+                best = value;
+                bestCount = count;
+            }
+        }
+        return best;
+    }
+
+    function formatSampleRate(hz: number): string {
+        return hz % 1000 === 0 ? `${hz / 1000}kHz` : `${(hz / 1000).toFixed(1)}kHz`;
+    }
+
+    function buildAlbumAudioInfo(trackList: Track[]): AlbumAudioInfo {
+        const formats = trackList.map((track) => normalizeFormat(track.format));
+        const sampleRates = trackList.map((track) => parseTrackAudioMeta(track).sampleRate);
+        const bitDepths = trackList.map((track) => parseTrackAudioMeta(track).bitDepth);
+
+        return {
+            format: mostCommonValue(formats),
+            sampleRate: mostCommonValue(sampleRates),
+            bitDepth: mostCommonValue(bitDepths),
+        };
+    }
+
+    $: albumAudioInfo = buildAlbumAudioInfo(tracks);
 
     function groupTracksByDisc(tracks: Track[]) {
         const groups = new Map<number, Track[]>();
@@ -81,6 +156,28 @@
         mbReleaseLoading = true;
         try {
             mbRelease = await getReleaseMbInfo(name, artist);
+            // Persist year to DB if album is missing it
+            if (album && mbRelease && (mbRelease.original_year || mbRelease.year)) {
+                if (album.original_year == null || album.year == null) {
+                    try {
+                        const result = await enrichAlbumYear(album.id, name, artist);
+                        if (result.original_year != null && album.original_year == null) {
+                            album.original_year = result.original_year;
+                        }
+                        if (result.year != null && album.year == null) {
+                            album.year = result.year;
+                        }
+                        // Update the albums store so the grid reflects the change
+                        albums.update(list => list.map(a =>
+                            a.id === album!.id
+                                ? { ...a, year: album!.year, original_year: album!.original_year }
+                                : a
+                        ));
+                    } catch (e) {
+                        console.warn("[AlbumDetail] Failed to persist MB year:", e);
+                    }
+                }
+            }
         } catch (e) {
             console.warn("[AlbumDetail] MB release fetch failed:", e);
         } finally {
@@ -170,8 +267,9 @@
     }
 
     function handlePlayAll() {
-        if (tracks.length > 0 && album) {
-            playTracks(tracks, 0, {
+        const tracksToPlay = showOnlyLiked ? likedTracks : tracks;
+        if (tracksToPlay.length > 0 && album) {
+            playTracks(tracksToPlay, 0, {
                 type: "album",
                 albumId: album.id,
                 displayName: album.name,
@@ -196,15 +294,82 @@
     } from "$lib/stores/pinned";
     import { setCustomArtwork } from "$lib/stores/customArtwork";
 
+    let showArtPopup = false;
+    import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
+    import { likedAlbumIds, toggleAlbumLike } from "$lib/stores/liked-albums";
+    import { likedTrackIds } from "$lib/stores/liked";
+
+    let showOnlyLiked = false;
+
+    $: likedTracks = tracks.filter(t => $likedTrackIds.has(t.id));
+    $: displayTracks = showOnlyLiked ? likedTracks : tracks;
+    $: displayGroupedTracks = showOnlyLiked ? groupTracksByDisc(likedTracks) : groupedTracks;
+
+    // Computed years: prefer DB values, fallback to MB response
+    $: displayOriginalYear = album?.original_year ?? (mbRelease?.original_year ? parseInt(mbRelease.original_year) : null);
+    $: displayEditionYear = album?.year ?? (mbRelease?.year ? parseInt(mbRelease.year) : null);
+    $: displayYear = displayOriginalYear || displayEditionYear;
+
     function handleContextMenu(e: MouseEvent) {
         if (!album) return;
         e.preventDefault();
         const pinned = isPinned("album", album.id, $pinnedItems);
+        const savedForLater = isInListenLater(album.id);
         contextMenu.set({
             visible: true,
             x: e.clientX,
             y: e.clientY,
             items: [
+                {
+                    label: $_('contextMenu.playAlbumNext'),
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album!.id);
+                            if (tracks.length === 0) {
+                                addToast(
+                                    $_('queue.noTracksToAdd', { default: 'No tracks found for this album' }),
+                                    'warning',
+                                );
+                                return;
+                            }
+                            playNext(tracks);
+                            addToast(`Playing "${album!.name}" next`, 'success');
+                        } catch (err) {
+                            console.error('Failed to play album next:', err);
+                            addToast('Failed to play album next', 'error');
+                        }
+                    },
+                },
+                {
+                    label: $_('contextMenu.addToQueue'),
+                    icon: `<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h12v2H3v-2zM17 13v6h6v-6h-6zm3 4.5L18 15l1.5-1.5L22 16l-2 2z"/></svg>`,
+                    action: async () => {
+                        try {
+                            const tracks = await getTracksByAlbum(album!.id);
+                            if (tracks.length === 0) {
+                                addToast(
+                                    $_('queue.noTracksToAdd', { default: 'No tracks found for this album' }),
+                                    'warning',
+                                );
+                                return;
+                            }
+                            appendToQueueEnd(tracks);
+                            addToast(
+                                $_('queue.albumAddedToEnd', {
+                                    values: { count: tracks.length, name: album!.name },
+                                    default: `Added ${tracks.length} tracks from "${album!.name}" to end of queue`,
+                                }),
+                                'success',
+                            );
+                        } catch (err) {
+                            console.error('Failed to add album to queue:', err);
+                            addToast(
+                                $_('queue.addToQueueFailed', { default: 'Failed to add album to queue' }),
+                                'error',
+                            );
+                        }
+                    },
+                },
                 {
                     label: pinned ? $_('contextMenu.unpinFromTop') : $_('contextMenu.pinToTop'),
                     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 2L4.5 9L9 9L9 22L15 22L15 9L19.5 9L12 2Z"/></svg>`,
@@ -214,6 +379,21 @@
                         } else {
                             pinItem("album", album!.id);
                         }
+                    },
+                },
+                {
+                    label: savedForLater
+                        ? $_('contextMenu.removeFromListenLater', { default: 'Quitar de Escuchar más tarde' })
+                        : $_('contextMenu.listenLater', { default: 'Escuchar más tarde' }),
+                    action: async () => {
+                        const wasSaved = isInListenLater(album!.id);
+                        await toggleListenLater(album!.id);
+                        addToast(
+                            wasSaved
+                                ? $_('listenLater.removedToast', { default: 'Álbum eliminado de Escuchar más tarde' })
+                                : $_('listenLater.addedToast', { default: 'Álbum añadido a Escuchar más tarde' }),
+                            'success',
+                        );
                     },
                 },
                 { type: "separator" },
@@ -318,8 +498,8 @@
         >
             <button
                 class="back-btn"
-                on:click={goToAlbums}
-                aria-label="Back to Albums"
+                on:click={goBack}
+                aria-label="Back"
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -338,6 +518,8 @@
                         src={getAlbumCoverFromTracks(album.id)}
                         alt={album.name}
                         decoding="async"
+                        on:click={() => (showArtPopup = true)}
+                        class="clickable"
                     />
                 {:else}
                     <div class="album-cover-placeholder">
@@ -370,10 +552,31 @@
                     >
                         {album.artist || "Unknown Artist"}
                     </button>
+                    {#if displayYear}
+                        <span class="separator">•</span>
+                        <span class="album-year-display">{displayOriginalYear || displayEditionYear}</span>
+                        {#if displayEditionYear && displayOriginalYear && displayEditionYear !== displayOriginalYear}
+                            <span class="album-edition-display">({$_('album.edition', { default: 'Edition' })}: {displayEditionYear})</span>
+                        {/if}
+                    {/if}
                     <span class="separator">•</span>
                     <span>{$_('album.songs', { values: { count: tracks.length } })}</span>
                     <span class="separator">•</span>
                     <span>{formatDuration(totalDuration)}</span>
+                    {#if albumAudioInfo.format || albumAudioInfo.sampleRate || albumAudioInfo.bitDepth}
+                        <span class="separator">•</span>
+                        <div class="album-audio-meta">
+                            {#if albumAudioInfo.format}
+                                <span class="album-audio-chip format-chip">{albumAudioInfo.format}</span>
+                            {/if}
+                            {#if albumAudioInfo.sampleRate}
+                                <span class="album-audio-chip">{formatSampleRate(albumAudioInfo.sampleRate)}</span>
+                            {/if}
+                            {#if albumAudioInfo.bitDepth}
+                                <span class="album-audio-chip">{albumAudioInfo.bitDepth}bit</span>
+                            {/if}
+                        </div>
+                    {/if}
                 </div>
                 <div class="album-actions">
                     <button
@@ -390,6 +593,56 @@
                         </svg>
                         {$_('album.play')}
                     </button>
+
+                    <button
+                        class="btn-info"
+                        type="button"
+                        on:click={() => (infoOpen = true)}
+                        title={$_('album.infoTitle')}
+                        aria-label={$_('album.infoTitle')}
+                    >
+                        <svg viewBox="0 0 24 24" width="22" height="22"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="16" x2="12" y2="12"/>
+                            <line x1="12" y1="8" x2="12.01" y2="8"/>
+                        </svg>
+                    </button>
+
+                    <button
+                        class="btn-like-album"
+                        class:liked={$likedAlbumIds.has(albumId)}
+                        on:click={() => toggleAlbumLike(albumId)}
+                        title={$likedAlbumIds.has(albumId) ? "Unlike album" : "Like album"}
+                    >
+                        <svg viewBox="0 0 24 24" width="22" height="22"
+                            fill={$likedAlbumIds.has(albumId) ? "currentColor" : "none"}
+                            stroke="currentColor" stroke-width="2"
+                        >
+                            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                        </svg>
+                    </button>
+
+                    {#if likedTracks.length > 0 && likedTracks.length < tracks.length}
+                        <button
+                            class="btn-filter-liked"
+                            class:active={showOnlyLiked}
+                            on:click={() => showOnlyLiked = !showOnlyLiked}
+                            title={showOnlyLiked ? "Show all tracks" : "Show only liked tracks"}
+                        >
+                            <svg viewBox="0 0 24 24" width="18" height="18"
+                                fill="currentColor" stroke="none"
+                            >
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                            </svg>
+                            <span>{likedTracks.length}</span>
+                        </button>
+                    {/if}
 
                     {#if hasDownloadable}
                         <button
@@ -440,15 +693,18 @@
                 <span class="mb-info-spinner"></span>
                 <span class="mb-info-hint">{$_('album.fetchingReleaseInfo')}</span>
             </div>
-        {:else if mbRelease && (mbRelease.year || mbRelease.label || mbRelease.country || mbRelease.release_type)}
+        {:else if mbRelease && (mbRelease.year || mbRelease.original_year || mbRelease.label || mbRelease.country || mbRelease.release_type)}
             <div class="mb-info-bar">
                 {#if mbRelease.release_type}
                     <span class="mb-chip type-chip"
                         >{mbRelease.release_type}</span
                     >
                 {/if}
-                {#if mbRelease.year}
-                    <span class="mb-chip">{mbRelease.year}</span>
+                {#if mbRelease.original_year}
+                    <span class="mb-chip">{mbRelease.original_year}</span>
+                {/if}
+                {#if mbRelease.year && mbRelease.year !== mbRelease.original_year}
+                    <span class="mb-chip">{$_('album.edition', { default: 'Edition' })}: {mbRelease.year}</span>
                 {/if}
                 {#if mbRelease.label}
                     <span class="mb-chip">
@@ -474,8 +730,8 @@
         {/if}
 
         <section class="track-list-section">
-            {#if groupedTracks.length > 1}
-                {#each groupedTracks as group}
+            {#if displayGroupedTracks.length > 1}
+                {#each displayGroupedTracks as group}
                     <div class="disc-group">
                         <div class="disc-header">
                             <span class="disc-icon">
@@ -495,25 +751,26 @@
                         <TrackList
                             tracks={group.tracks}
                             showAlbum={false}
+                            disableVirtualScroll={true}
                             playbackContext={{
                                 type: "album",
                                 albumId,
                                 displayName: album?.name,
                             }}
-                            queueTracks={tracks}
+                            queueTracks={displayTracks}
                         />
                     </div>
                 {/each}
             {:else}
                 <TrackList
-                    {tracks}
+                    tracks={displayTracks}
                     showAlbum={false}
                     playbackContext={{
                         type: "album",
                         albumId,
                         displayName: album?.name,
                     }}
-                    queueTracks={tracks}
+                    queueTracks={displayTracks}
                 />
             {/if}
         </section>
@@ -526,6 +783,34 @@
         </div>
     {/if}
 </div>
+
+{#if showArtPopup && album}
+    <div
+        class="art-popup-overlay"
+        on:click={() => (showArtPopup = false)}
+        on:keydown={(e) => e.key === 'Escape' && (showArtPopup = false)}
+        role="dialog"
+        aria-label="Album artwork"
+        tabindex="-1"
+    >
+        <div class="art-popup-content" on:click|stopPropagation>
+            <img
+                src={getAlbumCoverFromTracks(album.id)}
+                alt={album.name}
+                class="art-popup-img"
+            />
+            <button class="art-popup-close" on:click={() => (showArtPopup = false)}>Close</button>
+        </div>
+    </div>
+{/if}
+
+{#if album && infoOpen}
+    <AlbumInfoModal
+        {album}
+        bind:open={infoOpen}
+        on:close={() => (infoOpen = false)}
+    />
+{/if}
 
 <style>
     .album-detail {
@@ -606,6 +891,57 @@
         object-fit: cover;
     }
 
+    .album-cover img.clickable {
+        cursor: pointer;
+    }
+
+    .art-popup-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.85);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        animation: fadeIn 0.15s ease;
+    }
+
+    .art-popup-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        max-width: 90vw;
+        max-height: 90vh;
+    }
+
+    .art-popup-img {
+        max-width: 80vmin;
+        max-height: 80vmin;
+        border-radius: var(--radius-sm);
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+        object-fit: contain;
+    }
+
+    .art-popup-close {
+        background: none;
+        border: none;
+        color: var(--text-subdued);
+        font-size: 14px;
+        cursor: pointer;
+        padding: 8px 16px;
+    }
+
+    .art-popup-close:hover {
+        color: var(--text-primary);
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+
     .album-cover-placeholder {
         width: 100%;
         height: 100%;
@@ -651,6 +987,33 @@
         margin-bottom: var(--spacing-lg);
     }
 
+    .album-audio-meta {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+    }
+
+    .album-audio-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: var(--radius-full);
+        border: 1px solid var(--border-color);
+        background: var(--bg-highlight);
+        color: var(--text-secondary);
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1;
+        white-space: nowrap;
+    }
+
+    .album-audio-chip.format-chip {
+        color: var(--accent-primary);
+        border-color: color-mix(in srgb, var(--accent-primary), transparent 65%);
+        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
+    }
+
     .album-artist {
         font-weight: 600;
         color: var(--text-primary);
@@ -668,9 +1031,88 @@
         color: var(--text-subdued);
     }
 
+    .album-edition-display {
+        color: var(--text-subdued);
+        font-size: 0.85em;
+        margin-left: 4px;
+    }
+
     .album-actions {
         display: flex;
         gap: var(--spacing-md);
+        align-items: center;
+    }
+
+    .btn-info {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--bg-surface, #282828);
+        color: var(--text-secondary, #b3b3b3);
+        border: 0;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, transform 0.1s;
+        flex-shrink: 0;
+    }
+    .btn-info:hover {
+        background: var(--bg-highlight, #3e3e3e);
+        color: var(--accent-primary, #1DB954);
+    }
+    .btn-info:active { transform: scale(0.92); }
+
+    .btn-like-album {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-subdued);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+    }
+
+    .btn-like-album:hover {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+
+    .btn-like-album.liked {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+
+    .btn-filter-liked {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        height: 36px;
+        padding: 0 12px;
+        border-radius: var(--radius-full);
+        border: 1px solid var(--border-color);
+        background: transparent;
+        color: var(--text-subdued);
+        cursor: pointer;
+        font-size: 0.8rem;
+        font-weight: 600;
+        transition: all var(--transition-fast);
+    }
+
+    .btn-filter-liked:hover {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+    }
+
+    .btn-filter-liked.active {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
     }
 
     .play-all-btn {

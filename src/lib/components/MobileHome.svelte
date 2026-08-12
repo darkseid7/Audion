@@ -25,6 +25,7 @@
         goToArtistDetail,
         goToSettings,
         goToLikedSongs,
+        goToListenLater,
     } from "$lib/stores/view";
     import { isStatsWrappedOpen } from "$lib/stores/ui";
     import { progressiveScan, isScanning } from "$lib/stores/progressiveScan";
@@ -33,6 +34,7 @@
     import { appSettings } from "$lib/stores/settings";
     import { getLikedTracks } from "$lib/api/tauri";
     import { likedTrackIds } from "$lib/stores/liked";
+    import { listenLaterCount } from "$lib/stores/listen-later";
     import {
         topTracks,
         topAlbums,
@@ -261,6 +263,30 @@
 
     <!-- Liked Songs Banner -->
     <div class="liked-songs-banner-container">
+        <button class="liked-songs-banner" on:click={goToListenLater}>
+            <div class="liked-banner-content">
+                <div class="liked-banner-icon">
+                    <svg
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                        width="24"
+                        height="24"
+                    >
+                        <path
+                            d="M12 1.75A10.25 10.25 0 1 0 22.25 12 10.26 10.26 0 0 0 12 1.75zm0 18.5A8.25 8.25 0 1 1 20.25 12 8.26 8.26 0 0 1 12 20.25zm.75-13.25h-1.5v6l5 3 .75-1.23-4.25-2.52z"
+                        />
+                    </svg>
+                </div>
+                <div class="liked-banner-text">
+                    <span class="liked-banner-title">Escuchar más tarde</span>
+                    <span class="liked-banner-subtitle"
+                        >{$listenLaterCount}
+                        {$listenLaterCount === 1 ? "álbum" : "álbumes"}</span
+                    >
+                </div>
+            </div>
+        </button>
+
         <button class="liked-songs-banner" on:click={goToLikedSongs}>
             <div class="liked-banner-content">
                 <div class="liked-banner-icon">
