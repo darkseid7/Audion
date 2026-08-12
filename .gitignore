@@ -29,6 +29,7 @@ pnpm-debug.log*
 *.swp
 *.swo
 *~
+.pi-subagents
 
 # Rust / Tauri (Desktop)
 src-tauri/target/
