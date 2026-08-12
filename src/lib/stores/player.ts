@@ -43,6 +43,7 @@ import {
   activeSqueezePlayer,
   squeezePlayerState,
   setSqueezeVolumeCooldown,
+  invalidateSqueezePollOwnership,
 } from "$lib/stores/squeeze";
 import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
 import {
@@ -114,6 +115,9 @@ let dashPlayer: any | null = null;
 // Track which backend is currently active ('native', 'html5', 'remote', or 'none')
 export type ActiveBackend = "native" | "html5" | "remote" | "squeeze" | "none";
 export const activeBackend = writable<ActiveBackend>("none");
+// Squeeze polling uses an epoch in addition to current store values so an
+// A -> other -> A transition cannot let an old request publish.
+activeBackend.subscribe(() => invalidateSqueezePollOwnership());
 
 // Track if we should use native audio based on platform/settings
 let nativeAudioUsed = false;
@@ -1389,6 +1393,41 @@ function updateMediaSessionPosition(): void {
   }
 }
 
+export interface SqueezePlayCommit {
+  track: Track;
+  startTime: number;
+  sessionId: number;
+  isCurrentSession: () => boolean;
+  commit: () => void;
+}
+
+/**
+ * Issue a Squeeze play request and commit optimistic state only on success.
+ * The callback keeps this seam independent from the rest of the audio setup,
+ * while the session predicate prevents an older successful request winning.
+ */
+export async function playTrackOnSqueeze(
+  mac: string,
+  trackIds: number[],
+  startIndex: number,
+  commit: SqueezePlayCommit,
+): Promise<"played" | "failed" | "superseded"> {
+  try {
+    await squeezePlay(mac, trackIds, startIndex);
+  } catch (err) {
+    console.error("[Player] Squeeze play failed:", err);
+    addToast(
+      `Squeeze playback failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      "error",
+    );
+    return "failed";
+  }
+
+  if (!commit.isCurrentSession()) return "superseded";
+  commit.commit();
+  return "played";
+}
+
 // Play a specific track
 export async function playTrack(
   track: Track,
@@ -1495,19 +1534,18 @@ export async function playTrack(
       const idx = get(queueIndex);
       const trackIds = q.length > 0 ? q.map((t) => t.id) : [track.id];
       const startIdx = q.length > 0 ? idx : 0;
-      try {
-        await squeezePlay(mac, trackIds, startIdx);
-      } catch (err) {
-        console.error("[Player] Squeeze play failed:", err);
-        addToast(
-          `Squeeze playback failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-          "error",
-        );
-      }
-      currentTrack.set(trackForPlugins);
-      currentTime.set(startTime);
-      duration.set(track.duration || 0);
-      isPlaying.set(true);
+      await playTrackOnSqueeze(mac, trackIds, startIdx, {
+        track: trackForPlugins,
+        startTime,
+        sessionId,
+        isCurrentSession: () => sessionId === currentSessionId,
+        commit: () => {
+          currentTrack.set(trackForPlugins);
+          currentTime.set(startTime);
+          duration.set(track.duration || 0);
+          isPlaying.set(true);
+        },
+      });
     }
     return;
   }

@@ -23,7 +23,6 @@
     squeezeStartServer,
     squeezeStopServer,
     squeezeIsRunning,
-    squeezePlay,
     type SqueezePlayerInfo,
   } from "$lib/api/tauri";
   import { get } from "svelte/store";
@@ -35,6 +34,8 @@
     startGlobalSqueezeDiscovery,
     stopGlobalSqueezeDiscovery,
     disconnectSqueezePlayer,
+    activateSqueezeTarget,
+    playHereOnSqueeze,
   } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
@@ -83,9 +84,7 @@
     if ($activeSqueezePlayer === player.mac) {
       disconnectSqueezePlayer(player.mac);
     } else {
-      activeSqueezePlayer.set(player.mac);
-      activeBackend.set("squeeze");
-      activeRemoteDevice.set(null);
+      activateSqueezeTarget(player.mac);
     }
   }
 
@@ -102,7 +101,7 @@
     if (startIndex === -1) return;
 
     try {
-      await squeezePlay(mac, trackIds, startIndex);
+      await playHereOnSqueeze(mac, trackIds, startIndex);
     } catch (e) {
       console.error("Squeeze play error:", e);
     }

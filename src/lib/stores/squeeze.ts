@@ -42,6 +42,9 @@ export const squeezePlayerState = writable<SqueezePlayerInfo | null>(null);
  */
 export const discoveredSqueezePlayers = writable<SqueezePlayerInfo[]>([]);
 
+type SqueezePollOwner = Readonly<{ mac: string; epoch: number }>;
+
+let squeezePollEpoch = 0;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let volumeCooldownUntil = 0;
 
@@ -152,25 +155,46 @@ export function setSqueezeVolumeCooldown() {
   volumeCooldownUntil = Date.now() + 2000;
 }
 
+export function invalidateSqueezePollOwnership(): number {
+  squeezePollEpoch += 1;
+  return squeezePollEpoch;
+}
+
+function captureSqueezePollOwner(mac: string): SqueezePollOwner {
+  return Object.freeze({ mac, epoch: squeezePollEpoch });
+}
+
+function ownsSqueezePoll(owner: SqueezePollOwner): boolean {
+  return (
+    owner.epoch === squeezePollEpoch &&
+    get(activeSqueezePlayer) === owner.mac &&
+    get(activeBackend) === "squeeze"
+  );
+}
+
 activeSqueezePlayer.subscribe((mac) => {
+  invalidateSqueezePollOwnership();
   if (pollInterval) {
     clearInterval(pollInterval);
     pollInterval = null;
   }
 
   if (mac) {
-    pollSqueezeState(mac);
-    pollInterval = setInterval(() => pollSqueezeState(mac), 500);
+    void pollSqueezeState(captureSqueezePollOwner(mac));
+    pollInterval = setInterval(() => {
+      void pollSqueezeState(captureSqueezePollOwner(mac));
+    }, 500);
   } else {
     squeezePlayerState.set(null);
   }
 });
 
-async function pollSqueezeState(mac: string) {
-  if (get(activeBackend) !== "squeeze") return;
+async function pollSqueezeState(owner: SqueezePollOwner) {
+  if (!ownsSqueezePoll(owner)) return;
 
   try {
-    const info = await squeezeGetPlayerState(mac);
+    const info = await squeezeGetPlayerState(owner.mac);
+    if (!ownsSqueezePoll(owner)) return;
     squeezePlayerState.set(info);
 
     const playing = info.state === "Playing";
@@ -198,6 +222,7 @@ async function pollSqueezeState(mac: string) {
       if (!localTrack && !sameTrack) {
         try {
           const fetched = await getTrackById(info.current_track.id);
+          if (!ownsSqueezePoll(owner)) return;
           if (fetched) {
             cacheTrack(fetched);
             localTrack = fetched;
@@ -222,12 +247,14 @@ async function pollSqueezeState(mac: string) {
         if (!sameTrack && prevTrack && prevTrack.id !== info.current_track.id) {
           const durationPlayed = Math.floor(prevElapsed);
           if (durationPlayed > 5) {
-            void recordTrackPlay(
-              prevTrack.id,
-              prevTrack.album_id ?? null,
-              durationPlayed,
-            );
-            incrementPlayCount(prevTrack.id);
+            if (ownsSqueezePoll(owner)) {
+              void recordTrackPlay(
+                prevTrack.id,
+                prevTrack.album_id ?? null,
+                durationPlayed,
+              );
+              incrementPlayCount(prevTrack.id);
+            }
           }
         }
 
@@ -277,9 +304,10 @@ async function pollSqueezeState(mac: string) {
       lastForcedEndTrackId !== trackId
     ) {
       if (pendingSqueezeForcedEnd === null) {
+        const watchdogOwner = owner;
         pendingSqueezeForcedEnd = setTimeout(() => {
           pendingSqueezeForcedEnd = null;
-          if (get(activeBackend) !== "squeeze") return;
+          if (!ownsSqueezePoll(watchdogOwner)) return;
           const st = get(currentTime);
           const du = get(duration);
           if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
@@ -301,7 +329,7 @@ async function pollSqueezeState(mac: string) {
             }
             // Stop the LMS player so it transitions to "Stopped" — the
             // next poll will then drive isPlaying to false normally.
-            squeezeStop(mac).catch(console.error);
+            squeezeStop(watchdogOwner.mac).catch(console.error);
             // Mark this track so we don't fire the watchdog again for it.
             lastForcedEndTrackId = trackId;
           }
@@ -320,6 +348,34 @@ async function pollSqueezeState(mac: string) {
   } catch {
     // Player may have disconnected
   }
+}
+
+/** Activate a player as the Squeeze control target. */
+export function activateSqueezeTarget(mac: string): void {
+  activeRemoteDevice.set(null);
+  activeBackend.set("squeeze");
+  activeSqueezePlayer.set(mac);
+}
+
+/** Start playback on a target and activate it only after success. */
+export async function playHereOnSqueeze(
+  mac: string,
+  trackIds: number[],
+  startIndex: number,
+): Promise<void> {
+  await squeezePlay(mac, trackIds, startIndex);
+  activateSqueezeTarget(mac);
+}
+
+/** Test-only reset seam for module-level polling resources. */
+export function resetSqueezePollingForTests(): void {
+  invalidateSqueezePollOwnership();
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+  clearPendingSqueezeForcedEnd();
+  lastForcedEndTrackId = null;
 }
 
 // ── Session persistence ───────────────────────────────────────────────────────
