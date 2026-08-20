@@ -17,10 +17,7 @@
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import { isTauri } from "$lib/api/tauri";
   import { squeezeStartServer } from "$lib/api/tauri";
-  import {
-    startGlobalSqueezeDiscovery,
-    initSqueezeSessionPersistence,
-  } from "$lib/stores/squeeze";
+  import { startGlobalSqueezeDiscovery } from "$lib/stores/squeeze";
   import {
     initializeFromPersistedState,
     setupAutoSave,
@@ -98,18 +95,15 @@
     } finally {
       isLoading = false;
 
-      // Auto-start Squeeze server and the global player-discovery poll
-      // so any Eversolo (or other Squeeze player) that appears on the
-      // network is auto-selected as the active target without the user
-      // having to open the Connect panel first.
+      // Auto-start the Squeeze server so Audion is always available as a
+      // playback target — Spotify-Connect style. The server running does
+      // NOT select or play anything: the device list is refreshed by the
+      // discovery poll, and a device only becomes the active target when
+      // the user selects it (or connects from the streamer). No session
+      // is restored on boot, so reopening Audion is always a fresh start.
       squeezeStartServer()
         .then(() => startGlobalSqueezeDiscovery())
         .catch((e) => console.warn("[SQUEEZE] Auto-start failed:", e));
-
-      // Wire up session save/restore subscribers. Done here (not at
-      // module-load) to avoid a circular-import crash between
-      // squeeze.ts and player.ts — both must finish evaluating first.
-      initSqueezeSessionPersistence();
 
       // Lazy load plugins- reduce startup time
       requestIdleCallback(() => {

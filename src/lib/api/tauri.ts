@@ -1464,6 +1464,10 @@ export async function squeezeStopServer(): Promise<void> {
   return await invoke("squeeze_stop_server");
 }
 
+export async function squeezeDisconnectPlayer(mac: string): Promise<void> {
+  return await invoke("squeeze_disconnect_player", { mac });
+}
+
 export async function squeezeIsRunning(): Promise<boolean> {
   return await invoke("squeeze_is_running");
 }

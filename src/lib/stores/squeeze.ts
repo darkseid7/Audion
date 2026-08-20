@@ -3,13 +3,11 @@ import {
   squeezeGetPlayerState,
   squeezeGetPlayers,
   squeezeStop,
-  squeezeStartServer,
   squeezeIsRunning,
-  squeezePlay,
+  squeezeDisconnectPlayer,
   getTrackCoverSrc,
   getTrackById,
   type SqueezePlayerInfo,
-  type Track,
 } from "$lib/api/tauri";
 import {
   currentTrack,
@@ -20,8 +18,6 @@ import {
   activeBackend,
   shuffle,
   repeat,
-  queue,
-  queueIndex,
 } from "$lib/stores/player";
 import { activeRemoteDevice } from "$lib/stores/websocket";
 import {
@@ -52,21 +48,16 @@ let discoveryInterval: ReturnType<typeof setInterval> | null = null;
 let discoveryStarting = false;
 
 /**
- * MAC addresses that the user has explicitly disconnected in this session.
- * Polling skips these so a Disconnect button press is sticky and not
- * immediately undone by the next 1 s discovery tick.
- * Cleared when the Squeeze server is stopped — restarting re-enables
- * auto-pickup for all previously-discovered players.
- */
-const userDisconnectedMacs = new Set<string>();
-
-/**
- * Idempotent. Starts a 1 Hz poll that:
- *   1. Keeps `discoveredSqueezePlayers` in sync with the backend.
- *   2. Auto-selects the first discovered player when nothing is active,
- *      so an Eversolo (or any Squeeze player) that comes online is
- *      picked up immediately without the user having to open the
- *      Connect panel.
+ * Idempotent. Starts a 1 Hz poll that keeps `discoveredSqueezePlayers`
+ * in sync with the backend.
+ *
+ * The poll NEVER boots the Squeeze server and NEVER auto-selects a
+ * player: a Squeeze connection is established only by explicit user
+ * action (Start server / Control / Play Here). Auto-starting the server
+ * on app boot made the Eversolo auto-reconnect to a server the user
+ * never asked to run, and auto-selection silently re-established a
+ * "connection" the user had cut — both surfaced as broken playback
+ * after reopening Audion.
  *
  * The poll keeps running as long as the Squeeze server is up; it stops
  * when `stopGlobalSqueezeDiscovery()` is called (e.g. when the user
@@ -76,13 +67,10 @@ export async function startGlobalSqueezeDiscovery(): Promise<void> {
   if (discoveryInterval || discoveryStarting) return;
   discoveryStarting = true;
   try {
-    // Make sure the server is up before we start polling. If it's already
-    // running this resolves immediately; otherwise it boots it.
-    if (!(await squeezeIsRunning().catch(() => false))) {
-      await squeezeStartServer().catch((e) =>
-        console.warn("[SQUEEZE] Auto-start failed:", e),
-      );
-    }
+    // If the server isn't running there is nothing to discover. Never
+    // boot it from here — the Connect panel's Start button is the only
+    // entry point for bringing the server up.
+    if (!(await squeezeIsRunning().catch(() => false))) return;
     // First tick immediately so the UI doesn't have to wait a full
     // second for the initial state.
     await pollSqueezePlayersOnce();
@@ -98,39 +86,29 @@ export function stopGlobalSqueezeDiscovery(): void {
     discoveryInterval = null;
   }
   discoveredSqueezePlayers.set([]);
-  // Wipe the disconnect list so a subsequent server restart lets every
-  // player become eligible for auto-pickup again.
-  userDisconnectedMacs.clear();
 }
 
 /**
- * Disconnect a Squeeze player and prevent it from being auto-reselected
- * by the discovery poll. Call this instead of manually clearing
- * activeSqueezePlayer + activeBackend — the MAC is recorded so the
- * next poll tick skips it.
+ * Disconnect a Squeeze player for real: the backend drops the TCP
+ * connection, removes the player entry, and clears its queued stream,
+ * so the device is actually cut off — not just hidden in the UI.
+ * Playback state is cleared locally as well.
  */
 export function disconnectSqueezePlayer(mac: string): void {
-  userDisconnectedMacs.add(mac);
   activeSqueezePlayer.set(null);
   activeBackend.set("none");
+  squeezeDisconnectPlayer(mac).catch((e) =>
+    console.warn("[SQUEEZE] Disconnect failed:", e),
+  );
 }
 
-async function pollSqueezePlayersOnce(): Promise<void> {
+/** Test seam: trigger a single discovery tick without waiting for the 1 s interval. */
+export async function pollSqueezePlayersOnce(): Promise<void> {
   try {
     const players = await squeezeGetPlayers();
     discoveredSqueezePlayers.set(players ?? []);
-    // Auto-connect: pick the first available player when no squeeze
-    // player is currently selected. Skip players whose MAC the user
-    // manually disconnected this server session — otherwise a Disconnect
-    // button press is undone by the very next 1 s tick.
-    if (players && players.length > 0 && !get(activeSqueezePlayer)) {
-      const candidate = players.find((p) => !userDisconnectedMacs.has(p.mac));
-      if (candidate) {
-        activeSqueezePlayer.set(candidate.mac);
-        activeBackend.set("squeeze");
-        activeRemoteDevice.set(null);
-      }
-    }
+    // No implicit selection: a player only becomes the active target
+    // when the user explicitly controls it (Control / Play Here).
   } catch {
     // Server may have been stopped mid-tick; ignore.
   }
@@ -357,16 +335,6 @@ export function activateSqueezeTarget(mac: string): void {
   activeSqueezePlayer.set(mac);
 }
 
-/** Start playback on a target and activate it only after success. */
-export async function playHereOnSqueeze(
-  mac: string,
-  trackIds: number[],
-  startIndex: number,
-): Promise<void> {
-  await squeezePlay(mac, trackIds, startIndex);
-  activateSqueezeTarget(mac);
-}
-
 /** Test-only reset seam for module-level polling resources. */
 export function resetSqueezePollingForTests(): void {
   invalidateSqueezePollOwnership();
@@ -378,202 +346,3 @@ export function resetSqueezePollingForTests(): void {
   lastForcedEndTrackId = null;
 }
 
-// ── Session persistence ───────────────────────────────────────────────────────
-//
-// When the user has been playing music through a Squeeze player and
-// then either closes the app or the Eversolo drops its TCP/HTTP
-// connection to Audion, we want the next time that same device comes
-// back online to pick up roughly where they left off — same queue,
-// same current track. Exact minute-precise position isn't required,
-// so we only persist track IDs + start index + shuffle/repeat.
-
-export interface SqueezeSession {
-  mac: string;
-  trackIds: number[];
-  startIndex: number;
-  shuffle: boolean;
-  repeat: "none" | "one" | "all";
-  wasPlaying: boolean;
-  savedAt: number;
-}
-
-const SESSION_KEY_PREFIX = "rlist_squeeze_session_";
-const SESSION_VERSION = 1;
-
-// MACs we've already auto-restored in this app session, so we don't
-// replay the same queue every time the discovery poll re-selects them.
-const restoredMacs = new Set<string>();
-// True for ~2s after a programmatic restore so the subscribers below
-// don't immediately overwrite the freshly-restored session with the
-// still-empty local queue.
-let suppressSaveUntil = 0;
-
-export function saveSqueezeSession(mac: string): void {
-  if (typeof window === "undefined") return;
-  if (Date.now() < suppressSaveUntil) return;
-  if (get(activeBackend) !== "squeeze") return;
-  if (get(activeSqueezePlayer) !== mac) return;
-
-  const q = get(queue);
-  const idx = get(queueIndex);
-  if (q.length === 0) return;
-  if (idx < 0 || idx >= q.length) return;
-
-  const session: SqueezeSession = {
-    mac,
-    trackIds: q.map((t) => t.id),
-    startIndex: idx,
-    shuffle: get(shuffle),
-    repeat: get(repeat),
-    wasPlaying: get(isPlaying),
-    savedAt: Date.now(),
-  };
-
-  try {
-    localStorage.setItem(
-      SESSION_KEY_PREFIX + mac,
-      JSON.stringify({ v: SESSION_VERSION, ...session }),
-    );
-  } catch (e) {
-    console.warn("[SQUEEZE] Failed to save session:", e);
-  }
-}
-
-export function loadSqueezeSession(mac: string): SqueezeSession | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(SESSION_KEY_PREFIX + mac);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (parsed?.v !== SESSION_VERSION || parsed.mac !== mac) return null;
-    return parsed as SqueezeSession;
-  } catch {
-    return null;
-  }
-}
-
-export function clearSqueezeSession(mac: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(SESSION_KEY_PREFIX + mac);
-}
-
-let sessionSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-function scheduleSessionSave(mac: string): void {
-  if (sessionSaveTimeout) clearTimeout(sessionSaveTimeout);
-  sessionSaveTimeout = setTimeout(() => {
-    sessionSaveTimeout = null;
-    saveSqueezeSession(mac);
-  }, 1500);
-}
-
-/**
- * Restore the saved session for `mac` if there is one. Safe to call
- * multiple times: subsequent calls for a MAC that's already been
- * restored in this app session are a no-op. Returns true if a
- * restore was actually attempted.
- */
-export async function restoreSqueezeSessionIfAny(mac: string): Promise<boolean> {
-  if (restoredMacs.has(mac)) return false;
-  const session = loadSqueezeSession(mac);
-  if (!session) return false;
-  if (!session.trackIds || session.trackIds.length === 0) return false;
-
-  const safeIndex = Math.min(
-    Math.max(0, session.startIndex),
-    session.trackIds.length - 1,
-  );
-
-  // Populate the local queue/index with the saved tracks so subsequent
-  // user actions (play next album, click a specific track, etc.) keep
-  // the right context — the squeeze player's internal queue is the
-  // source of truth for next/prev, but the local queue drives any
-  // playTrack call that goes through the squeeze branch.
-  // Also keeps the queue consistent for the auto-save subscribers.
-  let tracks: Track[] = [];
-  try {
-    const fetched = await Promise.all(
-      session.trackIds.map((id) => getTrackById(id).catch(() => null)),
-    );
-    tracks = fetched.filter((t): t is Track => t !== null);
-  } catch (e) {
-    console.warn("[SQUEEZE] Track fetch during restore failed:", e);
-  }
-  if (tracks.length === 0) {
-    // Library changed under us; nothing useful to restore.
-    clearSqueezeSession(mac);
-    return false;
-  }
-
-  // Suppress the auto-save subscribers for ~2s so they don't immediately
-  // clobber the session we just loaded.
-  suppressSaveUntil = Date.now() + 2000;
-
-  try {
-    queue.set(tracks);
-    queueIndex.set(safeIndex);
-    shuffle.set(session.shuffle);
-    repeat.set(session.repeat);
-    await squeezePlay(mac, session.trackIds, safeIndex);
-    restoredMacs.add(mac);
-    console.log(
-      `[SQUEEZE] Restored session for ${mac}: ${tracks.length} tracks, start=${safeIndex}, shuffle=${session.shuffle}`,
-    );
-    return true;
-  } catch (e) {
-    console.warn("[SQUEEZE] Failed to restore session:", e);
-    return false;
-  }
-}
-
-// Auto-save: subscribe to the player-state stores that drive the
-// squeeze session. Only fires when in squeeze mode and a player is
-// active; the save function itself double-checks before writing.
-//
-// IMPORTANT: these subscribers MUST NOT be set up at module-load time.
-// `squeeze.ts` and `player.ts` import each other, so during module
-// evaluation the bindings from player.ts are still undefined here —
-// calling .subscribe() on them would throw and brick the whole app
-// (black screen). Defer all of this to a runtime init function that
-// `+page.svelte` calls after both modules are fully loaded.
-let persistenceInitialized = false;
-
-export function initSqueezeSessionPersistence(): void {
-  if (persistenceInitialized) return;
-  persistenceInitialized = true;
-
-  currentTrack.subscribe(() => {
-    const mac = get(activeSqueezePlayer);
-    if (mac && get(activeBackend) === "squeeze") scheduleSessionSave(mac);
-  });
-  queue.subscribe(() => {
-    const mac = get(activeSqueezePlayer);
-    if (mac && get(activeBackend) === "squeeze") scheduleSessionSave(mac);
-  });
-  queueIndex.subscribe(() => {
-    const mac = get(activeSqueezePlayer);
-    if (mac && get(activeBackend) === "squeeze") scheduleSessionSave(mac);
-  });
-  isPlaying.subscribe(() => {
-    const mac = get(activeSqueezePlayer);
-    if (mac && get(activeBackend) === "squeeze") scheduleSessionSave(mac);
-  });
-
-  // Auto-restore: whenever a Squeeze player gets selected, try to bring
-  // back its last session. Skips MACs we've already handled this run.
-  activeSqueezePlayer.subscribe((mac) => {
-    if (mac) {
-      void restoreSqueezeSessionIfAny(mac);
-    }
-  });
-
-  // Final flush on tab/app close — localStorage is synchronous so this
-  // captures whatever the debounced timer hasn't fired yet.
-  if (typeof window !== "undefined") {
-    window.addEventListener("beforeunload", () => {
-      const mac = get(activeSqueezePlayer);
-      if (mac && get(activeBackend) === "squeeze") {
-        saveSqueezeSession(mac);
-      }
-    });
-  }
-}

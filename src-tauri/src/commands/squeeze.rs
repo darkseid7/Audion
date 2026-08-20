@@ -78,6 +78,26 @@ pub async fn squeeze_get_player_state(
     Ok(player.info())
 }
 
+/// Hard-disconnect a player: stop it, close its TCP connection, remove
+/// it from the player map, and clear its queued stream. Idempotent —
+/// disconnecting an already-gone player is a no-op success.
+#[tauri::command]
+pub async fn squeeze_disconnect_player(
+    mac: String,
+    state: State<'_, SqueezeState>,
+) -> Result<(), String> {
+    let mac_addr = parse_mac(&mac)?;
+    let server = state.0.lock().await;
+    crate::squeeze::server::disconnect_player(
+        &mac_addr,
+        &server.players,
+        &server.streaming,
+        &server.cometd,
+    )
+    .await;
+    Ok(())
+}
+
 // ── Playback control ────────────────────────────────────────────────────────
 
 #[tauri::command]

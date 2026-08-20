@@ -59,6 +59,12 @@ impl StreamingState {
     pub async fn clear(&self) {
         self.queue.lock().await.clear();
     }
+
+    /// Drop the queued entry for one player (used on explicit disconnect)
+    /// so any in-flight `/stream?player=<mac>` request 404s immediately.
+    pub async fn clear_player(&self, mac: &MacAddress) {
+        self.queue.lock().await.remove(&mac.to_string());
+    }
 }
 
 /// Combined state for the HTTP server (streaming + cometd + webui).

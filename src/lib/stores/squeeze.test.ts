@@ -1,21 +1,35 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 
-const { squeezeGetPlayerState, squeezePlay, getTrackById, recordTrackPlay } = vi.hoisted(() => ({
+const {
+  squeezeGetPlayerState,
+  squeezePlay,
+  getTrackById,
+  recordTrackPlay,
+  squeezeGetPlayers,
+  squeezeIsRunning,
+  squeezeStartServer,
+  squeezeDisconnectPlayer,
+} = vi.hoisted(() => ({
   squeezeGetPlayerState: vi.fn(),
   squeezePlay: vi.fn(),
   getTrackById: vi.fn(),
   recordTrackPlay: vi.fn(),
+  squeezeGetPlayers: vi.fn(),
+  squeezeIsRunning: vi.fn(),
+  squeezeStartServer: vi.fn(),
+  squeezeDisconnectPlayer: vi.fn(),
 }));
 
 vi.mock("$lib/api/tauri", () => ({
   squeezeGetPlayerState,
-  squeezeGetPlayers: vi.fn().mockResolvedValue([]),
+  squeezeGetPlayers,
   squeezeStop: vi.fn().mockResolvedValue(undefined),
-  squeezeStartServer: vi.fn().mockResolvedValue(undefined),
-  squeezeIsRunning: vi.fn().mockResolvedValue(true),
+  squeezeStartServer,
+  squeezeIsRunning,
+  squeezeDisconnectPlayer,
   squeezePlay,
-  getTrackCoverSrc: (track: any) => track.cover_url ?? "",
+  getTrackCoverSrc: (track: { cover_url?: string }) => track.cover_url ?? "",
   getTrackById,
 }));
 
@@ -89,9 +103,12 @@ vi.mock("$lib/stores/activity", () => ({ recordTrackPlay }));
 import {
   activeSqueezePlayer,
   activateSqueezeTarget,
-  playHereOnSqueeze,
+  disconnectSqueezePlayer,
+  pollSqueezePlayersOnce,
   resetSqueezePollingForTests,
   squeezePlayerState,
+  startGlobalSqueezeDiscovery,
+  stopGlobalSqueezeDiscovery,
 } from "./squeeze";
 
 const info = (mac: string, id: number) => ({
@@ -127,6 +144,12 @@ describe("Squeeze poll ownership", () => {
     duration.set(0);
     squeezeGetPlayerState.mockReset();
     getTrackById.mockReset();
+    squeezeGetPlayers.mockReset();
+    squeezeIsRunning.mockReset();
+    squeezeStartServer.mockReset();
+    squeezeDisconnectPlayer.mockReset();
+    squeezeGetPlayers.mockResolvedValue([]);
+    squeezeIsRunning.mockResolvedValue(true);
   });
 
   it("discards a poll after switching players, including A -> B -> A reuse", async () => {
@@ -168,29 +191,76 @@ describe("Squeeze poll ownership", () => {
     expect(get(currentTrack)).toBeNull();
   });
 
-  it("activates Play Here only after squeezePlay succeeds", async () => {
-    activeSqueezePlayer.set("old");
-    activeBackend.set("remote");
-    activeRemoteDevice.set("phone");
-    squeezePlay.mockResolvedValueOnce(undefined);
+});
 
-    await playHereOnSqueeze("new", [1], 0);
-
-    expect(get(activeSqueezePlayer)).toBe("new");
-    expect(get(activeBackend)).toBe("squeeze");
-    expect(get(activeRemoteDevice)).toBeNull();
+describe("Squeeze connection lifecycle", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    resetSqueezePollingForTests();
+    activeSqueezePlayer.set(null);
+    activeBackend.set("none");
+    squeezePlayerState.set(null);
+    currentTrack.set(null);
+    isPlaying.set(false);
+    currentTime.set(0);
+    duration.set(0);
+    squeezeGetPlayerState.mockReset();
+    getTrackById.mockReset();
+    squeezeGetPlayers.mockReset();
+    squeezeIsRunning.mockReset();
+    squeezeStartServer.mockReset();
+    squeezeDisconnectPlayer.mockReset();
+    squeezeGetPlayers.mockResolvedValue([]);
+    squeezeIsRunning.mockResolvedValue(true);
+    squeezeStartServer.mockResolvedValue(undefined);
+    squeezeDisconnectPlayer.mockResolvedValue(undefined);
   });
 
-  it("preserves activation when Play Here fails", async () => {
-    activeSqueezePlayer.set("old");
-    activeBackend.set("remote");
-    activeRemoteDevice.set("phone");
-    squeezePlay.mockRejectedValueOnce(new Error("offline"));
+  afterEach(() => {
+    stopGlobalSqueezeDiscovery();
+  });
 
-    await expect(playHereOnSqueeze("new", [1], 0)).rejects.toThrow("offline");
+  it("discovery poll never boots the server — boot and panel own the lifecycle", async () => {
+    // The server lifecycle belongs to app boot (+page.svelte) and the
+    // Connect panel toggle. The discovery poll must not boot it on its
+    // own, otherwise any stray poll trigger silently resurrects the
+    // server and the Eversolo auto-reconnects to it.
+    squeezeIsRunning.mockResolvedValue(false);
+    await startGlobalSqueezeDiscovery();
+    expect(squeezeStartServer).not.toHaveBeenCalled();
+  });
 
-    expect(get(activeSqueezePlayer)).toBe("old");
-    expect(get(activeBackend)).toBe("remote");
-    expect(get(activeRemoteDevice)).toBe("phone");
+  it("does not auto-select a discovered player — connection must be explicit", async () => {
+    // A device that reconnected to the (user-started) server must not
+    // silently become the active control target.
+    squeezeGetPlayers.mockResolvedValue([info("AA:BB:CC:DD:EE:FF", 1)]);
+    await startGlobalSqueezeDiscovery();
+    expect(get(activeSqueezePlayer)).toBeNull();
+    expect(get(activeBackend)).not.toBe("squeeze");
+  });
+
+  it("disconnect tells the backend to drop the player", async () => {
+    const mac = "AA:BB:CC:DD:EE:FF";
+    squeezeGetPlayerState.mockResolvedValue(info(mac, 1));
+    activeSqueezePlayer.set(mac);
+    activeBackend.set("squeeze");
+
+    disconnectSqueezePlayer(mac);
+
+    expect(squeezeDisconnectPlayer).toHaveBeenCalledWith(mac);
+    expect(get(activeSqueezePlayer)).toBeNull();
+    expect(get(activeBackend)).toBe("none");
+  });
+
+  it("does not re-select a player the user disconnected", async () => {
+    const mac = "AA:BB:CC:DD:EE:FF";
+    squeezeGetPlayers.mockResolvedValue([info(mac, 1)]);
+    await startGlobalSqueezeDiscovery();
+    disconnectSqueezePlayer(mac);
+    // A later discovery tick (device re-announced via the UDP beacon)
+    // must not bring the disconnected device back as the active target.
+    await pollSqueezePlayersOnce();
+    expect(get(activeSqueezePlayer)).toBeNull();
+    expect(get(activeBackend)).not.toBe("squeeze");
   });
 });

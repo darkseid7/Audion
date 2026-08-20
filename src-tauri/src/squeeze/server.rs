@@ -608,3 +608,147 @@ pub async fn control_previous(
         handle_butn_start_track(mac, players, streaming).await;
     }
 }
+
+/// Explicitly disconnect a player: tell it to stop (best effort), drop
+/// its TCP writer — which closes the SlimProto connection — remove the
+/// player entry, and clear its queued stream so any in-flight
+/// `/stream?player=<mac>` request 404s immediately.
+///
+/// Unlike the implicit TCP-cleanup path, this removes the entry even
+/// when a CometD session is bound: the user asked for a hard disconnect.
+pub async fn disconnect_player(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+    cometd: &CometdState,
+) {
+    {
+        let mut map = players.lock().await;
+        if let Some(player) = map.get_mut(mac) {
+            player.display_track = None;
+            player.prefetched_generation = None;
+            player.suppress_track_finished = false;
+            // Best effort: tell the hardware to stop before we cut the wire.
+            let _ = player.stop().await;
+            let _ = player.flush().await;
+            player.state = PlayerState::Stopped;
+        }
+    }
+    // Dropping the writer (map removal) closes the TCP connection.
+    let mut map = players.lock().await;
+    map.remove(mac);
+    drop(map);
+
+    streaming.clear_player(mac).await;
+    cometd.notify_player_status(&mac.to_string()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::squeeze::player::new_player_map;
+    use crate::squeeze::streaming::StreamingState;
+    use std::sync::atomic::AtomicBool;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    /// Build a minimal client→server HELO frame: [tag][len u32 BE][payload].
+    /// Payload: device_id(1) + revision(1) + mac(6) + uuid(24) + wlan(4),
+    /// then the capabilities string at offset 36 (matches `parse_helo`).
+    fn helo_frame(mac: [u8; 6]) -> Vec<u8> {
+        let mut payload = vec![0u8; 60];
+        payload[0] = 1; // device_id
+        payload[1] = 1; // revision
+        payload[2..8].copy_from_slice(&mac);
+        let caps = b"ModelName:TestPlayer,";
+        payload[36..36 + caps.len()].copy_from_slice(caps);
+        let mut frame = b"HELO".to_vec();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    /// Register a fake SlimProto player over a real TCP connection, then
+    /// verify that `disconnect_player` removes the entry, clears the
+    /// queued stream, and actually closes the connection (the user-visible
+    /// "disconnect and that's it" behavior).
+    #[tokio::test]
+    async fn disconnect_player_drops_entry_stream_and_connection() {
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let cometd = CometdState::new(players.clone(), streaming.clone());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let listener = crate::squeeze::bind_tcp_reuse("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = start_slimproto_server_with_listener(
+            listener,
+            players.clone(),
+            streaming.clone(),
+            cometd.clone(),
+            shutdown.clone(),
+        );
+
+        // Fake player connects and sends HELO.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mac = [0x80, 0x0a, 0x80, 0x5e, 0xd6, 0xa5];
+        stream.write_all(&helo_frame(mac)).await.unwrap();
+
+        // Wait for registration (server sends handshake right after HELO).
+        let mac_addr = MacAddress(mac);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if players.lock().await.contains_key(&mac_addr) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "player never registered"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Queue a stream entry, as a playing track would leave behind.
+        streaming
+            .queue_file(&mac_addr, PathBuf::from("C:\\fake\\track.mp3"), 1, 0)
+            .await;
+
+        // Drain the handshake frames so we can assert a clean EOF later.
+        let mut tmp = [0u8; 512];
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), stream.read(&mut tmp)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(_)) => {}
+            }
+        }
+
+        disconnect_player(&mac_addr, &players, &streaming, &cometd).await;
+
+        // Player entry and stream entry are gone.
+        assert!(!players.lock().await.contains_key(&mac_addr));
+        assert!(streaming.get_entry(&mac_addr.to_string()).await.is_none());
+
+        // The TCP connection is actually closed: read until EOF (control
+        // frames sent right before the close may precede the FIN).
+        let mut saw_eof = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => {
+                    saw_eof = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        assert!(saw_eof, "TCP connection remained open after disconnect");
+
+        shutdown.store(true, Ordering::Relaxed);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+}

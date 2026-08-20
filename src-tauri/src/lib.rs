@@ -703,6 +703,7 @@ pub fn run() {
                     commands::squeeze::squeeze_is_running,
                     commands::squeeze::squeeze_get_players,
                     commands::squeeze::squeeze_get_player_state,
+                    commands::squeeze::squeeze_disconnect_player,
                     commands::squeeze::squeeze_play,
                     commands::squeeze::squeeze_pause,
                     commands::squeeze::squeeze_resume,

@@ -35,7 +35,6 @@
     stopGlobalSqueezeDiscovery,
     disconnectSqueezePlayer,
     activateSqueezeTarget,
-    playHereOnSqueeze,
   } from "$lib/stores/squeeze";
 
   const dispatch = createEventDispatcher();
@@ -80,30 +79,23 @@
     squeezeStarting = false;
   }
 
+  /** Clicking a device card makes it the output target (Spotify-style). */
   function selectSqueezePlayer(player: SqueezePlayerInfo) {
-    if ($activeSqueezePlayer === player.mac) {
-      disconnectSqueezePlayer(player.mac);
-    } else {
-      activateSqueezeTarget(player.mac);
-    }
+    if ($activeSqueezePlayer === player.mac) return; // already the target
+    activateSqueezeTarget(player.mac);
   }
 
-  async function playOnSqueezePlayer(mac: string) {
-    const $library = get(libraryTracks);
-    const $current = get(currentTrack);
-    if (!$current) return;
-
-    const trackIds = $library
-      .filter((t: any) => t.path)
-      .map((t: any) => t.id);
-
-    const startIndex = trackIds.indexOf($current.id);
-    if (startIndex === -1) return;
-
-    try {
-      await playHereOnSqueeze(mac, trackIds, startIndex);
-    } catch (e) {
-      console.error("Squeeze play error:", e);
+  /**
+   * Switch the output back to this device. If a Squeeze player is active
+   * this really disconnects it (stop + close the connection); if a cloud
+   * remote is being controlled, that session is cleared.
+   */
+  function selectThisDevice() {
+    if ($activeBackend === "squeeze" && $activeSqueezePlayer) {
+      disconnectSqueezePlayer($activeSqueezePlayer);
+    } else if ($activeBackend === "remote") {
+      activeBackend.set("none");
+      activeRemoteDevice.set(null);
     }
   }
 
@@ -209,7 +201,20 @@
     </header>
 
     <div class="session-section">
-      <div class="status-card" class:remote={$activeBackend === "remote" || $activeBackend === "squeeze"}>
+      <div
+        class="status-card clickable"
+        class:remote={$activeBackend === "remote" || $activeBackend === "squeeze"}
+        role="button"
+        tabindex="0"
+        title="Play on this device"
+        on:click={selectThisDevice}
+        on:keydown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            selectThisDevice();
+          }
+        }}
+      >
         <div class="device-icon-glow">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
             <path
@@ -262,8 +267,17 @@
           {:else}
             {#each squeezePlayers as player (player.mac)}
               <div
-                class="device-card"
+                class="device-card clickable"
                 class:active={$activeSqueezePlayer === player.mac}
+                role="button"
+                tabindex="0"
+                on:click={() => selectSqueezePlayer(player)}
+                on:keydown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    selectSqueezePlayer(player);
+                  }
+                }}
                 in:fly={{ y: 20, duration: 300 }}
               >
                 <div class="card-main">
@@ -283,22 +297,6 @@
                       <span class="idle-text">{player.state === 'Stopped' ? 'Ready' : player.state}</span>
                     {/if}
                   </div>
-                </div>
-
-                <div class="card-actions">
-                  <button
-                    class="btn secondary"
-                    class:active={$activeSqueezePlayer === player.mac}
-                    on:click={() => selectSqueezePlayer(player)}
-                  >
-                    {$activeSqueezePlayer === player.mac ? 'Disconnect' : 'Control'}
-                  </button>
-                  <button
-                    class="btn primary"
-                    on:click={() => playOnSqueezePlayer(player.mac)}
-                  >
-                    Play Here
-                  </button>
                 </div>
               </div>
             {/each}
@@ -632,6 +630,25 @@
   .status-card.remote {
     background: color-mix(in srgb, var(--accent-primary), transparent 92%);
     border-color: color-mix(in srgb, var(--accent-primary), transparent 80%);
+  }
+
+  /* Clickable output selector cards (This device / Squeeze players) */
+  .status-card.clickable,
+  .device-card.clickable {
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  .status-card.clickable:hover,
+  .device-card.clickable:not(.active):hover {
+    border-color: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .status-card.clickable:focus-visible,
+  .device-card.clickable:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
   }
 
   .device-icon-glow {
