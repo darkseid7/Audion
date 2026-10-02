@@ -104,6 +104,7 @@ import {
   activeSqueezePlayer,
   activateSqueezeTarget,
   disconnectSqueezePlayer,
+  discoveredSqueezePlayers,
   pollSqueezePlayersOnce,
   resetSqueezePollingForTests,
   squeezePlayerState,
@@ -218,6 +219,140 @@ describe("Squeeze connection lifecycle", () => {
 
   afterEach(() => {
     stopGlobalSqueezeDiscovery();
+    resetSqueezePollingForTests();
+    activeSqueezePlayer.set(null);
+    vi.useRealTimers();
+  });
+
+  it("does not restart discovery after stop while the server check is pending", async () => {
+    vi.useFakeTimers();
+    const running = deferred<boolean>();
+    squeezeIsRunning.mockReturnValueOnce(running.promise);
+    const starting = startGlobalSqueezeDiscovery();
+
+    stopGlobalSqueezeDiscovery();
+    running.resolve(true);
+    await starting;
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(get(discoveredSqueezePlayers)).toEqual([]);
+    expect(squeezeGetPlayers).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not publish or resume discovery after stop during its first player request", async () => {
+    vi.useFakeTimers();
+    const players = deferred<any[]>();
+    squeezeGetPlayers.mockReturnValueOnce(players.promise);
+    const starting = startGlobalSqueezeDiscovery();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    stopGlobalSqueezeDiscovery();
+    players.resolve([info("A", 1)]);
+    await starting;
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(get(discoveredSqueezePlayers)).toEqual([]);
+    expect(squeezeGetPlayers).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("discards a pending discovery tick after stopping", async () => {
+    vi.useFakeTimers();
+    await startGlobalSqueezeDiscovery();
+    const players = deferred<any[]>();
+    squeezeGetPlayers.mockReturnValueOnce(players.promise);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    stopGlobalSqueezeDiscovery();
+    players.resolve([info("A", 1)]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(get(discoveredSqueezePlayers)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("discards an old discovery tick after stopping and restarting", async () => {
+    vi.useFakeTimers();
+    await startGlobalSqueezeDiscovery();
+    const oldPlayers = deferred<any[]>();
+    squeezeGetPlayers.mockReturnValueOnce(oldPlayers.promise);
+    await vi.advanceTimersByTimeAsync(1000);
+    stopGlobalSqueezeDiscovery();
+
+    squeezeGetPlayers.mockResolvedValue([info("B", 2)]);
+    await startGlobalSqueezeDiscovery();
+    oldPlayers.resolve([info("A", 1)]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(get(discoveredSqueezePlayers).map((player) => player.mac)).toEqual(["B"]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("allows a fresh discovery start while a cancelled start is still pending", async () => {
+    vi.useFakeTimers();
+    const oldRunning = deferred<boolean>();
+    squeezeIsRunning.mockReturnValueOnce(oldRunning.promise);
+    const oldStarting = startGlobalSqueezeDiscovery();
+    stopGlobalSqueezeDiscovery();
+
+    squeezeGetPlayers.mockResolvedValue([info("B", 2)]);
+    await startGlobalSqueezeDiscovery();
+    const freshPlayers = get(discoveredSqueezePlayers).map((player) => player.mac);
+
+    oldRunning.resolve(true);
+    await oldStarting;
+    expect(freshPlayers).toEqual(["B"]);
+    expect(squeezeGetPlayers).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("clears playback state when disconnecting the active Squeeze target", () => {
+    activeBackend.set("squeeze");
+    activeSqueezePlayer.set("A");
+    currentTrack.set({ id: 1, title: "Track" });
+    isPlaying.set(true);
+    currentTime.set(12);
+    duration.set(100);
+
+    disconnectSqueezePlayer("A");
+
+    expect(get(isPlaying)).toBe(false);
+    expect(get(currentTrack)).toBeNull();
+    expect(get(currentTime)).toBe(0);
+    expect(get(duration)).toBe(0);
+  });
+
+  it("preserves current playback when disconnecting a different Squeeze player", () => {
+    activeBackend.set("squeeze");
+    activeSqueezePlayer.set("A");
+    currentTrack.set({ id: 1, title: "Track" });
+    isPlaying.set(true);
+
+    disconnectSqueezePlayer("B");
+
+    expect(get(activeSqueezePlayer)).toBe("A");
+    expect(get(activeBackend)).toBe("squeeze");
+    expect(get(isPlaying)).toBe(true);
+    expect(get(currentTrack)?.id).toBe(1);
+    expect(squeezeDisconnectPlayer).toHaveBeenCalledWith("B");
+  });
+
+  it("preserves cloud playback when disconnecting the previous Squeeze target", () => {
+    activeSqueezePlayer.set("A");
+    activeBackend.set("remote");
+    currentTrack.set({ id: 2, title: "Cloud track" });
+    isPlaying.set(true);
+
+    disconnectSqueezePlayer("A");
+
+    expect(get(activeSqueezePlayer)).toBeNull();
+    expect(get(activeBackend)).toBe("remote");
+    expect(get(isPlaying)).toBe(true);
+    expect(get(currentTrack)?.id).toBe(2);
   });
 
   it("discovery poll never boots the server — boot and panel own the lifecycle", async () => {

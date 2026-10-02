@@ -161,7 +161,7 @@ pub async fn cometd_handler(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let body_str = String::from_utf8_lossy(&body);
-    tracing::info!("Cometd: raw request ({} bytes): {}", body.len(), &body_str[..body_str.len().min(500)]);
+    tracing::info!("Cometd: raw request ({} bytes): {}", body.len(), log_preview(&body_str, 500));
 
     // Try parsing as array first, then as single object
     let messages: Vec<BayeuxRequest> = match serde_json::from_slice(&body) {
@@ -253,7 +253,7 @@ pub async fn cometd_handler(
 /// - Cache-Control/Pragma/Expires headers (LMS compat)
 fn build_cometd_response(responses: &[serde_json::Value]) -> axum::response::Response {
     let json = serde_json::to_string(responses).unwrap_or_else(|_| "[]".to_string());
-    tracing::info!("Cometd: response ({} bytes): {}", json.len(), &json[..json.len().min(300)]);
+    tracing::info!("Cometd: response ({} bytes): {}", json.len(), log_preview(&json, 300));
     axum::http::Response::builder()
         .header("Content-Type", "application/json")
         .header("Connection", "keep-alive")
@@ -313,7 +313,8 @@ async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
     }
     {
         let mut mac_map = state.mac_to_client.lock().await;
-        mac_map.insert(mac_str.clone(), client_id.clone());
+        // TCP and command routing use MacAddress's canonical lowercase form.
+        mac_map.insert(mac.to_string(), client_id.clone());
     }
 
     // Register in the player map (so the frontend sees this player)
@@ -975,27 +976,30 @@ async fn handle_disconnect(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRe
         // Wake up any pending long-poll
         client.notify.notify_one();
 
-        // Remove MAC mapping
+        // A replacement handshake may already own this MAC. Keep the mapping
+        // lock through player cleanup so it cannot change owners mid-removal.
         let mut mac_map = state.mac_to_client.lock().await;
-        mac_map.remove(&client.mac.to_string());
-        drop(mac_map);
+        let mac_str = client.mac.to_string();
+        if mac_map.get(&mac_str) == Some(&client_id) {
+            mac_map.remove(&mac_str);
 
-        // If this was a CometD-only registration (no TCP writer), drop
-        // the player entry too. Otherwise leave it for the TCP path to
-        // manage — when both transports share the same MAC the TCP
-        // disconnect handler will do the cleanup.
-        let mut players = state.players.lock().await;
-        let is_cometd_only = players
-            .get(&client.mac)
-            .map(|p| !p.has_tcp_writer())
-            .unwrap_or(false);
-        if is_cometd_only {
-            if let Some(p) = players.remove(&client.mac) {
-                tracing::info!(
-                    "Cometd: removed CometD-only player {} (\"{}\") on disconnect",
-                    client.mac,
-                    p.name
-                );
+            // If this was a CometD-only registration (no TCP writer), drop
+            // the player entry too. Otherwise leave it for the TCP path to
+            // manage — when both transports share the same MAC the TCP
+            // disconnect handler will do the cleanup.
+            let mut players = state.players.lock().await;
+            let is_cometd_only = players
+                .get(&client.mac)
+                .map(|p| !p.has_tcp_writer())
+                .unwrap_or(false);
+            if is_cometd_only {
+                if let Some(p) = players.remove(&client.mac) {
+                    tracing::info!(
+                        "Cometd: removed CometD-only player {} (\"{}\") on disconnect",
+                        client.mac,
+                        p.name
+                    );
+                }
             }
         }
     }
@@ -1380,7 +1384,7 @@ async fn cometd_seek(state: &CometdState, player_id: &str, mac: &MacAddress, pos
     let gen = {
         let mut players = state.players.lock().await;
         if let Some(player) = players.get_mut(mac) {
-            player.generation += 1;
+            player.advance_stream_generation();
             player.seek_offset_ms = (position_seconds * 1000.0) as u32;
             player.generation
         } else {
@@ -1416,7 +1420,7 @@ async fn cometd_start_current_track(state: &CometdState, player_id: &str, mac: &
     let gen = {
         let mut players = state.players.lock().await;
         if let Some(player) = players.get_mut(mac) {
-            player.generation += 1;
+            player.advance_stream_generation();
             player.generation
         } else {
             return;
@@ -1440,6 +1444,15 @@ async fn cometd_start_current_track(state: &CometdState, player_id: &str, mac: &
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────
+
+/// Keep log previews byte-bounded without splitting a UTF-8 character.
+fn log_preview(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 pub fn parse_mac_address(mac_str: &str) -> MacAddress {
     let parts: Vec<&str> = mac_str.split(':').collect();
@@ -1493,37 +1506,234 @@ pub async fn run_watchdog(state: CometdState, shutdown: Arc<AtomicBool>) {
             continue;
         }
 
-        let mut clients = state.clients.lock().await;
-        let mut mac_map = state.mac_to_client.lock().await;
-        let mut players = state.players.lock().await;
+        evict_stale_clients(&state, stale, now).await;
+    }
+    tracing::info!("Cometd watchdog stopped");
+}
 
-        for (client_id, mac) in stale {
-            if let Some(client) = clients.remove(&client_id) {
-                mac_map.remove(&client.mac.to_string());
-                // Only drop the player entry if it's a CometD-only
-                // registration (no TCP writer). If TCP is also active
-                // for this MAC, the TCP path owns the player lifecycle.
-                let is_cometd_only = players
-                    .get(&mac)
-                    .map(|p| !p.has_tcp_writer())
-                    .unwrap_or(false);
-                if is_cometd_only {
-                    if let Some(p) = players.remove(&mac) {
-                        tracing::info!(
-                            "Cometd watchdog: evicted stale player {} (\"{}\")",
-                            mac,
-                            p.name
-                        );
-                    }
-                } else {
+async fn evict_stale_clients(state: &CometdState, stale: Vec<(String, MacAddress)>, now: Instant) {
+    let mut clients = state.clients.lock().await;
+    let mut mac_map = state.mac_to_client.lock().await;
+    let mut players = state.players.lock().await;
+
+    for (client_id, mac) in stale {
+        // A heartbeat may have refreshed this client after the snapshot.
+        if !clients.get(&client_id).is_some_and(|client| {
+            now.saturating_duration_since(client.last_seen) > WATCHDOG_TIMEOUT
+        }) {
+            continue;
+        }
+
+        if let Some(client) = clients.remove(&client_id) {
+            let mac_str = client.mac.to_string();
+            if mac_map.get(&mac_str) != Some(&client_id) {
+                continue;
+            }
+            mac_map.remove(&mac_str);
+            // Only drop the player entry if it's a CometD-only
+            // registration (no TCP writer). If TCP is also active
+            // for this MAC, the TCP path owns the player lifecycle.
+            let is_cometd_only = players
+                .get(&mac)
+                .map(|p| !p.has_tcp_writer())
+                .unwrap_or(false);
+            if is_cometd_only {
+                if let Some(p) = players.remove(&mac) {
                     tracing::info!(
-                        "Cometd watchdog: evicted stale client {} for {}, kept player (has TCP writer)",
-                        client_id,
-                        mac
+                        "Cometd watchdog: evicted stale player {} (\"{}\")",
+                        mac,
+                        p.name
                     );
                 }
+            } else {
+                tracing::info!(
+                    "Cometd watchdog: evicted stale client {} for {}, kept player (has TCP writer)",
+                    client_id,
+                    mac
+                );
             }
         }
     }
-    tracing::info!("Cometd watchdog stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::squeeze::player::new_player_map;
+    use axum::body::{to_bytes, Bytes};
+    use std::time::Duration;
+
+    const MAC: &str = "ab:cd:ef:01:02:03";
+
+    fn test_state() -> CometdState {
+        CometdState::new(new_player_map(), StreamingState::new())
+    }
+
+    async fn request(state: &CometdState, message: serde_json::Value) -> Vec<serde_json::Value> {
+        let response = cometd_handler(
+            AxumState(state.clone()), Bytes::from(serde_json::to_vec(&message).unwrap()),
+        ).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    async fn handshake(state: &CometdState, name: &str) -> String {
+        let response = request(state, serde_json::json!({
+            "channel": "/meta/handshake", "ext": {"mac": MAC, "name": name},
+        })).await;
+        response[0]["clientId"].as_str().unwrap().to_string()
+    }
+
+    async fn disconnect(state: &CometdState, client_id: &str) {
+        let response = request(state, serde_json::json!({
+            "channel": "/meta/disconnect", "clientId": client_id,
+        })).await;
+        assert_eq!(response[0]["successful"], true);
+    }
+
+    async fn attach_tcp_writer(state: &CometdState) -> tokio::net::TcpStream {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        state.players.lock().await.get_mut(&parse_mac_address(MAC)).unwrap()
+            .set_writer(socket.into_split().1, std::net::Ipv4Addr::LOCALHOST);
+        peer
+    }
+
+    async fn make_stale(state: &CometdState, client_id: &str) {
+        state.clients.lock().await.get_mut(client_id).unwrap().last_seen =
+            Instant::now() - WATCHDOG_TIMEOUT - Duration::from_secs(1);
+    }
+
+    #[tokio::test]
+    async fn request_logging_accepts_multibyte_text_at_truncation_boundary() {
+        let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO)
+            .with_test_writer().finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let state = test_state();
+        let prefix = r#"{"channel":"/meta/handshake","ext":{"mac":"ab:cd:ef:01:02:03","name":""#;
+        let body = format!("{}{}한\"}}}}", prefix, "a".repeat(499 - prefix.len()));
+        assert!(!body.is_char_boundary(500));
+        let response = cometd_handler(AxumState(state.clone()), Bytes::from(body)).await;
+        let messages: Vec<serde_json::Value> = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(messages[0]["successful"], true);
+        assert!(state.players.lock().await.contains_key(&parse_mac_address(MAC)));
+    }
+
+    #[tokio::test]
+    async fn response_logging_accepts_multibyte_text_at_truncation_boundary() {
+        let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO)
+            .with_test_writer().finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // The response's channel starts after the 13-byte [{"channel":" prefix.
+        let channel = format!("{}한", "x".repeat(286));
+        let response = request(&test_state(), serde_json::json!({"channel": channel})).await;
+        assert_eq!(response[0]["channel"], channel);
+        assert_eq!(response[0]["successful"], true);
+    }
+
+    #[tokio::test]
+    async fn superseded_disconnect_preserves_replacement_player_and_command_routing() {
+        let state = test_state();
+        let old = handshake(&state, "Old session").await;
+        let current = handshake(&state, "Replacement").await;
+        disconnect(&state, &old).await;
+        assert!(!state.clients.lock().await.contains_key(&old));
+        assert!(state.clients.lock().await.contains_key(&current));
+        assert_eq!(state.mac_to_client.lock().await.get(MAC), Some(&current));
+        assert_eq!(state.players.lock().await.get(&parse_mac_address(MAC)).unwrap().name, "Replacement");
+        let command = serde_json::json!({"channel": "/player/control", "data": "play"});
+        state.push_to_player(MAC, command.clone()).await;
+        let response = request(&state, serde_json::json!({
+            "channel": "/meta/connect", "clientId": current, "advice": {"timeout": 0},
+        })).await;
+        assert_eq!(response[0], command);
+    }
+
+    #[tokio::test]
+    async fn uppercase_handshake_routes_commands_and_disconnects_by_canonical_mac() {
+        let state = test_state();
+        let response = request(&state, serde_json::json!({
+            "channel": "/meta/handshake", "ext": {"mac": MAC.to_ascii_uppercase(), "name": "Current"},
+        })).await;
+        let client_id = response[0]["clientId"].as_str().unwrap().to_string();
+        assert_eq!(state.connected_macs().await, vec![MAC.to_string()]);
+        let command = serde_json::json!({"channel": "/player/control", "data": "play"});
+        state.push_to_player(MAC, command.clone()).await;
+        let response = request(&state, serde_json::json!({
+            "channel": "/meta/connect", "clientId": client_id, "advice": {"timeout": 0},
+        })).await;
+        assert_eq!(response[0], command);
+        disconnect(&state, &client_id).await;
+        assert!(state.mac_to_client.lock().await.is_empty());
+        assert!(!state.players.lock().await.contains_key(&parse_mac_address(MAC)));
+    }
+
+    #[tokio::test]
+    async fn current_disconnect_removes_cometd_only_player() {
+        let state = test_state();
+        let client_id = handshake(&state, "Current").await;
+        disconnect(&state, &client_id).await;
+        assert!(!state.clients.lock().await.contains_key(&client_id));
+        assert!(!state.mac_to_client.lock().await.contains_key(MAC));
+        assert!(!state.players.lock().await.contains_key(&parse_mac_address(MAC)));
+    }
+
+    #[tokio::test]
+    async fn current_disconnect_preserves_tcp_player() {
+        let state = test_state();
+        let client_id = handshake(&state, "Current").await;
+        let _peer = attach_tcp_writer(&state).await;
+        disconnect(&state, &client_id).await;
+        assert!(!state.mac_to_client.lock().await.contains_key(MAC));
+        assert!(state.players.lock().await.get(&parse_mac_address(MAC)).unwrap().has_tcp_writer());
+    }
+
+    #[tokio::test]
+    async fn watchdog_preserves_replacement_for_superseded_client() {
+        let state = test_state();
+        let old = handshake(&state, "Old session").await;
+        let current = handshake(&state, "Replacement").await;
+        make_stale(&state, &old).await;
+        evict_stale_clients(&state, vec![(old.clone(), parse_mac_address(MAC))], Instant::now()).await;
+        assert!(!state.clients.lock().await.contains_key(&old));
+        assert!(state.clients.lock().await.contains_key(&current));
+        assert_eq!(state.mac_to_client.lock().await.get(MAC), Some(&current));
+        assert!(state.players.lock().await.contains_key(&parse_mac_address(MAC)));
+    }
+
+    #[tokio::test]
+    async fn watchdog_current_eviction_preserves_tcp_coexistence() {
+        for with_tcp in [false, true] {
+            let state = test_state();
+            let client_id = handshake(&state, "Current").await;
+            let _peer = if with_tcp { Some(attach_tcp_writer(&state).await) } else { None };
+            make_stale(&state, &client_id).await;
+            evict_stale_clients(&state, vec![(client_id.clone(), parse_mac_address(MAC))], Instant::now()).await;
+            assert!(!state.clients.lock().await.contains_key(&client_id));
+            assert!(!state.mac_to_client.lock().await.contains_key(MAC));
+            assert_eq!(state.players.lock().await.contains_key(&parse_mac_address(MAC)), with_tcp);
+        }
+    }
+
+    #[tokio::test]
+    async fn watchdog_rechecks_liveness_after_stale_snapshot() {
+        let state = test_state();
+        let client_id = handshake(&state, "Current").await;
+        make_stale(&state, &client_id).await;
+        let snapshot_time = Instant::now();
+        let stale = vec![(client_id.clone(), parse_mac_address(MAC))];
+        // Exercise a real heartbeat between the watchdog's snapshot and eviction.
+        let response = request(&state, serde_json::json!({
+            "channel": "/meta/connect", "clientId": client_id, "advice": {"timeout": 0},
+        })).await;
+        assert_eq!(response[0]["successful"], true);
+        evict_stale_clients(&state, stale, snapshot_time).await;
+        assert!(state.clients.lock().await.contains_key(&client_id),
+            "watchdog evicted a client refreshed after its stale snapshot");
+        assert_eq!(state.mac_to_client.lock().await.get(MAC), Some(&client_id));
+        assert!(state.players.lock().await.contains_key(&parse_mac_address(MAC)));
+    }
 }

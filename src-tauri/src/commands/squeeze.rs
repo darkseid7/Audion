@@ -169,7 +169,7 @@ pub async fn squeeze_play(
     let gen = {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.generation += 1;
+        player.advance_stream_generation();
         player.generation
     };
 
@@ -303,7 +303,7 @@ pub async fn squeeze_next(mac: String, state: State<'_, SqueezeState>) -> Result
     let gen = {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.generation += 1;
+        player.advance_stream_generation();
         player.generation
     };
 
@@ -366,7 +366,7 @@ pub async fn squeeze_previous(mac: String, state: State<'_, SqueezeState>) -> Re
     let gen = {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.generation += 1;
+        player.advance_stream_generation();
         player.generation
     };
 
@@ -429,7 +429,7 @@ pub async fn squeeze_seek(
     let gen = {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.generation += 1;
+        player.advance_stream_generation();
         player.seek_offset_ms = (position_seconds * 1000.0) as u32;
         player.generation
     };

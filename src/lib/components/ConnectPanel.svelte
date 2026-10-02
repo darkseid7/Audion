@@ -34,6 +34,7 @@
     startGlobalSqueezeDiscovery,
     stopGlobalSqueezeDiscovery,
     disconnectSqueezePlayer,
+    clearSqueezeTarget,
     activateSqueezeTarget,
   } from "$lib/stores/squeeze";
 
@@ -64,10 +65,7 @@
         await squeezeStopServer();
         squeezeRunning = false;
         stopGlobalSqueezeDiscovery();
-        if ($activeSqueezePlayer) {
-          activeSqueezePlayer.set(null);
-          activeBackend.set("none");
-        }
+        clearSqueezeTarget();
       } else {
         await squeezeStartServer();
         squeezeRunning = true;
@@ -81,7 +79,7 @@
 
   /** Clicking a device card makes it the output target (Spotify-style). */
   function selectSqueezePlayer(player: SqueezePlayerInfo) {
-    if ($activeSqueezePlayer === player.mac) return; // already the target
+    if ($activeBackend === "squeeze" && $activeSqueezePlayer === player.mac) return;
     activateSqueezeTarget(player.mac);
   }
 

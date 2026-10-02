@@ -44,6 +44,7 @@ import {
   squeezePlayerState,
   setSqueezeVolumeCooldown,
   invalidateSqueezePollOwnership,
+  captureSqueezeTargetOwnership,
 } from "$lib/stores/squeeze";
 import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
 import {
@@ -1534,11 +1535,12 @@ export async function playTrack(
       const idx = get(queueIndex);
       const trackIds = q.length > 0 ? q.map((t) => t.id) : [track.id];
       const startIdx = q.length > 0 ? idx : 0;
+      const ownsTarget = captureSqueezeTargetOwnership(mac);
       await playTrackOnSqueeze(mac, trackIds, startIdx, {
         track: trackForPlugins,
         startTime,
         sessionId,
-        isCurrentSession: () => sessionId === currentSessionId,
+        isCurrentSession: () => sessionId === currentSessionId && ownsTarget(),
         commit: () => {
           currentTrack.set(trackForPlugins);
           currentTime.set(startTime);

@@ -45,7 +45,8 @@ let pollInterval: ReturnType<typeof setInterval> | null = null;
 let volumeCooldownUntil = 0;
 
 let discoveryInterval: ReturnType<typeof setInterval> | null = null;
-let discoveryStarting = false;
+let discoveryEpoch = 0;
+let discoveryStarting: number | null = null;
 
 /**
  * Idempotent. Starts a 1 Hz poll that keeps `discoveredSqueezePlayers`
@@ -64,23 +65,31 @@ let discoveryStarting = false;
  * hits the Stop button in the Connect panel).
  */
 export async function startGlobalSqueezeDiscovery(): Promise<void> {
-  if (discoveryInterval || discoveryStarting) return;
-  discoveryStarting = true;
+  if (discoveryInterval || discoveryStarting !== null) return;
+  const epoch = discoveryEpoch;
+  discoveryStarting = epoch;
   try {
     // If the server isn't running there is nothing to discover. Never
     // boot it from here — the Connect panel's Start button is the only
     // entry point for bringing the server up.
     if (!(await squeezeIsRunning().catch(() => false))) return;
+    if (epoch !== discoveryEpoch) return;
     // First tick immediately so the UI doesn't have to wait a full
     // second for the initial state.
-    await pollSqueezePlayersOnce();
-    discoveryInterval = setInterval(pollSqueezePlayersOnce, 1000);
+    await pollSqueezePlayersForEpoch(epoch);
+    if (epoch !== discoveryEpoch) return;
+    discoveryInterval = setInterval(() => {
+      void pollSqueezePlayersForEpoch(epoch);
+    }, 1000);
   } finally {
-    discoveryStarting = false;
+    if (discoveryStarting === epoch) discoveryStarting = null;
   }
 }
 
 export function stopGlobalSqueezeDiscovery(): void {
+  // Invalidate pending startup checks and player requests before clearing UI.
+  discoveryEpoch += 1;
+  discoveryStarting = null;
   if (discoveryInterval) {
     clearInterval(discoveryInterval);
     discoveryInterval = null;
@@ -95,17 +104,33 @@ export function stopGlobalSqueezeDiscovery(): void {
  * Playback state is cleared locally as well.
  */
 export function disconnectSqueezePlayer(mac: string): void {
-  activeSqueezePlayer.set(null);
-  activeBackend.set("none");
+  if (get(activeSqueezePlayer) === mac) clearSqueezeTarget();
   squeezeDisconnectPlayer(mac).catch((e) =>
     console.warn("[SQUEEZE] Disconnect failed:", e),
   );
 }
 
+/** Release Squeeze control after a device disconnect or successful server stop. */
+export function clearSqueezeTarget(): void {
+  activeSqueezePlayer.set(null);
+  // A stale Squeeze selection must not erase the cloud/local owner's state.
+  if (get(activeBackend) !== "squeeze") return;
+  activeBackend.set("none");
+  isPlaying.set(false);
+  currentTrack.set(null);
+  currentTime.set(0);
+  duration.set(0);
+}
+
 /** Test seam: trigger a single discovery tick without waiting for the 1 s interval. */
 export async function pollSqueezePlayersOnce(): Promise<void> {
+  await pollSqueezePlayersForEpoch(discoveryEpoch);
+}
+
+async function pollSqueezePlayersForEpoch(epoch: number): Promise<void> {
   try {
     const players = await squeezeGetPlayers();
+    if (epoch !== discoveryEpoch) return;
     discoveredSqueezePlayers.set(players ?? []);
     // No implicit selection: a player only becomes the active target
     // when the user explicitly controls it (Control / Play Here).
@@ -148,6 +173,12 @@ function ownsSqueezePoll(owner: SqueezePollOwner): boolean {
     get(activeSqueezePlayer) === owner.mac &&
     get(activeBackend) === "squeeze"
   );
+}
+
+/** Capture the current target generation for an asynchronous Squeeze command. */
+export function captureSqueezeTargetOwnership(mac: string): () => boolean {
+  const owner = captureSqueezePollOwner(mac);
+  return () => ownsSqueezePoll(owner);
 }
 
 activeSqueezePlayer.subscribe((mac) => {

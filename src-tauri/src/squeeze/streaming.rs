@@ -78,7 +78,7 @@ pub struct HttpState {
 struct StreamQuery {
     player: String,
     #[serde(default)]
-    gen: u64,
+    gen: Option<u64>,
 }
 
 /// Handler for GET /stream?player=<MAC>&gen=<gen>
@@ -93,6 +93,12 @@ async fn stream_handler(
             return Err((StatusCode::NOT_FOUND, "No stream queued for this player"));
         }
     };
+
+    // Legacy clients may omit gen, but an explicit old URL must never
+    // receive audio belonging to the player's newer stream.
+    if query.gen.is_some_and(|generation| generation != entry.generation) {
+        return Err((StatusCode::NOT_FOUND, "Stream generation is no longer current"));
+    }
 
     // Open the file
     let file = match tokio::fs::File::open(&entry.path).await {
@@ -325,6 +331,7 @@ pub async fn start_streaming_server_with_listener(
     listener: tokio::net::TcpListener,
     state: StreamingState,
     cometd_state: CometdState,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     let http_state = HttpState { streaming: state, cometd: cometd_state };
 
@@ -347,11 +354,31 @@ pub async fn start_streaming_server_with_listener(
 
     tracing::info!("Squeeze HTTP: listening on port {}", listener.local_addr().map(|a| a.port()).unwrap_or(0));
 
+    let mut connections = tokio::task::JoinSet::new();
+    let shutdown_wait = async {
+        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    tokio::pin!(shutdown_wait);
     loop {
-        let (stream, addr) = listener.accept().await.map_err(|e| format!("{}", e))?;
+        let accepted = tokio::select! {
+            biased;
+            _ = &mut shutdown_wait => break,
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, addr) = match accepted {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                connections.abort_all();
+                while connections.join_next().await.is_some() {}
+                return Err(e.to_string());
+            }
+        };
         let app = app.clone();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);
 
             let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
@@ -376,6 +403,10 @@ pub async fn start_streaming_server_with_listener(
             }
         });
     }
+    drop(listener);
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 /// Middleware that logs every HTTP request and response at the transport level.
@@ -396,4 +427,192 @@ async fn http_logging_middleware(
         method, uri, response.status(), response.headers()
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    const MAC: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 1]);
+
+    async fn request_stream(state: StreamingState, query: &str) -> axum::response::Response {
+        let cometd = CometdState::new(crate::squeeze::player::new_player_map(), state.clone());
+        Router::new()
+            .route("/stream", axum::routing::get(stream_handler))
+            .with_state(HttpState { streaming: state, cometd })
+            .oneshot(Request::builder()
+                .uri(format!("/stream?player={MAC}{query}"))
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stale_generation_is_rejected_before_opening_current_audio() {
+        let state = StreamingState::new();
+        state.queue_file(&MAC, PathBuf::from("missing-current-track.flac"), 7, 0).await;
+
+        let response = request_stream(state, "&gen=6").await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_generation_is_not_treated_as_omitted() {
+        let state = StreamingState::new();
+        state.queue_file(&MAC, PathBuf::from("missing-current-track.flac"), 7, 0).await;
+
+        let response = request_stream(state, "&gen=0").await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    struct AudioFixture(PathBuf);
+
+    impl AudioFixture {
+        async fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("audion-stream-{}.flac", uuid::Uuid::new_v4()));
+            tokio::fs::write(&path, b"fixture-audio").await.unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for AudioFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    async fn wav_fixture(sample: i16) -> AudioFixture {
+        let path = std::env::temp_dir().join(format!("audion-stream-{}.wav", uuid::Uuid::new_v4()));
+        // Valid mono 8 kHz, 16-bit PCM WAV with one sample.
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&38u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&2u32.to_le_bytes());
+        wav.extend_from_slice(&sample.to_le_bytes());
+        tokio::fs::write(&path, wav).await.unwrap();
+        AudioFixture(path)
+    }
+
+    fn fixture_track(fixture: &AudioFixture, id: i64) -> crate::squeeze::queue::QueueTrack {
+        crate::squeeze::queue::QueueTrack {
+            id,
+            title: format!("Track {id}"),
+            artist: String::new(),
+            album: String::new(),
+            path: fixture.0.to_string_lossy().into_owned(),
+            duration: 0.000125,
+            format: "wav".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_does_not_reuse_previous_stream_url() {
+        use crate::squeeze::player::{new_player_map, SqueezePlayer};
+        use crate::squeeze::server::{control_next, disconnect_player};
+
+        let old_audio = wav_fixture(100).await;
+        let new_audio = wav_fixture(200).await;
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let cometd = CometdState::new(players.clone(), streaming.clone());
+        let mut player = SqueezePlayer::new_cometd(MAC, MAC.to_string(), "old-session".into());
+        player.queue.set_tracks(vec![fixture_track(&old_audio, 1), fixture_track(&old_audio, 2)], 0);
+        players.lock().await.insert(MAC, player);
+        control_next(&MAC, &players, &streaming).await;
+        let old_generation = streaming.get_entry(&MAC.to_string()).await.unwrap().generation;
+        let response = request_stream(streaming.clone(), &format!("&gen={old_generation}")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+            tokio::fs::read(&old_audio.0).await.unwrap().as_slice());
+
+        disconnect_player(&MAC, &players, &streaming, &cometd).await;
+        assert!(!players.lock().await.contains_key(&MAC));
+        let mut replacement = SqueezePlayer::new_cometd(MAC, MAC.to_string(), "new-session".into());
+        replacement.queue.set_tracks(vec![fixture_track(&old_audio, 1), fixture_track(&new_audio, 3)], 0);
+        players.lock().await.insert(MAC, replacement);
+        control_next(&MAC, &players, &streaming).await;
+        let new_generation = streaming.get_entry(&MAC.to_string()).await.unwrap().generation;
+
+        let stale = request_stream(streaming.clone(), &format!("&gen={old_generation}")).await;
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND,
+            "a reconnected player reused the old stream URL for different audio");
+        let current = request_stream(streaming, &format!("&gen={new_generation}")).await;
+        assert_eq!(current.status(), StatusCode::OK);
+        assert_eq!(to_bytes(current.into_body(), 1024).await.unwrap().as_ref(),
+            tokio::fs::read(&new_audio.0).await.unwrap().as_slice());
+    }
+
+    #[tokio::test]
+    async fn successive_playback_changes_keep_distinct_stream_urls() {
+        use crate::squeeze::player::{new_player_map, SqueezePlayer};
+        use crate::squeeze::server::control_next;
+
+        let audio = wav_fixture(100).await;
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let mut player = SqueezePlayer::new_cometd(MAC, MAC.to_string(), "session".into());
+        player.queue.set_tracks((1..=3).map(|id| fixture_track(&audio, id)).collect(), 0);
+        players.lock().await.insert(MAC, player);
+        control_next(&MAC, &players, &streaming).await;
+        let first_generation = streaming.get_entry(&MAC.to_string()).await.unwrap().generation;
+        control_next(&MAC, &players, &streaming).await;
+        let second_generation = streaming.get_entry(&MAC.to_string()).await.unwrap().generation;
+
+        assert_ne!(first_generation, second_generation);
+        assert_eq!(request_stream(streaming.clone(), &format!("&gen={first_generation}")).await.status(),
+            StatusCode::NOT_FOUND);
+        assert_eq!(request_stream(streaming, &format!("&gen={second_generation}")).await.status(),
+            StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn matching_generation_serves_current_audio() {
+        let fixture = AudioFixture::new().await;
+        let state = StreamingState::new();
+        state.queue_file(&MAC, fixture.0.clone(), 7, 0).await;
+
+        let response = request_stream(state, "&gen=7").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/flac");
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"fixture-audio");
+    }
+
+    #[tokio::test]
+    async fn omitted_generation_keeps_legacy_stream_compatibility() {
+        let fixture = AudioFixture::new().await;
+        let state = StreamingState::new();
+        state.queue_file(&MAC, fixture.0.clone(), 7, 0).await;
+
+        let response = request_stream(state, "").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"fixture-audio");
+    }
+
+    #[tokio::test]
+    async fn matching_generation_preserves_seek_offset() {
+        let fixture = AudioFixture::new().await;
+        let state = StreamingState::new();
+        state.queue_file(&MAC, fixture.0.clone(), 7, 8).await;
+
+        let response = request_stream(state, "&gen=7").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"audio");
+    }
 }

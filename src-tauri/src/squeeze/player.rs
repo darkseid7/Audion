@@ -9,7 +9,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -41,12 +42,19 @@ pub struct PlayerInfo {
     pub queue_position: Option<usize>,
 }
 
+static NEXT_TCP_SESSION: AtomicU64 = AtomicU64::new(1);
+// Generation URLs must remain distinct when a player entry is reconstructed.
+// A randomized process seed also avoids predictably reusing URLs after restart.
+static NEXT_STREAM_GENERATION: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(rand::random::<u64>().max(1)));
+
 /// A connected Squeeze player.
 pub struct SqueezePlayer {
     pub mac: MacAddress,
     pub name: String,
     pub capabilities: String,
     writer: Option<OwnedWriteHalf>,
+    tcp_session_id: Option<u64>,
     pub state: PlayerState,
     pub queue: PlayQueue,
     pub volume: u8, // 0-100
@@ -92,6 +100,7 @@ impl SqueezePlayer {
             name: display_name,
             capabilities,
             writer: Some(writer),
+            tcp_session_id: Some(NEXT_TCP_SESSION.fetch_add(1, Ordering::Relaxed)),
             state: PlayerState::Stopped,
             queue: PlayQueue::new(),
             volume: 80,
@@ -118,6 +127,7 @@ impl SqueezePlayer {
             name: display_name,
             capabilities: format!("cometd,uuid={}", uuid),
             writer: None,
+            tcp_session_id: None,
             state: PlayerState::Stopped,
             queue: PlayQueue::new(),
             volume: 80,
@@ -138,7 +148,17 @@ impl SqueezePlayer {
     /// for a player that was already registered via CometD).
     pub fn set_writer(&mut self, writer: OwnedWriteHalf, server_ip: Ipv4Addr) {
         self.writer = Some(writer);
+        self.tcp_session_id = Some(NEXT_TCP_SESSION.fetch_add(1, Ordering::Relaxed));
         self.server_ip = server_ip;
+    }
+
+    /// Identity of the reader that owns the current TCP writer.
+    pub fn tcp_session_id(&self) -> Option<u64> {
+        self.tcp_session_id
+    }
+
+    pub fn owns_tcp_session(&self, session_id: u64) -> bool {
+        self.tcp_session_id == Some(session_id)
     }
 
     /// Returns true if this player has an active TCP writer (i.e., the
@@ -155,6 +175,7 @@ impl SqueezePlayer {
     /// for the same MAC — we don't want to drop the player entry.
     pub fn clear_writer(&mut self) {
         self.writer = None;
+        self.tcp_session_id = None;
     }
 
     /// Get current elapsed time in milliseconds.
@@ -198,8 +219,14 @@ impl SqueezePlayer {
         Ok(())
     }
 
+    /// Allocate a fresh opaque stream identity shared by all player lifetimes.
+    pub fn advance_stream_generation(&mut self) -> u64 {
+        self.generation = NEXT_STREAM_GENERATION.fetch_add(1, Ordering::Relaxed);
+        self.generation
+    }
+
     /// Start streaming a track. Returns the current generation.
-    /// Callers must increment `self.generation` before calling this.
+    /// Callers must call `advance_stream_generation` before queuing the file.
     pub async fn start_stream(
         &mut self,
         http_port: u16,

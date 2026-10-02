@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 /// HTTP port for the streaming server.
 pub const HTTP_PORT: u16 = 9000;
@@ -41,30 +41,36 @@ pub fn start_slimproto_server_with_listener(
     tokio::spawn(async move {
         tracing::info!("Squeeze TCP: listening on port 3483");
 
+        let mut connections = JoinSet::new();
+        let mut shutdown_poll = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let (stream, addr) = match listener.accept().await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("Squeeze TCP: accept error: {}", e);
-                    continue;
+            tokio::select! {
+                biased;
+                _ = shutdown_poll.tick() => {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
-            };
-
-            tracing::info!("Squeeze TCP: connection from {}", addr);
-
-            let players = players.clone();
-            let streaming = streaming.clone();
-            let shutdown = shutdown.clone();
-            let cometd = cometd.clone();
-
-            tokio::spawn(async move {
-                handle_connection(stream, addr, players, streaming, cometd, shutdown).await;
-            });
+                _ = connections.join_next(), if !connections.is_empty() => {}
+                result = listener.accept() => {
+                    let (stream, addr) = match result {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!("Squeeze TCP: accept error: {}", e);
+                            continue;
+                        }
+                    };
+                    tracing::info!("Squeeze TCP: connection from {}", addr);
+                    connections.spawn(handle_connection(
+                        stream, addr, players.clone(), streaming.clone(),
+                        cometd.clone(), shutdown.clone(),
+                    ));
+                }
+            }
         }
+        // JoinSet also aborts these readers if the listener task is aborted.
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
 
         tracing::info!("Squeeze TCP: server stopped");
     })
@@ -82,8 +88,8 @@ async fn handle_connection(
     let server_ip = detect_local_ip(&addr);
 
     // Read the first message — must be HELO
-    let mac = match read_and_parse_helo(&mut reader, writer, server_ip, &players).await {
-        Some(mac) => mac,
+    let (mac, session_id) = match read_and_parse_helo(&mut reader, writer, server_ip, &players).await {
+        Some(session) => session,
         None => {
             tracing::warn!("Squeeze TCP: connection from {} did not send valid HELO", addr);
             return;
@@ -95,7 +101,7 @@ async fn handle_connection(
     // Send handshake
     {
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(&mac) {
+        if let Some(player) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
             if let Err(e) = player.send_handshake().await {
                 tracing::error!("Squeeze TCP: handshake failed for {}: {}", mac, e);
                 map.remove(&mac);
@@ -143,14 +149,16 @@ async fn handle_connection(
         }
 
         let msg = codec::parse_client_message(&tag_buf, &payload);
-        let tag_str = String::from_utf8_lossy(&tag_buf);
+        if !players.lock().await.get(&mac).is_some_and(|p| p.owns_tcp_session(session_id)) {
+            break;
+        }
 
 
         match msg {
             ClientMessage::Stat(stat) => {
                 let (action, state_changed) = {
                     let mut map = players.lock().await;
-                    if let Some(player) = map.get_mut(&mac) {
+                    if let Some(player) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
                         let old_state = player.state;
                         let action = player.handle_stat(&stat);
                         (action, player.state != old_state)
@@ -171,10 +179,10 @@ async fn handle_connection(
 
                 match action {
                     StatAction::Prefetch => {
-                        handle_prefetch(&mac, &players, &streaming).await;
+                        handle_prefetch(&mac, &players, &streaming, Some(session_id)).await;
                     }
                     StatAction::TrackFinished => {
-                        handle_track_finished(&mac, &players, &streaming).await;
+                        handle_track_finished(&mac, &players, &streaming, Some(session_id)).await;
                         cometd.notify_player_status(&mac.to_string()).await;
                     }
                     StatAction::None => {}
@@ -184,7 +192,7 @@ async fn handle_connection(
                 if stat.event == codec::StatEvent::Timer {
                     let frame = codec::encode_strm_simple(codec::StrmCommand::Status, stat.jiffies);
                     let mut map = players.lock().await;
-                    if let Some(player) = map.get_mut(&mac) {
+                    if let Some(player) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
                         let _ = player.send(&frame).await;
                     }
                 }
@@ -201,7 +209,7 @@ async fn handle_connection(
                 if !data.is_empty() && data[0] == 0x00 && data.len() > 1 {
                     let name = String::from_utf8_lossy(&data[1..]).trim_end_matches('\0').to_string();
                     let mut map = players.lock().await;
-                    if let Some(player) = map.get_mut(&mac) {
+                    if let Some(player) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
                         // Only update if we don't already have a friendly name
                         if friendly_name(&mac).is_none() {
                             player.name = name.clone();
@@ -230,7 +238,7 @@ async fn handle_connection(
                     0x768920df | 0x768910ef => {
                         // Pause/Play toggle
                         let mut map = players.lock().await;
-                        if let Some(player) = map.get_mut(&mac) {
+                        if let Some(player) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
                             if player.state == PlayerState::Playing {
                                 player.elapsed_ms = player.get_elapsed_ms();
                                 player.play_started_at = None;
@@ -249,12 +257,12 @@ async fn handle_connection(
                     }
                     0x7689a05f | 0x7689e01f | 0x7689a25d => {
                         // Next track
-                        control_next(&mac, &players, &streaming).await;
+                        control_next_for_session(&mac, &players, &streaming, Some(session_id)).await;
                         cometd.notify_player_status(&mac_str).await;
                     }
                     0x7689c03f | 0x7689d02f | 0x7689c23d => {
                         // Previous track
-                        control_previous(&mac, &players, &streaming).await;
+                        control_previous_for_session(&mac, &players, &streaming, Some(session_id)).await;
                         cometd.notify_player_status(&mac_str).await;
                     }
                     _ => {
@@ -277,16 +285,18 @@ async fn handle_connection(
         let players_lock = players.clone();
         let cometd_for_check = cometd.clone();
         let mac_for_check = cometd_mac_str.clone();
-        let has_cometd = {
-            let mac_map = cometd_for_check.mac_to_client.lock().await;
-            mac_map.contains_key(&mac_for_check)
-        };
+        // Keep the binding stable through cleanup (mac -> players lock order).
+        let mac_map = cometd_for_check.mac_to_client.lock().await;
+        let has_cometd = mac_map.contains_key(&mac_for_check);
         let mut map = players_lock.lock().await;
+        if !map.get(&mac).is_some_and(|p| p.owns_tcp_session(session_id)) {
+            return;
+        }
         if has_cometd {
             // Keep the player entry; just clear the TCP writer so the
             // CometD path takes over (state polling now relies solely
             // on the long-poll updates pushed from the Eversolo WebUI).
-            if let Some(p) = map.get_mut(&mac) {
+            if let Some(p) = map.get_mut(&mac).filter(|p| p.owns_tcp_session(session_id)) {
                 p.clear_writer();
             }
             tracing::info!(
@@ -306,7 +316,7 @@ async fn read_and_parse_helo(
     writer: tokio::net::tcp::OwnedWriteHalf,
     server_ip: Ipv4Addr,
     players: &PlayerMap,
-) -> Option<MacAddress> {
+) -> Option<(MacAddress, u64)> {
     let mut tag_buf = [0u8; 4];
     let mut len_buf = [0u8; 4];
 
@@ -363,7 +373,7 @@ async fn read_and_parse_helo(
                 map.insert(mac, player);
             }
 
-            Some(mac)
+            Some((mac, map.get(&mac)?.tcp_session_id()?))
         }
         _ => None,
     }
@@ -388,10 +398,11 @@ async fn handle_prefetch(
     mac: &MacAddress,
     players: &PlayerMap,
     streaming: &StreamingState,
+    session_id: Option<u64>,
 ) {
     let (next_track, gen) = {
         let mut map = players.lock().await;
-        let player = match map.get_mut(mac) {
+        let player = match map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             Some(p) => p,
             None => return,
         };
@@ -407,7 +418,7 @@ async fn handle_prefetch(
 
         // Queue the file for HTTP streaming
         let path = PathBuf::from(&next.path);
-        player.generation += 1;
+        player.advance_stream_generation();
         let gen = player.generation;
         streaming.queue_file(mac, path, gen, 0).await;
 
@@ -417,7 +428,7 @@ async fn handle_prefetch(
     // Send strm 's' with NO_RESTART_DECODER flag
     {
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
+        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             player.seek_offset_ms = 0;
             if let Err(e) = player.start_stream(HTTP_PORT, 0x40).await {
                 tracing::error!("Squeeze: prefetch start_stream failed: {}", e);
@@ -433,10 +444,11 @@ async fn handle_track_finished(
     mac: &MacAddress,
     players: &PlayerMap,
     streaming: &StreamingState,
+    session_id: Option<u64>,
 ) {
     let needs_start = {
         let map = players.lock().await;
-        let player = match map.get(mac) {
+        let player = match map.get(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             Some(p) => p,
             None => return,
         };
@@ -449,7 +461,7 @@ async fn handle_track_finished(
         // No prefetch — need to advance and start fresh
         let has_next = {
             let mut map = players.lock().await;
-            if let Some(player) = map.get_mut(mac) {
+            if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
                 player.queue.next().is_some()
             } else {
                 false
@@ -459,27 +471,25 @@ async fn handle_track_finished(
         if has_next {
             let (path, title) = {
                 let map = players.lock().await;
-                map.get(mac)
+                map.get(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id)))
                     .and_then(|p| p.queue.current().map(|t| (PathBuf::from(&t.path), t.title.clone())))
                     .unzip()
             };
 
             if let (Some(path), Some(title)) = (path, title) {
                 tracing::info!("Squeeze: track finished -> now playing: \"{}\"", title);
-                let gen = {
+                {
                     let mut map = players.lock().await;
-                    if let Some(player) = map.get_mut(mac) {
-                        player.generation += 1;
-                        player.generation
+                    if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
+                        player.advance_stream_generation();
+                        streaming.queue_file(mac, path, player.generation, 0).await;
                     } else {
                         return;
                     }
                 };
 
-                streaming.queue_file(mac, path, gen, 0).await;
-
                 let mut map = players.lock().await;
-                if let Some(player) = map.get_mut(mac) {
+                if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
                     player.seek_offset_ms = 0;
                     player.elapsed_ms = 0;
                     player.play_started_at = Some(Instant::now());
@@ -492,7 +502,7 @@ async fn handle_track_finished(
             // Queue exhausted
             tracing::info!("Squeeze: queue exhausted — stopping");
             let mut map = players.lock().await;
-            if let Some(player) = map.get_mut(mac) {
+            if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
                 player.state = PlayerState::Stopped;
             }
         }
@@ -500,7 +510,7 @@ async fn handle_track_finished(
         // Prefetch already handled it — just reset the prefetch flag
         tracing::debug!("Squeeze: track finished (prefetch already active)");
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
+        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             player.display_track = None;
             player.prefetched_generation = None;
             player.seek_offset_ms = 0;
@@ -515,29 +525,28 @@ async fn handle_butn_start_track(
     mac: &MacAddress,
     players: &PlayerMap,
     streaming: &StreamingState,
+    session_id: Option<u64>,
 ) {
     let path = {
         let map = players.lock().await;
-        match map.get(mac).and_then(|p| p.queue.current().map(|t| PathBuf::from(&t.path))) {
+        match map.get(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))).and_then(|p| p.queue.current().map(|t| PathBuf::from(&t.path))) {
             Some(p) => p,
             None => return,
         }
     };
 
-    let gen = {
+    {
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
-            player.generation += 1;
-            player.generation
+        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
+            player.advance_stream_generation();
+            streaming.queue_file(mac, path, player.generation, 0).await;
         } else {
             return;
         }
     };
 
-    streaming.queue_file(mac, path, gen, 0).await;
-
     let mut map = players.lock().await;
-    if let Some(player) = map.get_mut(mac) {
+    if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
         player.seek_offset_ms = 0;
         player.elapsed_ms = 0;
         player.play_started_at = Some(Instant::now());
@@ -554,9 +563,18 @@ pub async fn control_next(
     players: &PlayerMap,
     streaming: &StreamingState,
 ) {
+    control_next_for_session(mac, players, streaming, None).await;
+}
+
+async fn control_next_for_session(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+    session_id: Option<u64>,
+) {
     {
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
+        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             player.display_track = None;
             let _ = player.stop().await;
             let _ = player.flush().await;
@@ -568,13 +586,13 @@ pub async fn control_next(
     }
     let has_next = {
         let mut map = players.lock().await;
-        match map.get_mut(mac) {
+        match map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             Some(player) => player.queue.next().is_some(),
             None => false,
         }
     };
     if has_next {
-        handle_butn_start_track(mac, players, streaming).await;
+        handle_butn_start_track(mac, players, streaming, session_id).await;
     }
 }
 
@@ -585,9 +603,18 @@ pub async fn control_previous(
     players: &PlayerMap,
     streaming: &StreamingState,
 ) {
+    control_previous_for_session(mac, players, streaming, None).await;
+}
+
+async fn control_previous_for_session(
+    mac: &MacAddress,
+    players: &PlayerMap,
+    streaming: &StreamingState,
+    session_id: Option<u64>,
+) {
     {
         let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
+        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             player.display_track = None;
             let _ = player.stop().await;
             let _ = player.flush().await;
@@ -599,13 +626,13 @@ pub async fn control_previous(
     }
     let has_prev = {
         let mut map = players.lock().await;
-        match map.get_mut(mac) {
+        match map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
             Some(player) => player.queue.previous().is_some(),
             None => false,
         }
     };
     if has_prev {
-        handle_butn_start_track(mac, players, streaming).await;
+        handle_butn_start_track(mac, players, streaming, session_id).await;
     }
 }
 
@@ -622,24 +649,22 @@ pub async fn disconnect_player(
     streaming: &StreamingState,
     cometd: &CometdState,
 ) {
-    {
-        let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac) {
-            player.display_track = None;
-            player.prefetched_generation = None;
-            player.suppress_track_finished = false;
-            // Best effort: tell the hardware to stop before we cut the wire.
-            let _ = player.stop().await;
-            let _ = player.flush().await;
-            player.state = PlayerState::Stopped;
-        }
-    }
-    // Dropping the writer (map removal) closes the TCP connection.
     let mut map = players.lock().await;
+    if let Some(player) = map.get_mut(mac) {
+        player.display_track = None;
+        player.prefetched_generation = None;
+        player.suppress_track_finished = false;
+        // Best effort: tell the hardware to stop before we cut the wire.
+        let _ = player.stop().await;
+        let _ = player.flush().await;
+        player.state = PlayerState::Stopped;
+    }
+    // Keep removal and stream cleanup in one critical section: a new HELO
+    // must not register between stopping the old session and removing it.
     map.remove(mac);
+    streaming.clear_player(mac).await;
     drop(map);
 
-    streaming.clear_player(mac).await;
     cometd.notify_player_status(&mac.to_string()).await;
 }
 
@@ -666,6 +691,149 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(&payload);
         frame
+    }
+
+    fn client_frame(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut frame = tag.to_vec();
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    async fn connect_test_player(
+        mac: [u8; 6],
+        players: &PlayerMap,
+        streaming: &StreamingState,
+        cometd: &CometdState,
+    ) -> (tokio::net::TcpStream, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let task = tokio::spawn(handle_connection(
+            socket, addr, players.clone(), streaming.clone(), cometd.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+        client.write_all(&helo_frame(mac)).await.unwrap();
+        // Receipt of all five handshake frames proves the new writer is attached.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            for _ in 0..5 {
+                let mut len = [0; 2];
+                client.read_exact(&mut len).await.unwrap();
+                let mut payload = vec![0; u16::from_be_bytes(len) as usize];
+                client.read_exact(&mut payload).await.unwrap();
+            }
+        }).await.expect("handshake timed out");
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn superseded_tcp_cleanup_preserves_replacement() {
+        for has_cometd in [false, true] {
+            let players = new_player_map();
+            let streaming = StreamingState::new();
+            let cometd = CometdState::new(players.clone(), streaming.clone());
+            let mac = [1, 2, 3, 4, 5, 6];
+            let mac_addr = MacAddress(mac);
+            if has_cometd {
+                cometd.mac_to_client.lock().await.insert(mac_addr.to_string(), "test-client".into());
+            }
+            let (mut old, old_task) = connect_test_player(mac, &players, &streaming, &cometd).await;
+            let (_replacement, replacement_task) = connect_test_player(mac, &players, &streaming, &cometd).await;
+            old.write_all(&client_frame(b"BYE!", &[])).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), old_task).await.unwrap().unwrap();
+            let map = players.lock().await;
+            assert!(map.get(&mac_addr).is_some_and(|p| p.has_tcp_writer()),
+                "superseded TCP cleanup removed or closed replacement (CometD={has_cometd})");
+            replacement_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_tcp_messages_do_not_mutate_replacement() {
+        let mut button = vec![0; 8];
+        button[4..].copy_from_slice(&0x768920dfu32.to_be_bytes());
+        for (tag, payload) in [
+            (*b"SETD", b"\0Stale name\0".to_vec()),
+            (*b"STAT", b"STMp".to_vec()),
+            (*b"BUTN", button),
+        ] {
+            let players = new_player_map();
+            let streaming = StreamingState::new();
+            let cometd = CometdState::new(players.clone(), streaming.clone());
+            let mac = [1, 2, 3, 4, 5, 6];
+            let mac_addr = MacAddress(mac);
+            // Retain the registration during old-session cleanup so assertions
+            // independently catch late message mutation, not just removal.
+            cometd.mac_to_client.lock().await.insert(mac_addr.to_string(), "test-client".into());
+            let (mut old, old_task) = connect_test_player(mac, &players, &streaming, &cometd).await;
+            let (_replacement, replacement_task) = connect_test_player(mac, &players, &streaming, &cometd).await;
+            players.lock().await.get_mut(&mac_addr).unwrap().state = PlayerState::Playing;
+            old.write_all(&client_frame(&tag, &payload)).await.unwrap();
+            old.write_all(&client_frame(b"BYE!", &[])).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), old_task).await.unwrap().unwrap();
+            let map = players.lock().await;
+            let player = map.get(&mac_addr).expect("replacement disappeared");
+            assert_eq!(player.name, "TestPlayer", "late {:?} changed replacement name", tag);
+            assert_eq!(player.state, PlayerState::Playing, "late {:?} changed replacement state", tag);
+            replacement_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_disconnect_does_not_remove_queued_takeover() {
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let cometd = CometdState::new(players.clone(), streaming.clone());
+        let mac = [1, 2, 3, 4, 5, 6];
+        let mac_addr = MacAddress(mac);
+        let (_old, old_task) = connect_test_player(mac, &players, &streaming, &cometd).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut replacement = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        replacement.write_all(&helo_frame(mac)).await.unwrap();
+        let (mut reader, writer) = socket.into_split();
+
+        // Tokio's mutex is FIFO: queue disconnect first, then registration.
+        // Releasing and reacquiring the guard mid-disconnect lets HELO win.
+        let guard = players.lock().await;
+        let disconnect = tokio::spawn({
+            let players = players.clone();
+            let streaming = streaming.clone();
+            let cometd = cometd.clone();
+            async move { disconnect_player(&mac_addr, &players, &streaming, &cometd).await }
+        });
+        tokio::task::yield_now().await;
+        let takeover = tokio::spawn({
+            let players = players.clone();
+            async move { read_and_parse_helo(&mut reader, writer, Ipv4Addr::LOCALHOST, &players).await }
+        });
+        tokio::task::yield_now().await;
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), disconnect).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), takeover).await.unwrap().unwrap().unwrap();
+        assert!(players.lock().await.get(&mac_addr).is_some_and(|p| p.has_tcp_writer()),
+            "disconnect removed a TCP session registered after it began");
+        old_task.abort();
+    }
+
+    #[tokio::test]
+    async fn slimproto_shutdown_closes_idle_listener_and_connection() {
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let cometd = CometdState::new(players.clone(), streaming.clone());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let task = start_slimproto_server_with_listener(listener, players, streaming, cometd, shutdown.clone());
+        tokio::task::yield_now().await;
+        shutdown.store(true, Ordering::Relaxed);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await
+            .expect("idle SlimProto listener ignored shutdown").unwrap();
+        let mut byte = [0];
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut byte)).await
+            .expect("idle HELO task retained its socket").unwrap(), 0);
+        TcpListener::bind(addr).await.expect("SlimProto listener retained its port");
     }
 
     /// Register a fake SlimProto player over a real TCP connection, then

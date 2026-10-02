@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { get } from "svelte/store";
 
 const { squeezePlay } = vi.hoisted(() => ({ squeezePlay: vi.fn() }));
 vi.mock("$lib/api/tauri", () => ({
   squeezePlay,
+  squeezeGetPlayerState: vi.fn(() => new Promise(() => {})),
+  squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined),
   getAudioSrc: vi.fn(),
   getAlbumArtSrc: vi.fn(),
   getTrackCoverSrc: vi.fn(),
@@ -25,7 +28,22 @@ vi.mock("$lib/api/tauri", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("$lib/stores/toast", () => ({ addToast: vi.fn() }));
 
-import { playTrackOnSqueeze } from "./player";
+import {
+  activeBackend,
+  currentTrack,
+  currentTime,
+  duration,
+  isPlaying,
+  playTrack,
+  playTrackOnSqueeze,
+  queue,
+} from "./player";
+import {
+  activeSqueezePlayer,
+  activateSqueezeTarget,
+  disconnectSqueezePlayer,
+  resetSqueezePollingForTests,
+} from "./squeeze";
 
 describe("success-gated Squeeze play", () => {
   beforeEach(() => squeezePlay.mockReset());
@@ -59,4 +77,90 @@ describe("success-gated Squeeze play", () => {
 
     expect(commit).toHaveBeenCalledOnce();
   });
+});
+
+
+describe("Squeeze play request ownership", () => {
+  beforeEach(() => {
+    vi.stubGlobal("navigator", {});
+    resetSqueezePollingForTests();
+    activeSqueezePlayer.set(null);
+    activeBackend.set("none");
+    currentTrack.set(null);
+    currentTime.set(0);
+    duration.set(0);
+    isPlaying.set(false);
+    queue.set([]);
+    squeezePlay.mockReset();
+  });
+
+  afterEach(() => {
+    resetSqueezePollingForTests();
+    activeSqueezePlayer.set(null);
+    activeBackend.set("none");
+    vi.unstubAllGlobals();
+  });
+
+  it("commits a successful play while the same target still owns playback", async () => {
+    squeezePlay.mockResolvedValueOnce(undefined);
+    activateSqueezeTarget("A");
+
+    await playTrack({ id: 1, title: "Current target", duration: 100, cover_url: "fixture" } as any);
+
+    expect(get(currentTrack)?.id).toBe(1);
+    expect(get(duration)).toBe(100);
+    expect(get(isPlaying)).toBe(true);
+  });
+
+  it("keeps existing playback state when the actual play request fails", async () => {
+    squeezePlay.mockRejectedValueOnce(new Error("offline"));
+    activateSqueezeTarget("A");
+    currentTrack.set({ id: 2, title: "Existing track" } as any);
+    currentTime.set(7);
+    duration.set(200);
+    isPlaying.set(false);
+
+    await playTrack({ id: 1, title: "Failed request", duration: 100, cover_url: "fixture" } as any);
+
+    expect(get(currentTrack)?.id).toBe(2);
+    expect(get(currentTime)).toBe(7);
+    expect(get(duration)).toBe(200);
+    expect(get(isPlaying)).toBe(false);
+  });
+
+  it.each(["cloud", "other player", "A -> B -> A", "Squeeze -> cloud -> Squeeze", "disconnect"])(
+    "does not publish late play success after %s ownership changes",
+    async (transition) => {
+      let finishPlay!: () => void;
+      squeezePlay.mockReturnValueOnce(new Promise<void>((resolve) => { finishPlay = resolve; }));
+      activateSqueezeTarget("A");
+      const playing = playTrack({ id: 1, title: "Old Squeeze request", duration: 100, cover_url: "fixture" } as any);
+      await vi.waitFor(() => expect(squeezePlay).toHaveBeenCalledOnce());
+
+      if (transition === "disconnect") {
+        disconnectSqueezePlayer("A");
+      } else {
+        if (transition === "cloud" || transition === "Squeeze -> cloud -> Squeeze") {
+          activeBackend.set("remote");
+        } else {
+          activateSqueezeTarget("B");
+        }
+        if (transition === "A -> B -> A" || transition === "Squeeze -> cloud -> Squeeze") {
+          activateSqueezeTarget("A");
+        }
+        currentTrack.set({ id: 2, title: "New owner track" } as any);
+        currentTime.set(7);
+        duration.set(200);
+        isPlaying.set(false);
+      }
+
+      finishPlay();
+      await playing;
+
+      expect(get(currentTrack)?.id ?? null).toBe(transition === "disconnect" ? null : 2);
+      expect(get(currentTime)).toBe(transition === "disconnect" ? 0 : 7);
+      expect(get(duration)).toBe(transition === "disconnect" ? 0 : 200);
+      expect(get(isPlaying)).toBe(false);
+    },
+  );
 });
