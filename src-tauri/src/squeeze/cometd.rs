@@ -118,6 +118,9 @@ pub struct CometdClient {
     /// proper /meta/disconnect (e.g. the user closed the Eversolo WebUI
     /// tab or the network dropped).
     pub last_seen: Instant,
+    /// Diagnostic-only readiness timing; never used for session policy.
+    handshake_at: Instant,
+    first_connect_at: Option<Instant>,
 }
 
 /// Shared Cometd state.
@@ -254,6 +257,16 @@ pub async fn cometd_handler(
 fn build_cometd_response(responses: &[serde_json::Value]) -> axum::response::Response {
     let json = serde_json::to_string(responses).unwrap_or_else(|_| "[]".to_string());
     tracing::info!("Cometd: response ({} bytes): {}", json.len(), log_preview(&json, 300));
+    for response in responses.iter().filter(|response| response["channel"] == "/meta/handshake") {
+        tracing::info!(
+            diagnostic = "cometd_readiness", stage = "handshake_response",
+            client_id = response["clientId"].as_str().unwrap_or(""),
+            request_id = log_preview(response["id"].as_str().unwrap_or(""), 64),
+            successful = response["successful"].as_bool().unwrap_or(false),
+            http_status = 200, body_bytes = json.len(), response_messages = responses.len(),
+            "CometD handshake HTTP response built"
+        );
+    }
     axum::http::Response::builder()
         .header("Content-Type", "application/json")
         .header("Connection", "keep-alive")
@@ -295,6 +308,7 @@ async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
     let player_name = ext_name.clone().unwrap_or_else(|| format!("Player {}", mac_str));
 
     // Register the client
+    let handshake_at = Instant::now();
     let client = CometdClient {
         client_id: client_id.clone(),
         mac,
@@ -305,16 +319,36 @@ async fn handle_handshake(state: &CometdState, msg: &BayeuxRequest) -> BayeuxRes
         push_queue: Vec::new(),
         notify: Arc::new(Notify::new()),
         last_seen: Instant::now(),
+        handshake_at,
+        first_connect_at: None,
     };
 
     {
         let mut clients = state.clients.lock().await;
         clients.insert(client_id.clone(), client);
     }
-    {
+    let previous_client_id = {
         let mut mac_map = state.mac_to_client.lock().await;
         // TCP and command routing use MacAddress's canonical lowercase form.
-        mac_map.insert(mac.to_string(), client_id.clone());
+        mac_map.insert(mac.to_string(), client_id.clone())
+    };
+    {
+        let clients = state.clients.lock().await;
+        let previous = previous_client_id.as_ref().and_then(|id| clients.get(id));
+        let previous_stage = match previous {
+            Some(client) if client.first_connect_at.is_none() => "awaiting_connect",
+            Some(client) if !client.status_channels.contains_key(&mac.to_string()) => "awaiting_status_subscription",
+            Some(_) => "ready",
+            None => "no_session",
+        };
+        tracing::info!(
+            diagnostic = "cometd_readiness", stage = "handshake",
+            client_id = %client_id, player_mac = %mac,
+            previous_client_id = previous_client_id.as_deref().unwrap_or(""),
+            previous_stage,
+            previous_elapsed_ms = previous.map(|client| client.handshake_at.elapsed().as_millis() as u64).unwrap_or(0),
+            "CometD session registered; awaiting connect and player-status subscription"
+        );
     }
 
     // Register in the player map (so the frontend sees this player)
@@ -396,6 +430,16 @@ async fn handle_connect(state: &CometdState, msg: &BayeuxRequest) -> Vec<serde_j
     let notify = {
         let mut clients = state.clients.lock().await;
         if let Some(client) = clients.get_mut(&client_id) {
+            if client.first_connect_at.is_none() {
+                client.first_connect_at = Some(Instant::now());
+                tracing::info!(
+                    diagnostic = "cometd_readiness", stage = "first_connect",
+                    client_id = %client_id, player_mac = %client.mac,
+                    elapsed_ms = client.handshake_at.elapsed().as_millis() as u64,
+                    status_subscriptions = client.status_channels.len(),
+                    "CometD first connect received"
+                );
+            }
             if !client.push_queue.is_empty() {
                 // Drain queued messages immediately (raw serde_json::Value)
                 let queued: Vec<serde_json::Value> = client.push_queue.drain(..).collect();
@@ -568,7 +612,17 @@ async fn handle_slim_subscribe(state: &CometdState, msg: &BayeuxRequest) -> Vec<
                             {
                                 let mut clients = state.clients.lock().await;
                                 if let Some(client) = clients.get_mut(&client_id) {
-                                    client.status_channels.insert(player_id.to_string(), response_channel.to_string());
+                                    let previous = client.status_channels.insert(player_id.to_string(), response_channel.to_string());
+                                    if previous.as_deref() != Some(response_channel) {
+                                        tracing::info!(
+                                            diagnostic = "cometd_readiness", stage = "status_subscribed",
+                                            client_id = %client_id, player_mac = log_preview(player_id, 64),
+                                            response_channel = log_preview(response_channel, 128),
+                                            connected = client.first_connect_at.is_some(),
+                                            elapsed_ms = client.handshake_at.elapsed().as_millis() as u64,
+                                            "CometD player-status subscription registered"
+                                        );
+                                    }
                                 }
                             }
                             // Include initial status inline
@@ -1249,6 +1303,25 @@ async fn notify_player_status_inner(state: &CometdState, player_mac: &str) {
             .collect()
     };
 
+    if subscriptions.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
+        let owner_id = state.mac_to_client.lock().await.get(player_mac).cloned();
+        let clients = state.clients.lock().await;
+        let owner = owner_id.as_ref().and_then(|id| clients.get(id));
+        let readiness = match owner {
+            Some(client) if client.first_connect_at.is_none() => "awaiting_connect",
+            Some(_) => "awaiting_status_subscription",
+            None => "no_session",
+        };
+        // Publishing can run periodically: keep this diagnostic below INFO.
+        tracing::debug!(
+            diagnostic = "cometd_readiness", stage = "no_status_subscriber",
+            player_mac = log_preview(player_mac, 64), client_id = owner_id.as_deref().unwrap_or(""),
+            readiness,
+            elapsed_ms = owner.map(|client| client.handshake_at.elapsed().as_millis() as u64).unwrap_or(0),
+            "CometD player status has no subscriber; nothing queued"
+        );
+    }
+
     for (client_id, response_channel) in subscriptions {
         let event = serde_json::json!({
             "channel": response_channel,
@@ -1560,13 +1633,220 @@ async fn evict_stale_clients(state: &CometdState, stale: Vec<(String, MacAddress
 mod tests {
     use super::*;
     use crate::squeeze::player::new_player_map;
+    use crate::squeeze::queue::QueueTrack;
     use axum::body::{to_bytes, Bytes};
     use std::time::Duration;
+    use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     const MAC: &str = "ab:cd:ef:01:02:03";
 
     fn test_state() -> CometdState {
         CometdState::new(new_player_map(), StreamingState::new())
+    }
+
+    #[derive(Clone, Default)]
+    struct DiagnosticCapture(Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>);
+
+    struct DiagnosticFields(HashMap<String, String>);
+
+    impl tracing::field::Visit for DiagnosticFields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for DiagnosticCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+            let mut fields = DiagnosticFields(HashMap::new());
+            event.record(&mut fields);
+            if fields.0.get("diagnostic").map(String::as_str) == Some("cometd_readiness") {
+                fields.0.insert("level".to_string(), event.metadata().level().to_string());
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+    }
+
+    impl DiagnosticCapture {
+        fn events(&self, stage: &str) -> Vec<HashMap<String, String>> {
+            self.0.lock().unwrap().iter()
+                .filter(|event| event.get("stage").map(String::as_str) == Some(stage))
+                .cloned().collect()
+        }
+    }
+
+    async fn connect(state: &CometdState, client_id: &str) -> Vec<serde_json::Value> {
+        request(state, serde_json::json!({
+            "channel": "/meta/connect", "clientId": client_id, "advice": {"timeout": 0},
+        })).await
+    }
+
+    async fn subscribe_status(state: &CometdState, client_id: &str) -> Vec<serde_json::Value> {
+        request(state, serde_json::json!({
+            "channel": "/slim/subscribe", "clientId": client_id,
+            "data": {"response": "/test/status", "request": [MAC, ["status", "-", "1", "subscribe:1"]]},
+        })).await
+    }
+
+    async fn set_track(state: &CometdState, id: i64, title: &str) {
+        let mut players = state.players.lock().await;
+        let player = players.get_mut(&parse_mac_address(MAC)).unwrap();
+        player.queue.set_tracks(vec![QueueTrack {
+            id, title: title.to_string(), artist: "Test artist".to_string(),
+            album: "Test album".to_string(), path: "test.flac".to_string(),
+            duration: 120.0, format: "flac".to_string(),
+        }], 0);
+    }
+
+    #[tokio::test]
+    async fn readiness_diagnostics_trace_handshake_first_connect_and_status_subscription() {
+        let capture = DiagnosticCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG).with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let state = test_state();
+        let message_id = "h".repeat(200);
+        let response = cometd_handler(AxumState(state.clone()), Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "channel": "/meta/handshake", "id": message_id, "ext": {"mac": MAC},
+            })).unwrap(),
+        )).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()["Content-Type"], "application/json");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let messages: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(messages[0]["id"], message_id, "diagnostics must not truncate wire IDs");
+        let client_id = messages[0]["clientId"].as_str().unwrap();
+        connect(&state, client_id).await;
+        connect(&state, client_id).await;
+        request(&state, serde_json::json!({
+            "channel": "/meta/subscribe", "clientId": client_id, "subscription": "/test/status",
+        })).await;
+        assert!(capture.events("status_subscribed").is_empty(),
+            "Bayeux channel subscription alone is not player-status readiness");
+        set_track(&state, 1, "Initial track").await;
+        let initial = subscribe_status(&state, client_id).await;
+        assert_eq!(initial[0]["data"]["title"], "Initial track");
+        subscribe_status(&state, client_id).await;
+
+        let handshakes = capture.events("handshake");
+        assert_eq!(handshakes.len(), 1, "handshake readiness event is missing");
+        assert_eq!(handshakes[0]["client_id"], client_id);
+        assert_eq!(handshakes[0]["player_mac"], MAC);
+        let responses = capture.events("handshake_response");
+        assert_eq!(responses.len(), 1, "handshake HTTP summary is missing");
+        assert_eq!(responses[0]["body_bytes"].parse::<usize>().unwrap(), body.len());
+        assert_eq!(responses[0]["response_messages"], "1");
+        assert_eq!(responses[0]["successful"], "true");
+        assert!(responses[0]["request_id"].len() <= 64, "diagnostic IDs must be bounded");
+        let connects = capture.events("first_connect");
+        assert_eq!(connects.len(), 1, "ordinary long-polls must not repeat readiness INFO");
+        assert_eq!(connects[0]["client_id"], client_id);
+        assert!(connects[0]["elapsed_ms"].parse::<u128>().is_ok());
+        let subscriptions = capture.events("status_subscribed");
+        assert_eq!(subscriptions.len(), 1, "unchanged status subscriptions must not repeat INFO");
+        assert_eq!(subscriptions[0]["client_id"], client_id);
+        assert_eq!(subscriptions[0]["player_mac"], MAC);
+        assert_eq!(subscriptions[0]["response_channel"], "/test/status");
+        assert_eq!(subscriptions[0]["connected"], "true");
+        assert!(subscriptions[0]["elapsed_ms"].parse::<u128>().is_ok());
+    }
+
+    #[tokio::test]
+    async fn unsubscribed_status_publish_diagnoses_stalled_handshake_without_info_spam() {
+        let capture = DiagnosticCapture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG).with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let state = test_state();
+        state.notify_player_status(MAC).await;
+        let old = handshake(&state, "Stalled session").await;
+        state.notify_player_status(MAC).await;
+        state.notify_player_status(MAC).await;
+        let replacement = handshake(&state, "Replacement").await;
+        let handshakes = capture.events("handshake");
+        assert_eq!(handshakes.len(), 2, "replacement must expose the prior stalled stage");
+        assert_eq!(handshakes[1]["previous_client_id"], old);
+        assert_eq!(handshakes[1]["previous_stage"], "awaiting_connect");
+        assert!(handshakes[1]["previous_elapsed_ms"].parse::<u128>().is_ok());
+        connect(&state, &replacement).await;
+        request(&state, serde_json::json!({
+            "channel": "/meta/subscribe", "clientId": replacement, "subscription": "/test/status",
+        })).await;
+        state.notify_player_status(MAC).await;
+        let missing = capture.events("no_status_subscriber");
+        assert_eq!(missing.len(), 4, "missing-subscriber stages must be observable");
+        assert!(missing.iter().all(|event| event["level"] == "DEBUG"),
+            "periodic publishing must not create new INFO spam");
+        assert_eq!(missing[0]["readiness"], "no_session");
+        assert_eq!(missing[1]["readiness"], "awaiting_connect");
+        assert_eq!(missing[1]["client_id"], old);
+        assert_eq!(missing[3]["readiness"], "awaiting_status_subscription");
+        assert_eq!(missing[3]["client_id"], replacement);
+        assert!(missing[3]["elapsed_ms"].parse::<u128>().is_ok());
+
+        subscribe_status(&state, &replacement).await;
+        set_track(&state, 2, "Changed track").await;
+        state.notify_player_status(MAC).await;
+        let delivered = connect(&state, &replacement).await;
+        assert_eq!(delivered[0]["channel"], "/test/status");
+        assert_eq!(delivered[0]["data"]["title"], "Changed track");
+        assert_eq!(capture.events("no_status_subscriber").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn replacement_handshake_reports_status_readiness_for_its_own_player() {
+        let capture = DiagnosticCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let state = test_state();
+        let old = handshake(&state, "Other player's status only").await;
+        connect(&state, &old).await;
+        request(&state, serde_json::json!({
+            "channel": "/slim/subscribe", "clientId": old,
+            "data": {"response": "/other/status", "request": ["ab:cd:ef:04:05:06", ["status", "-", "1", "subscribe:1"]]},
+        })).await;
+        let current = handshake(&state, "Own status").await;
+        let handshakes = capture.events("handshake");
+        assert_eq!(handshakes[1]["previous_stage"], "awaiting_status_subscription",
+            "another player's subscription must not imply readiness for this player");
+        subscribe_status(&state, &current).await;
+        connect(&state, &current).await;
+        handshake(&state, "Ready replacement").await;
+        assert_eq!(capture.events("handshake")[2]["previous_stage"], "ready");
+    }
+
+    #[tokio::test]
+    async fn restarted_server_resubscribe_delivers_changed_track_metadata() {
+        let before = test_state();
+        let old = handshake(&before, "Before restart").await;
+        connect(&before, &old).await;
+        set_track(&before, 1, "Before restart").await;
+        assert_eq!(subscribe_status(&before, &old).await[0]["data"]["title"], "Before restart");
+
+        // A new server has no prior sessions. This tests the server recovery
+        // contract, not the device behavior that omitted connect/subscribe.
+        let restarted = test_state();
+        let stale = connect(&restarted, &old).await;
+        assert_eq!(stale[0]["successful"], false);
+        assert_eq!(stale[0]["advice"]["reconnect"], "handshake");
+        let fresh = handshake(&restarted, "After restart").await;
+        connect(&restarted, &fresh).await;
+        set_track(&restarted, 2, "After restart").await;
+        assert_eq!(subscribe_status(&restarted, &fresh).await[0]["data"]["title"], "After restart");
+        set_track(&restarted, 3, "New selection").await;
+        restarted.notify_player_status(MAC).await;
+        let delivered = connect(&restarted, &fresh).await;
+        assert_eq!(delivered[0]["channel"], "/test/status");
+        assert_eq!(delivered[0]["data"]["track_id"], 3);
+        assert_eq!(delivered[0]["data"]["title"], "New selection");
+        assert_eq!(delivered[0]["data"]["artist"], "Test artist");
+        assert_eq!(delivered[0]["data"]["album"], "Test album");
+        assert_eq!(delivered[0]["data"]["duration"], 120.0);
+        assert_eq!(delivered[0]["data"]["artwork_url"], "/music/3/cover.jpg");
     }
 
     async fn request(state: &CometdState, message: serde_json::Value) -> Vec<serde_json::Value> {

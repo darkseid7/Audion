@@ -333,6 +333,17 @@ pub async fn start_streaming_server_with_listener(
     cometd_state: CometdState,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
+    start_streaming_server_with_listener_owned(listener, state, cometd_state,
+        shutdown, super::new_connection_tasks()).await
+}
+
+pub(super) async fn start_streaming_server_with_listener_owned(
+    listener: tokio::net::TcpListener,
+    state: StreamingState,
+    cometd_state: CometdState,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    connections: super::ConnectionTasks,
+) -> Result<(), String> {
     let http_state = HttpState { streaming: state, cometd: cometd_state };
 
     let app = Router::new()
@@ -354,7 +365,7 @@ pub async fn start_streaming_server_with_listener(
 
     tracing::info!("Squeeze HTTP: listening on port {}", listener.local_addr().map(|a| a.port()).unwrap_or(0));
 
-    let mut connections = tokio::task::JoinSet::new();
+    let mut connections = connections.lock().await;
     let shutdown_wait = async {
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -371,12 +382,12 @@ pub async fn start_streaming_server_with_listener(
         let (stream, addr) = match accepted {
             Ok(accepted) => accepted,
             Err(e) => {
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
+                connections.shutdown().await;
                 return Err(e.to_string());
             }
         };
         let app = app.clone();
+        let connection_shutdown = shutdown.clone();
 
         connections.spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);
@@ -394,7 +405,23 @@ pub async fn start_streaming_server_with_listener(
             let mut builder = hyper::server::conn::http1::Builder::new();
             builder.title_case_headers(true);
 
-            if let Err(e) = builder.serve_connection(io, service).await {
+            let connection = builder.serve_connection(io, service);
+            tokio::pin!(connection);
+            let shutdown_wait = async {
+                while !connection_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            let result = tokio::select! {
+                result = &mut connection => result,
+                _ = shutdown_wait => {
+                    // Disable keep-alive without discarding a pending CometD
+                    // response, and keep polling until its bytes are written.
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+            };
+            if let Err(e) = result {
                 // Don't log connection-reset errors (normal for clients disconnecting)
                 let msg = format!("{}", e);
                 if !msg.contains("reset") && !msg.contains("broken pipe") {
@@ -404,7 +431,9 @@ pub async fn start_streaming_server_with_listener(
         });
     }
     drop(listener);
-    connections.abort_all();
+    // Gracefully drain until SqueezeServer's one shared deadline. If this
+    // parent is forced out, its retained registry still owns child completion
+    // so stop can abort AND join every normal child before returning.
     while connections.join_next().await.is_some() {}
     Ok(())
 }
@@ -430,13 +459,18 @@ async fn http_logging_middleware(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
 
     const MAC: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 1]);
+
+    pub(crate) async fn hold_queue(state: &StreamingState)
+        -> tokio::sync::OwnedMutexGuard<HashMap<String, StreamEntry>> {
+        state.queue.clone().lock_owned().await
+    }
 
     async fn request_stream(state: StreamingState, query: &str) -> axum::response::Response {
         let cometd = CometdState::new(crate::squeeze::player::new_player_map(), state.clone());

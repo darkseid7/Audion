@@ -1,6 +1,7 @@
 // Audion - Local Spotify-style Music Player
 // Main library entry point
 
+mod app_exit;
 mod commands;
 mod db;
 #[cfg(desktop)]
@@ -301,6 +302,8 @@ pub fn run() {
     {
         builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
+
+    let exit_coordinator = std::sync::Arc::new(app_exit::AppExit::default());
 
     builder
         .setup(|app| {
@@ -893,6 +896,32 @@ pub fn run() {
                 ]
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| {
+            let action = exit_coordinator.on_event(&event);
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                match action {
+                    app_exit::ExitAction::Allow => {}
+                    app_exit::ExitAction::Prevent => api.prevent_exit(),
+                    app_exit::ExitAction::StopPlayers(code) => {
+                        api.prevent_exit();
+                        let app = app.clone();
+                        let coordinator = exit_coordinator.clone();
+                        tauri::async_runtime::spawn(async move {
+                            coordinator
+                                .stop_players(
+                                    async {
+                                        let state = app.state::<commands::squeeze::SqueezeState>();
+                                        state.0.lock().await.stop().await;
+                                    },
+                                    app_exit::APP_EXIT_TIMEOUT,
+                                )
+                                .await;
+                            app.exit(code);
+                        });
+                    }
+                }
+            }
+        });
 }

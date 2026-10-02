@@ -178,6 +178,11 @@ impl SqueezePlayer {
         self.tcp_session_id = None;
     }
 
+    /// Reject queued reader actions while retaining the writer for final stop.
+    pub(super) fn retire_tcp_session(&mut self) {
+        self.tcp_session_id = None;
+    }
+
     /// Get current elapsed time in milliseconds.
     /// Uses wall-clock time since playback started for smooth progress tracking.
     pub fn get_elapsed_ms(&self) -> u32 {

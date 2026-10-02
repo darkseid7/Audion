@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 
 /// HTTP port for the streaming server.
 pub const HTTP_PORT: u16 = 9000;
@@ -38,10 +38,22 @@ pub fn start_slimproto_server_with_listener(
     cometd: CometdState,
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
+    start_slimproto_server_with_listener_owned(listener, players, streaming, cometd,
+        shutdown, super::new_connection_tasks())
+}
+
+pub(super) fn start_slimproto_server_with_listener_owned(
+    listener: TcpListener,
+    players: PlayerMap,
+    streaming: StreamingState,
+    cometd: CometdState,
+    shutdown: Arc<AtomicBool>,
+    connections: super::ConnectionTasks,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("Squeeze TCP: listening on port 3483");
 
-        let mut connections = JoinSet::new();
+        let mut connections = connections.lock().await;
         let mut shutdown_poll = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             tokio::select! {
@@ -68,9 +80,9 @@ pub fn start_slimproto_server_with_listener(
                 }
             }
         }
-        // JoinSet also aborts these readers if the listener task is aborted.
-        connections.abort_all();
-        while connections.join_next().await.is_some() {}
+        // Normal flag shutdown joins here; forced parent shutdown is joined
+        // through SqueezeServer's retained completion owner.
+        connections.shutdown().await;
 
         tracing::info!("Squeeze TCP: server stopped");
     })
@@ -88,7 +100,7 @@ async fn handle_connection(
     let server_ip = detect_local_ip(&addr);
 
     // Read the first message — must be HELO
-    let (mac, session_id) = match read_and_parse_helo(&mut reader, writer, server_ip, &players).await {
+    let (mac, session_id) = match read_and_parse_helo(&mut reader, writer, server_ip, &players, &shutdown).await {
         Some(session) => session,
         None => {
             tracing::warn!("Squeeze TCP: connection from {} did not send valid HELO", addr);
@@ -316,6 +328,7 @@ async fn read_and_parse_helo(
     writer: tokio::net::tcp::OwnedWriteHalf,
     server_ip: Ipv4Addr,
     players: &PlayerMap,
+    shutdown: &AtomicBool,
 ) -> Option<(MacAddress, u64)> {
     let mut tag_buf = [0u8; 4];
     let mut len_buf = [0u8; 4];
@@ -352,6 +365,11 @@ async fn read_and_parse_helo(
             let name = extract_model_name(&helo.capabilities)
                 .unwrap_or_else(|| format!("Squeeze Player {}", mac));
             let mut map = players.lock().await;
+            // Shutdown publishes this flag while holding the same map guard.
+            // A HELO queued behind it must not replace a stopped TCP writer.
+            if shutdown.load(Ordering::Relaxed) {
+                return None;
+            }
 
             if let Some(existing) = map.get_mut(&mac) {
                 // Player already registered (e.g., via CometD). Merge TCP writer.
@@ -700,6 +718,113 @@ mod tests {
         frame
     }
 
+    #[tokio::test]
+    async fn queued_helo_cannot_replace_writer_after_shutdown_wins_player_lock() {
+        let players = new_player_map();
+        let streaming = StreamingState::new();
+        let cometd = CometdState::new(players.clone(), streaming.clone());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mac = MacAddress([2, 0, 0, 0, 0, 1]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _old_peer = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (old_socket, _) = listener.accept().await.unwrap();
+        let (_old_reader, old_writer) = old_socket.into_split();
+        let old_player = SqueezePlayer::new(mac, "Existing player".into(), String::new(),
+            old_writer, Ipv4Addr::LOCALHOST);
+        let old_session = old_player.tcp_session_id();
+        players.lock().await.insert(mac, old_player);
+
+        let mut replacement = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        let map = players.lock().await;
+        replacement.write_all(&helo_frame(mac.0)).await.unwrap();
+        socket.readable().await.unwrap();
+        let connection = handle_connection(socket, addr, players.clone(), streaming, cometd, shutdown.clone());
+        tokio::pin!(connection);
+        // Poll the received HELO while the real registration lock is held.
+        // This leaves registration queued behind shutdown's critical section.
+        assert!(futures::poll!(&mut connection).is_pending());
+        shutdown.store(true, Ordering::Relaxed);
+        drop(map);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), connection).await.unwrap();
+
+        let mut wire = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacement.read_to_end(&mut wire))
+            .await.unwrap().unwrap();
+        assert!(wire.is_empty(), "a post-shutdown HELO was admitted and handshaken");
+        assert_eq!(players.lock().await.get(&mac).and_then(|player| player.tcp_session_id()), old_session,
+            "queued HELO replaced shutdown's existing writer");
+    }
+
+    #[tokio::test]
+    async fn already_read_stat_cannot_revive_state_after_first_shutdown_reset() {
+        let mut server = crate::squeeze::SqueezeServer::new();
+        let mac = MacAddress([2, 0, 0, 0, 0, 1]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut hardware = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (socket, addr) = listener.accept().await.unwrap();
+        // A read-only duplicate observes when the real reader consumed STAT;
+        // it never supplies a mocked protocol or consumes any receive bytes.
+        let socket = socket.into_std().unwrap();
+        let observed_socket = socket.try_clone().unwrap();
+        let socket = tokio::net::TcpStream::from_std(socket).unwrap();
+        let connection = handle_connection(socket, addr, server.players.clone(),
+            server.streaming.clone(), server.cometd.clone(), server.shutdown_flag.clone());
+        tokio::pin!(connection);
+        hardware.write_all(&helo_frame(mac.0)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                _ = &mut connection => panic!("connection ended during handshake"),
+                _ = async {
+                    for _ in 0..5 {
+                        let mut len = [0; 2];
+                        hardware.read_exact(&mut len).await.unwrap();
+                        hardware.read_exact(&mut vec![0; u16::from_be_bytes(len) as usize]).await.unwrap();
+                    }
+                } => {}
+            }
+        }).await.unwrap();
+        // Ensure the read loop entered its pending tag read before shutdown.
+        assert!(futures::poll!(&mut connection).is_pending());
+        server.cometd.mac_to_client.lock().await.insert(mac.to_string(), "observer".into());
+        let observed_state = {
+            let queue_guard = crate::squeeze::streaming::tests::hold_queue(&server.streaming).await;
+            let prepare = server.prepare_shutdown_status();
+            tokio::pin!(prepare);
+            // This real queue lock holds prepare AFTER its first player reset.
+            assert!(futures::poll!(&mut prepare).is_pending());
+            assert_eq!(server.players.lock().await[&mac].state, PlayerState::Stopped);
+            let stat = client_frame(b"STAT", b"STMs");
+            hardware.write_all(&stat).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut peek = [0; 64];
+                loop {
+                    if observed_socket.peek(&mut peek).is_ok_and(|bytes| bytes == stat.len()) { break; }
+                    tokio::task::yield_now().await;
+                }
+                loop {
+                    // Drive the actual handler through its queued STAT, rather
+                    // than assuming a successful client write means it ran.
+                    if futures::poll!(&mut connection).is_ready() { break; }
+                    match observed_socket.peek(&mut peek) {
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        _ => tokio::task::yield_now().await,
+                    }
+                }
+            }).await.unwrap();
+            let state = server.players.lock().await[&mac].state;
+            drop(queue_guard);
+            prepare.await;
+            state
+        };
+        server.stop().await;
+        drop(observed_socket);
+
+        assert_eq!(observed_state, PlayerState::Stopped,
+            "a STAT consumed after the first stopped reset revived playback state");
+    }
+
     async fn connect_test_player(
         mac: [u8; 6],
         players: &PlayerMap,
@@ -805,7 +930,7 @@ mod tests {
         tokio::task::yield_now().await;
         let takeover = tokio::spawn({
             let players = players.clone();
-            async move { read_and_parse_helo(&mut reader, writer, Ipv4Addr::LOCALHOST, &players).await }
+            async move { read_and_parse_helo(&mut reader, writer, Ipv4Addr::LOCALHOST, &players, &AtomicBool::new(false)).await }
         });
         tokio::task::yield_now().await;
         drop(guard);
