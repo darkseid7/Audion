@@ -29,6 +29,9 @@
     "addFolderToGetStarted": "Añade una carpeta de música para comenzar"
   },
   "album": {
+    "gridView": "Vista de cuadrícula",
+    "listView": "Vista de lista",
+    "viewMode": "Vista de álbumes",
     "loading": "Cargando álbum...",
     "type": "Álbum",
     "songs": "{count} canciones",

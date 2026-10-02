@@ -39,6 +39,31 @@
     import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
     import { likedAlbumIds } from "$lib/stores/liked-albums";
     import { _ } from "svelte-i18n";
+    import {
+        loadAlbumView,
+        saveAlbumView,
+        albumViewTransitionDuration,
+        type AlbumView,
+    } from "$lib/stores/album-view";
+
+    let albumView: AlbumView = loadAlbumView();
+    let albumGridBody: HTMLDivElement;
+    let viewAnimation: Animation | null = null;
+
+    function selectAlbumView(value: AlbumView) {
+        if (value === albumView) return;
+        albumView = value;
+        saveAlbumView(value);
+        viewAnimation?.cancel();
+        viewAnimation = null;
+        const duration = albumViewTransitionDuration();
+        if (duration > 0 && typeof albumGridBody?.animate === "function") {
+            viewAnimation = albumGridBody.animate(
+                [{ opacity: 0.45 }, { opacity: 1 }],
+                { duration, easing: "ease-out" },
+            );
+        }
+    }
 
     let currentScrollTop = getScroll("albums");
 
@@ -46,6 +71,7 @@
     let showOnlyFavorites = _showOnlyFavorites;
 
     onDestroy(() => {
+        viewAnimation?.cancel();
         saveScroll("albums", currentScrollTop);
         _searchQuery = searchQuery;
         _showOnlyFavorites = showOnlyFavorites;
@@ -66,8 +92,14 @@
     const ALBUM_SORT_STORAGE_KEY = "audion_album_sort";
 
     function loadAlbumSort(): AlbumSortOption {
-        if (typeof localStorage === "undefined") return "artist-asc";
-        const saved = localStorage.getItem(ALBUM_SORT_STORAGE_KEY);
+        let saved: string | null;
+        try {
+            saved = typeof localStorage === "undefined"
+                ? null
+                : localStorage.getItem(ALBUM_SORT_STORAGE_KEY);
+        } catch {
+            return "artist-asc";
+        }
         if (
             saved === "artist-asc" ||
             saved === "artist-desc" ||
@@ -135,8 +167,14 @@
         };
     });
 
-    $: if (typeof localStorage !== "undefined") {
-        localStorage.setItem(ALBUM_SORT_STORAGE_KEY, albumSort);
+    $: {
+        try {
+            if (typeof localStorage !== "undefined") {
+                localStorage.setItem(ALBUM_SORT_STORAGE_KEY, albumSort);
+            }
+        } catch {
+            // Sorting remains usable when browser storage is unavailable.
+        }
     }
 
     // Playback state
@@ -773,7 +811,7 @@
     };
 </script>
 
-<div class="albums-grid">
+<div class="albums-grid" class:list-view={albumView === "list"}>
     <div class="albums-toolbar-wrap">
         <div class="albums-toolbar">
             <div class="search-filter-group">
@@ -809,6 +847,39 @@
                     </svg>
                 </button>
             </div>
+            <div class="toolbar-actions">
+                <div class="view-controls" role="group" aria-label={$_("album.viewMode")}>
+                    <button
+                        type="button"
+                        class="view-button"
+                        class:active={albumView === "grid"}
+                        title={$_("album.gridView")}
+                        aria-label={$_("album.gridView")}
+                        aria-pressed={albumView === "grid"}
+                        on:click={() => selectAlbumView("grid")}
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+                            <rect x="3" y="3" width="7" height="7" rx="1" />
+                            <rect x="14" y="3" width="7" height="7" rx="1" />
+                            <rect x="3" y="14" width="7" height="7" rx="1" />
+                            <rect x="14" y="14" width="7" height="7" rx="1" />
+                        </svg>
+                    </button>
+                    <button
+                        type="button"
+                        class="view-button"
+                        class:active={albumView === "list"}
+                        title={$_("album.listView")}
+                        aria-label={$_("album.listView")}
+                        aria-pressed={albumView === "list"}
+                        on:click={() => selectAlbumView("list")}
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true">
+                            <path d="M9 5h12M9 12h12M9 19h12" />
+                            <path d="M3 4h2v2H3zM3 11h2v2H3zM3 18h2v2H3z" />
+                        </svg>
+                    </button>
+                </div>
             <div class="sort-group">
                 <span class="sort-label">Ordenar por</span>
             <div class="sort-dropdown">
@@ -852,12 +923,14 @@
                 {/if}
             </div>
             </div>
+            </div>
         </div>
     </div>
 
-    <div class="albums-grid-body">
+    <div class="albums-grid-body" bind:this={albumGridBody}>
         <VirtualizedGrid
             items={sortedAlbums}
+            layout={albumView}
             bind:currentScrollTop
             initialScrollTop={currentScrollTop}
             onItemClick={handleAlbumClick}
@@ -866,8 +939,10 @@
             emptyStateConfig={emptyState}
             cardWidthDesktop={240}
             cardWidthMobile={170}
-            cardHeightDesktop={380}
-            cardHeightMobile={305}
+            cardHeightDesktop={albumView === "list" ? 104 : 380}
+            cardHeightMobile={albumView === "list" ? 104 : 305}
+            gridGapDesktop={albumView === "list" ? 8 : 24}
+            gridGapMobile={8}
             let:item={album}
         >
             {@const cover = getAlbumCoverFromTracks(album.id)}
@@ -876,6 +951,7 @@
             {@const audioInfo = albumAudioInfoById.get(album.id)}
 
             <MediaCard
+                layout={albumView}
                 {isNowPlaying}
                 {isPaused}
                 isPinned={isPinned("album", album.id, $pinnedItems)}
@@ -1051,6 +1127,51 @@
         background: color-mix(in oklab, var(--accent-primary) 12%, transparent);
     }
 
+    .toolbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+    }
+
+    .view-controls {
+        display: flex;
+        flex-shrink: 0;
+        padding: 2px;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        background: var(--bg-card);
+    }
+
+    .view-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+    }
+
+    .view-button:hover {
+        background: var(--bg-highlight);
+        color: var(--text-primary);
+    }
+
+    .view-button.active {
+        background: var(--bg-highlight);
+        color: var(--accent-primary);
+    }
+
+    .view-button:focus-visible {
+        outline: 2px solid var(--accent-primary);
+        outline-offset: 2px;
+    }
+
     .sort-group {
         display: flex;
         align-items: center;
@@ -1166,8 +1287,14 @@
             min-width: 0;
         }
 
-        .sort-group {
+        .toolbar-actions {
             width: 100%;
+            gap: 8px;
+        }
+
+        .sort-group {
+            flex: 1;
+            min-width: 0;
         }
 
         .sort-menu {
@@ -1195,6 +1322,12 @@
         flex-wrap: wrap;
         gap: 4px;
         margin-top: 8px;
+    }
+
+    .list-view .audio-chips {
+        flex-wrap: nowrap;
+        margin-top: 0;
+        overflow: hidden;
     }
 
     .audio-chip {

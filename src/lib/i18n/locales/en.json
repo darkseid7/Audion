@@ -34,6 +34,9 @@
     "addFolderToGetStarted": "Add a music folder to get started"
   },
   "album": {
+    "gridView": "Grid view",
+    "listView": "List view",
+    "viewMode": "Album view",
     "loading": "Loading album...",
     "type": "Album",
     "songs": "{count} songs",

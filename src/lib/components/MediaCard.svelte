@@ -14,6 +14,7 @@
   export let pauseTooltip = "Pause";
   export let ariaLabel = "";
   export let variant: "square" | "round" = "square";
+  export let layout: "grid" | "list" = "grid";
   export let coverBackground = "";
   export let primaryText = "";
   export let secondaryText = "";
@@ -130,6 +131,7 @@
 
 <div
   class="media-card"
+  class:list-view={layout === "list"}
   class:now-playing={isNowPlaying}
   class:paused={isPaused}
   class:centered={isCentered}
@@ -183,6 +185,7 @@
         <button
           class="pause-button-overlay"
           data-pause-tooltip={pauseTooltip}
+          title={layout === "list" ? pauseTooltip : undefined}
           on:click|stopPropagation={() => dispatch("pause")}
           aria-label={pauseTooltip}
         >
@@ -205,6 +208,7 @@
           class="play-button"
           data-mediacard-play
           data-play-tooltip={isPaused ? resumeTooltip : playTooltip}
+          title={layout === "list" ? (isPaused ? resumeTooltip : playTooltip) : undefined}
           aria-label={isPaused ? resumeTooltip : playTooltip}
           on:click|stopPropagation={() => dispatch("play")}
         >
@@ -715,6 +719,38 @@
     }
   }
 
+  .media-card.list-view {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm);
+  }
+
+  .list-view .cover {
+    width: 72px;
+    height: 72px;
+    flex: 0 0 72px;
+    max-height: none;
+    margin-bottom: 0;
+  }
+
+  .list-view .play-button::after,
+  .list-view .pause-button-overlay::after {
+    display: none;
+  }
+
+  .list-view .info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .list-view .badge {
+    position: static;
+    order: 1;
+    flex-shrink: 0;
+    font-size: 0.625rem;
+  }
+
   /* Mobile */
   @media (max-width: 768px) {
     .media-card {
@@ -722,6 +758,12 @@
     }
     .cover {
       margin-bottom: var(--spacing-sm);
+    }
+    .list-view .cover {
+      width: 64px;
+      height: 64px;
+      flex-basis: 64px;
+      margin-bottom: 0;
     }
     .text-track:not(.secondary) .text-inner {
       font-size: 0.8125rem;

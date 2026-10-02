@@ -1,5 +1,5 @@
 <script lang="ts" generics="T">
-    import { onMount, onDestroy } from 'svelte';
+    import { afterUpdate, onMount, onDestroy } from 'svelte';
 
     // Generic type T
     type Item = T;
@@ -16,6 +16,7 @@
     } | undefined = undefined;
 
     // Virtual scrolling configuration
+    export let layout: 'grid' | 'list' = 'grid';
     export let cardWidthDesktop = 180;
     export let cardWidthMobile = 140;
     export let gridGapDesktop = 24;
@@ -38,6 +39,7 @@
     // Responsive values
     let containerWidth = 800;
     let containerHeight = 600;
+    let containerPaddingHeight = 0;
     let scrollTop = 0;
     let containerElement: HTMLDivElement;
 
@@ -55,7 +57,7 @@
     }
 
     // Calculate columns based on container width
-    $: columns = Math.max(1, Math.floor((containerWidth - (gridGap * 2) + gridGap) / (cardWidth + gridGap)));
+    $: columns = layout === 'list' ? 1 : Math.max(1, Math.floor((containerWidth - (gridGap * 2) + gridGap) / (cardWidth + gridGap)));
 
     // Each row is cardHeight + gridGap
     $: ROW_HEIGHT = cardHeight > 0 ? cardHeight + gridGap : 1;
@@ -97,22 +99,64 @@
         visibleRows: [] as ItemRow[],
     };
 
-    // virtual scrolling
-    $: {
-        const totalRows = Math.ceil(items.length / columns);
-        const totalHeight = totalRows * ROW_HEIGHT;
+    let previousGeometry: { columns: number; rowHeight: number } | undefined;
+    let pendingScrollTop: number | undefined;
+
+    // Keep the first visible item near the same viewport position when changing
+    // layout or responsive dimensions, before calculating the visible rows.
+    $: updateVirtualScroll(items, columns, ROW_HEIGHT, containerHeight, containerPaddingHeight, scrollTop, overscan);
+
+    function updateVirtualScroll(
+        currentItems: Item[], columnCount: number, rowHeight: number,
+        viewportHeight: number, verticalPadding: number, currentOffset: number, extraRows: number,
+    ) {
+        const totalRows = Math.ceil(currentItems.length / columnCount);
+        const totalHeight = totalRows * rowHeight;
+        let nextScrollTop = currentOffset;
+
+        if (previousGeometry && (previousGeometry.columns !== columnCount || previousGeometry.rowHeight !== rowHeight)) {
+            const oldRow = Math.floor(currentOffset / previousGeometry.rowHeight);
+            const firstVisibleItem = oldRow * previousGeometry.columns;
+            const rowFraction = (currentOffset % previousGeometry.rowHeight) / previousGeometry.rowHeight;
+            nextScrollTop = (Math.floor(firstVisibleItem / columnCount) + rowFraction) * rowHeight;
+        }
+        // clientHeight includes padding, while the virtual spacer does not.
+        nextScrollTop = Math.max(0, Math.min(nextScrollTop, Math.max(0, totalHeight + verticalPadding - viewportHeight)));
+        previousGeometry = { columns: columnCount, rowHeight };
+        if (nextScrollTop !== currentOffset) {
+            scrollTop = nextScrollTop;
+            currentScrollTop = nextScrollTop;
+            pendingScrollTop = nextScrollTop;
+        }
         
-        const startRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - overscan);
-        const endRow = Math.min(totalRows, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + overscan);
+        const startRow = Math.max(0, Math.floor(nextScrollTop / rowHeight) - extraRows);
+        const endRow = Math.min(totalRows, Math.ceil((nextScrollTop + viewportHeight) / rowHeight) + extraRows);
         
         const visibleRows: ItemRow[] = [];
         for (let rowIndex = startRow; rowIndex < endRow; rowIndex++) {
-            const startIdx = rowIndex * columns;
-            const rowItems = items.slice(startIdx, Math.min(startIdx + columns, items.length));
+            const startIdx = rowIndex * columnCount;
+            const rowItems = currentItems.slice(startIdx, Math.min(startIdx + columnCount, currentItems.length));
             if (rowItems.length > 0) visibleRows.push({ rowIndex, items: rowItems });
         }
 
-        virtualScrollState = { totalHeight, startRow, endRow, offsetY: startRow * ROW_HEIGHT, visibleRows };
+        virtualScrollState = { totalHeight, startRow, endRow, offsetY: startRow * rowHeight, visibleRows };
+    }
+
+    // The spacer must have its new height before assigning the anchored scroll
+    // position; otherwise the browser may clamp it against the old layout.
+    afterUpdate(() => {
+        syncContainerObserver();
+        updateContainerPadding();
+        if (pendingScrollTop === undefined) return;
+        const target = pendingScrollTop;
+        pendingScrollTop = undefined;
+        if (containerElement && scrollTop === target) containerElement.scrollTop = target;
+    });
+
+    function updateContainerPadding() {
+        if (!containerElement) return;
+        const style = getComputedStyle(containerElement);
+        containerPaddingHeight = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
     }
 
     // Shared event delegation (one listener for the whole grid)
@@ -175,33 +219,46 @@
 
     // ResizeObserver
     let resizeObserver: ResizeObserver | undefined;
+    let observedContainer: HTMLDivElement | undefined;
 
-    onMount(() => {
+    function updateContainerSize() {
+        // A callback already queued before disconnect can outlive the node.
         if (!containerElement) return;
+        containerHeight = containerElement.clientHeight;
+        containerWidth = containerElement.clientWidth;
+        updateContainerPadding();
+    }
 
-        const update = () => {
-            containerHeight = containerElement.clientHeight;
-            containerWidth = containerElement.clientWidth;
-        };
-        update();
+    function syncContainerObserver() {
+        if (observedContainer === containerElement) return;
+        resizeObserver?.disconnect();
+        observedContainer = containerElement;
+        if (!containerElement) return;
+        updateContainerSize();
 
-        if (initialScrollTop > 0) {
-            containerElement.scrollTop = initialScrollTop;
+        if (!scrollRestored) {
+            if (initialScrollTop > 0) containerElement.scrollTop = initialScrollTop;
+            scrollRestored = true;
         }
-        scrollRestored = true;
 
         if (typeof ResizeObserver !== 'undefined') {
-            resizeObserver = new ResizeObserver(update);
+            resizeObserver ??= new ResizeObserver(updateContainerSize);
             resizeObserver.observe(containerElement);
-        } else {
-            window.addEventListener('resize', update);
-            return () => window.removeEventListener('resize', update);
+        }
+    }
+
+    onMount(() => {
+        syncContainerObserver();
+        if (typeof ResizeObserver === 'undefined') {
+            window.addEventListener('resize', updateContainerSize);
+            return () => window.removeEventListener('resize', updateContainerSize);
         }
     });
 
     onDestroy(() => {
         resizeObserver?.disconnect();
         resizeObserver = undefined;
+        observedContainer = undefined;
         itemIndexMap.clear();
         containerElement = undefined as any;
     });

@@ -29,6 +29,9 @@
     "addFolderToGetStarted": "Ajoutez un dossier de musique pour commencer"
   },
   "album": {
+    "gridView": "Vue en grille",
+    "listView": "Vue en liste",
+    "viewMode": "Affichage des albums",
     "loading": "Chargement de l'album...",
     "type": "Album",
     "songs": "{count} titres",
