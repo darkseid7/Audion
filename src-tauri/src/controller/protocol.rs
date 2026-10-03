@@ -94,6 +94,61 @@ fn optional_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Err
     Ok(Some(value))
 }
 
+// A custom field deserializer without `default` makes the key required even for Option.
+fn required_nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(d)
+}
+// Use with `default` only for truly optional TS fields: absent is valid, null is not.
+fn optional_value<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+fn nullable_revision<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Option::<serde_json::Number>::deserialize(d)?
+        .map(|value| safe_number(&value).ok_or_else(|| D::Error::custom("unsafe integer")))
+        .transpose()
+}
+fn nullable_entity_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let value = nullable_revision(d)?;
+    if value == Some(0) {
+        return Err(D::Error::custom("entity ID must be positive"));
+    }
+    Ok(value)
+}
+fn nullable_signed_integer<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Option::<serde_json::Number>::deserialize(d)?
+        .map(|value| {
+            let number = value
+                .as_f64()
+                .ok_or_else(|| D::Error::custom("invalid signed integer"))?;
+            if !number.is_finite()
+                || number.abs() > MAX_SAFE_INTEGER as f64
+                || number.fract() != 0.0
+            {
+                return Err(D::Error::custom("unsafe signed integer"));
+            }
+            Ok(number as i64)
+        })
+        .transpose()
+}
+fn finite<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let value = f64::deserialize(d)?;
+    if !value.is_finite() {
+        return Err(D::Error::custom("nonfinite number"));
+    }
+    Ok(value)
+}
+fn nullable_finite<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let value = Option::<f64>::deserialize(d)?;
+    if value.is_some_and(|number| !number.is_finite()) {
+        return Err(D::Error::custom("nonfinite number"));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationMode {
@@ -142,8 +197,13 @@ pub enum OutputRef {
 )]
 pub enum SnapshotOutputRef {
     Pc {},
-    Squeeze { player_id: String },
-    DesktopOnly { reason: String },
+    Squeeze {
+        #[serde(deserialize_with = "identifier")]
+        player_id: String,
+    },
+    DesktopOnly {
+        reason: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -277,7 +337,8 @@ pub struct CommandEnvelope {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawCommandEnvelope {
-    protocol_version: u8,
+    #[serde(deserialize_with = "safe_revision")]
+    protocol_version: u64,
     #[serde(deserialize_with = "identifier")]
     request_id: String,
     preconditions: CommandPreconditions,
@@ -328,7 +389,7 @@ impl TryFrom<RawCommandEnvelope> for CommandEnvelope {
             return Err("missing required revision".into());
         }
         let envelope = Self {
-            protocol_version: raw.protocol_version,
+            protocol_version: 1,
             request_id: raw.request_id,
             preconditions: raw.preconditions,
             intent: raw.intent,
@@ -379,19 +440,24 @@ pub struct ControlError {
 )]
 pub enum ExecutionResult {
     Applied {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
     },
     Accepted {
+        #[serde(deserialize_with = "identifier")]
         job_id: String,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
     },
     Failed {
         error: ControlError,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         partial_effects: Vec<String>,
     },
     Superseded {
         error: ControlError,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         partial_effects: Vec<String>,
     },
@@ -405,15 +471,18 @@ pub enum ExecutionResult {
 )]
 pub enum CompletedExecutionResult {
     Applied {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
     },
     Failed {
         error: ControlError,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         partial_effects: Vec<String>,
     },
     Superseded {
         error: ControlError,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         partial_effects: Vec<String>,
     },
@@ -422,14 +491,18 @@ pub enum CompletedExecutionResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtworkReference {
+    #[serde(deserialize_with = "identifier")]
     pub resource_id: String,
+    #[serde(deserialize_with = "safe_revision")]
     pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualitySummary {
+    #[serde(deserialize_with = "required_nullable")]
     pub format: Option<String>,
+    #[serde(deserialize_with = "nullable_revision")]
     pub bitrate: Option<u64>,
     pub badges: Vec<String>,
 }
@@ -437,24 +510,39 @@ pub struct QualitySummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayTrack {
+    #[serde(deserialize_with = "entity_id")]
     pub id: u64,
+    #[serde(deserialize_with = "required_nullable")]
     pub title: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
     pub artist: Option<String>,
+    #[serde(deserialize_with = "nullable_entity_id")]
     pub album_id: Option<u64>,
+    #[serde(deserialize_with = "required_nullable")]
     pub album: Option<String>,
+    #[serde(deserialize_with = "nullable_finite")]
     pub duration: Option<f64>,
+    #[serde(deserialize_with = "nullable_revision")]
     pub track_number: Option<u64>,
+    #[serde(deserialize_with = "nullable_revision")]
     pub disc_number: Option<u64>,
     pub quality: QualitySummary,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artwork: Option<ArtworkReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AlbumSortSummary {
+    #[serde(deserialize_with = "required_nullable")]
     pub artist: Option<String>,
+    #[serde(deserialize_with = "nullable_signed_integer")]
     pub year: Option<i64>,
+    #[serde(deserialize_with = "required_nullable")]
     pub date_added: Option<String>,
     pub name: String,
 }
@@ -462,29 +550,44 @@ pub struct AlbumSortSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayAlbum {
+    #[serde(deserialize_with = "entity_id")]
     pub id: u64,
     pub name: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub artist: Option<String>,
+    #[serde(deserialize_with = "nullable_signed_integer")]
     pub year: Option<i64>,
     pub quality_badges: Vec<String>,
     pub sort_summary: AlbumSortSummary,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artwork: Option<ArtworkReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayArtist {
+    #[serde(deserialize_with = "identifier")]
     pub name: String,
+    #[serde(deserialize_with = "safe_revision")]
     pub track_count: u64,
+    #[serde(deserialize_with = "safe_revision")]
     pub album_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artwork: Option<ArtworkReference>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueueEntry {
+    #[serde(deserialize_with = "identifier")]
     pub entry_id: String,
     pub track: DisplayTrack,
 }
@@ -493,7 +596,9 @@ pub struct QueueEntry {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Page<T> {
     pub items: Vec<T>,
+    #[serde(deserialize_with = "nullable_identifier")]
     pub next_cursor: Option<String>,
+    #[serde(deserialize_with = "safe_revision")]
     pub revision: u64,
 }
 
@@ -520,7 +625,11 @@ pub enum ApplicationQuery {
     Snapshot {},
     Outputs {},
     Albums {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "optional_value",
+            skip_serializing_if = "Option::is_none"
+        )]
         sort: Option<AlbumSort>,
         #[serde(
             default,
@@ -719,17 +828,21 @@ pub struct HostCapabilities {
 )]
 pub enum PlaybackContext {
     Album {
+        #[serde(deserialize_with = "entity_id")]
         album_id: u64,
         play_mode: AlbumPlayMode,
     },
     Playlist {
+        #[serde(deserialize_with = "entity_id")]
         playlist_id: u64,
     },
     Artist {
+        #[serde(deserialize_with = "identifier")]
         artist_name: String,
     },
     Liked {},
     Track {
+        #[serde(deserialize_with = "entity_id")]
         track_id: u64,
     },
     Queue {},
@@ -739,39 +852,62 @@ pub enum PlaybackContext {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlaybackState {
     pub status: PlaybackStatus,
+    #[serde(deserialize_with = "required_nullable")]
     pub track: Option<DisplayTrack>,
+    #[serde(deserialize_with = "required_nullable")]
     pub context: Option<PlaybackContext>,
+    #[serde(deserialize_with = "finite")]
     pub position: f64,
+    #[serde(deserialize_with = "nullable_finite")]
     pub duration: Option<f64>,
+    #[serde(deserialize_with = "volume")]
     pub volume: f64,
     pub shuffle: bool,
     pub repeat: RepeatMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub error: Option<ControlError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueueSummary {
+    #[serde(deserialize_with = "safe_revision")]
     pub count: u64,
+    #[serde(deserialize_with = "nullable_identifier")]
     pub current_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DomainRevisions {
+    #[serde(deserialize_with = "safe_revision")]
     pub library_revision: u64,
+    #[serde(deserialize_with = "safe_revision")]
     pub queue_revision: u64,
+    #[serde(deserialize_with = "safe_revision")]
     pub output_revision: u64,
+    #[serde(deserialize_with = "safe_revision")]
     pub settings_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsProjection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub album_view: Option<AlbumView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reduced_motion: Option<bool>,
 }
 
@@ -784,14 +920,19 @@ pub struct SettingsProjection {
 )]
 pub enum JobSummary {
     Pending {
+        #[serde(deserialize_with = "identifier")]
         job_id: String,
+        #[serde(deserialize_with = "nullable_finite")]
         progress: Option<f64>,
     },
     Running {
+        #[serde(deserialize_with = "identifier")]
         job_id: String,
+        #[serde(deserialize_with = "nullable_finite")]
         progress: Option<f64>,
     },
     Completed {
+        #[serde(deserialize_with = "identifier")]
         job_id: String,
         result: CompletedExecutionResult,
     },
@@ -800,8 +941,11 @@ pub enum JobSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostSnapshot {
+    #[serde(deserialize_with = "identifier")]
     pub host_id: String,
+    #[serde(deserialize_with = "identifier")]
     pub host_epoch: String,
+    #[serde(deserialize_with = "safe_revision")]
     pub revision: u64,
     pub revisions: DomainRevisions,
     pub playback: PlaybackState,
@@ -822,34 +966,45 @@ pub struct HostSnapshot {
 )]
 pub enum HostEvent {
     Playback {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         playback: PlaybackState,
     },
     Queue {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
+        #[serde(deserialize_with = "safe_revision")]
         queue_revision: u64,
         queue: QueueSummary,
     },
     Library {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
+        #[serde(deserialize_with = "safe_revision")]
         library_revision: u64,
     },
     Output {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
+        #[serde(deserialize_with = "safe_revision")]
         output_revision: u64,
         output: SnapshotOutputRef,
         outputs: Vec<AvailableOutput>,
     },
     Settings {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
+        #[serde(deserialize_with = "safe_revision")]
         settings_revision: u64,
         settings: SettingsProjection,
     },
     Capabilities {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         capabilities: HostCapabilities,
     },
     Job {
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
         job: JobSummary,
     },
@@ -866,6 +1021,7 @@ pub enum ApplicationUpdate {
         snapshot: HostSnapshot,
     },
     Events {
+        #[serde(deserialize_with = "identifier")]
         host_epoch: String,
         events: Vec<HostEvent>,
     },
@@ -916,6 +1072,7 @@ pub enum QueryResult {
     },
     Outputs {
         outputs: Vec<AvailableOutput>,
+        #[serde(deserialize_with = "safe_revision")]
         revision: u64,
     },
 }
@@ -941,6 +1098,18 @@ mod tests {
                         .all(|(key, value)| b.get(key).is_some_and(|b| equivalent_json(value, b)))
             }
             _ => actual == expected,
+        }
+    }
+
+    #[test]
+    fn accepts_protocol_version_numeric_representations() {
+        for version in ["1", "1.0", "1e0"] {
+            let raw = format!(
+                r#"{{"protocolVersion":{version},"requestId":"r","preconditions":{{"hostEpoch":"e","outputRevision":0}},"intent":{{"type":"pause"}}}}"#
+            );
+            let envelope: CommandEnvelope =
+                serde_json::from_str(&raw).unwrap_or_else(|error| panic!("{version}: {error}"));
+            assert_eq!(envelope.protocol_version, 1);
         }
     }
 
@@ -977,6 +1146,320 @@ mod tests {
                 "{} was accepted",
                 case["name"]
             );
+        }
+    }
+
+    fn track_fixture() -> serde_json::Value {
+        serde_json::json!({"id":1,"title":"","artist":null,"albumId":null,"album":null,"duration":null,"trackNumber":null,"discNumber":null,"quality":{"format":null,"bitrate":null,"badges":[]}})
+    }
+    fn playback_fixture() -> serde_json::Value {
+        serde_json::json!({"status":"stopped","track":null,"context":null,"position":0,"duration":null,"volume":0,"shuffle":false,"repeat":"none"})
+    }
+    fn snapshot_fixture() -> serde_json::Value {
+        serde_json::json!({"hostId":"h","hostEpoch":"e","revision":0,"revisions":{"libraryRevision":0,"queueRevision":0,"outputRevision":0,"settingsRevision":0},"playback":playback_fixture(),"queue":{"count":0,"currentEntryId":null},"output":{"kind":"pc"},"outputs":[],"capabilities":{"queries":[],"intents":[]},"settings":{},"jobs":[]})
+    }
+    fn rejects_field_values<T: serde::de::DeserializeOwned>(
+        fixture: &serde_json::Value,
+        field: &str,
+        invalid: &[serde_json::Value],
+    ) {
+        assert!(
+            serde_json::from_value::<T>(fixture.clone()).is_ok(),
+            "valid {} fixture",
+            std::any::type_name::<T>()
+        );
+        for value in invalid {
+            let mut changed = fixture.clone();
+            changed[field] = value.clone();
+            assert!(
+                serde_json::from_value::<T>(changed).is_err(),
+                "{} accepted {field}={value}",
+                std::any::type_name::<T>()
+            );
+        }
+    }
+    fn requires_nullable_fields<T: serde::de::DeserializeOwned>(
+        fixture: &serde_json::Value,
+        fields: &[&str],
+    ) {
+        assert!(
+            serde_json::from_value::<T>(fixture.clone()).is_ok(),
+            "explicit nullable fields should be accepted"
+        );
+        for field in fields {
+            let mut missing = fixture.clone();
+            missing.as_object_mut().unwrap().remove(*field);
+            assert!(
+                serde_json::from_value::<T>(missing).is_err(),
+                "{} accepted missing {field}",
+                std::any::type_name::<T>()
+            );
+        }
+    }
+    fn invalid_identifiers() -> Vec<serde_json::Value> {
+        vec![serde_json::json!(""), serde_json::json!("é".repeat(129))]
+    }
+    fn invalid_revisions() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!(-1),
+            serde_json::json!(0.5),
+            serde_json::json!(9_007_199_254_740_992_u64),
+        ]
+    }
+    fn invalid_entity_ids() -> Vec<serde_json::Value> {
+        let mut values = invalid_revisions();
+        values.push(serde_json::json!(0));
+        values
+    }
+
+    #[test]
+    fn artwork_reference_enforces_identifier_and_revision_bounds() {
+        let fixture = serde_json::json!({"resourceId":"a","revision":0});
+        rejects_field_values::<ArtworkReference>(&fixture, "resourceId", &invalid_identifiers());
+        rejects_field_values::<ArtworkReference>(&fixture, "revision", &invalid_revisions());
+        let at_limit =
+            serde_json::json!({"resourceId":"é".repeat(128),"revision":9_007_199_254_740_991_u64});
+        assert!(serde_json::from_value::<ArtworkReference>(at_limit).is_ok());
+    }
+
+    #[test]
+    fn display_track_requires_nullable_metadata_without_fabricating_it() {
+        let fixture = track_fixture();
+        requires_nullable_fields::<DisplayTrack>(
+            &fixture,
+            &[
+                "title",
+                "artist",
+                "albumId",
+                "album",
+                "duration",
+                "trackNumber",
+                "discNumber",
+            ],
+        );
+        requires_nullable_fields::<QualitySummary>(&fixture["quality"], &["format", "bitrate"]);
+        let track: DisplayTrack = serde_json::from_value(fixture.clone()).unwrap();
+        assert_eq!(serde_json::to_value(track).unwrap(), fixture);
+        let mut empty = fixture.clone();
+        empty["artist"] = serde_json::json!("");
+        empty["album"] = serde_json::json!("");
+        empty["quality"]["format"] = serde_json::json!("");
+        assert!(serde_json::from_value::<DisplayTrack>(empty).is_ok());
+    }
+
+    #[test]
+    fn display_entities_validate_ids_counts_and_required_nullable_fields() {
+        let track = track_fixture();
+        rejects_field_values::<DisplayTrack>(&track, "id", &invalid_entity_ids());
+        rejects_field_values::<DisplayTrack>(&track, "albumId", &invalid_entity_ids());
+        for field in ["trackNumber", "discNumber"] {
+            rejects_field_values::<DisplayTrack>(&track, field, &invalid_revisions());
+        }
+        rejects_field_values::<QualitySummary>(&track["quality"], "bitrate", &invalid_revisions());
+        let album = serde_json::json!({"id":1,"name":"Album","artist":null,"year":null,"qualityBadges":[],"sortSummary":{"artist":null,"year":null,"dateAdded":null,"name":"Album"}});
+        rejects_field_values::<DisplayAlbum>(&album, "id", &invalid_entity_ids());
+        requires_nullable_fields::<DisplayAlbum>(&album, &["artist", "year"]);
+        requires_nullable_fields::<AlbumSortSummary>(
+            &album["sortSummary"],
+            &["artist", "year", "dateAdded"],
+        );
+        let artist = serde_json::json!({"name":"Artist","trackCount":0,"albumCount":0});
+        rejects_field_values::<DisplayArtist>(&artist, "name", &invalid_identifiers());
+        for field in ["trackCount", "albumCount"] {
+            rejects_field_values::<DisplayArtist>(&artist, field, &invalid_revisions());
+        }
+        for context in [
+            serde_json::json!({"type":"album","albumId":1,"playMode":"all"}),
+            serde_json::json!({"type":"playlist","playlistId":1}),
+            serde_json::json!({"type":"track","trackId":1}),
+        ] {
+            let field = match context["type"].as_str().unwrap() {
+                "album" => "albumId",
+                "playlist" => "playlistId",
+                _ => "trackId",
+            };
+            rejects_field_values::<PlaybackContext>(&context, field, &invalid_entity_ids());
+        }
+        rejects_field_values::<PlaybackContext>(
+            &serde_json::json!({"type":"artist","artistName":"Artist"}),
+            "artistName",
+            &invalid_identifiers(),
+        );
+    }
+
+    #[test]
+    fn pages_require_nullable_bounded_cursor_and_safe_revision() {
+        let fixture = serde_json::json!({"items":[],"nextCursor":null,"revision":0});
+        requires_nullable_fields::<Page<DisplayTrack>>(&fixture, &["nextCursor"]);
+        rejects_field_values::<Page<DisplayTrack>>(&fixture, "nextCursor", &invalid_identifiers());
+        rejects_field_values::<Page<DisplayTrack>>(&fixture, "revision", &invalid_revisions());
+        let mut encoded_integer = fixture.clone();
+        encoded_integer["revision"] = serde_json::json!(1.0);
+        assert!(serde_json::from_value::<Page<DisplayTrack>>(encoded_integer).is_ok());
+    }
+
+    #[test]
+    fn execution_and_job_results_validate_identifiers_revisions_and_required_progress() {
+        let error = serde_json::json!({"code":"execution_failed","message":"Output failed","retryable":false});
+        for fixture in [
+            serde_json::json!({"status":"applied","revision":0}),
+            serde_json::json!({"status":"accepted","jobId":"j","revision":0}),
+            serde_json::json!({"status":"failed","revision":0,"error":error,"partialEffects":[]}),
+            serde_json::json!({"status":"superseded","revision":0,"error":error,"partialEffects":[]}),
+        ] {
+            rejects_field_values::<ExecutionResult>(&fixture, "revision", &invalid_revisions());
+            if fixture["status"] != "accepted" {
+                rejects_field_values::<CompletedExecutionResult>(
+                    &fixture,
+                    "revision",
+                    &invalid_revisions(),
+                );
+            } else {
+                rejects_field_values::<ExecutionResult>(&fixture, "jobId", &invalid_identifiers());
+            }
+        }
+        for status in ["pending", "running"] {
+            let fixture = serde_json::json!({"status":status,"jobId":"j","progress":null});
+            requires_nullable_fields::<JobSummary>(&fixture, &["progress"]);
+            rejects_field_values::<JobSummary>(&fixture, "jobId", &invalid_identifiers());
+            let concrete = serde_json::json!({"status":status,"jobId":"j","progress":100});
+            assert!(
+                serde_json::from_value::<JobSummary>(concrete).is_ok(),
+                "no unapproved unit-interval progress restriction"
+            );
+        }
+        rejects_field_values::<JobSummary>(
+            &serde_json::json!({"status":"completed","jobId":"j","result":{"status":"applied","revision":0}}),
+            "jobId",
+            &invalid_identifiers(),
+        );
+    }
+
+    #[test]
+    fn snapshot_queue_and_output_contracts_enforce_primitive_invariants() {
+        let snapshot = snapshot_fixture();
+        for field in ["hostId", "hostEpoch"] {
+            rejects_field_values::<HostSnapshot>(&snapshot, field, &invalid_identifiers());
+        }
+        rejects_field_values::<HostSnapshot>(&snapshot, "revision", &invalid_revisions());
+        for field in [
+            "libraryRevision",
+            "queueRevision",
+            "outputRevision",
+            "settingsRevision",
+        ] {
+            rejects_field_values::<DomainRevisions>(
+                &snapshot["revisions"],
+                field,
+                &invalid_revisions(),
+            );
+        }
+        requires_nullable_fields::<PlaybackState>(
+            &snapshot["playback"],
+            &["track", "context", "duration"],
+        );
+        let queue = &snapshot["queue"];
+        requires_nullable_fields::<QueueSummary>(queue, &["currentEntryId"]);
+        rejects_field_values::<QueueSummary>(queue, "currentEntryId", &invalid_identifiers());
+        rejects_field_values::<QueueSummary>(queue, "count", &invalid_revisions());
+        rejects_field_values::<QueueEntry>(
+            &serde_json::json!({"entryId":"entry","track":track_fixture()}),
+            "entryId",
+            &invalid_identifiers(),
+        );
+        rejects_field_values::<SnapshotOutputRef>(
+            &serde_json::json!({"kind":"squeeze","playerId":"player"}),
+            "playerId",
+            &invalid_identifiers(),
+        );
+    }
+
+    #[test]
+    fn event_and_query_results_validate_all_revision_fields_and_epochs() {
+        for fixture in [
+            serde_json::json!({"type":"playback","revision":0,"playback":playback_fixture()}),
+            serde_json::json!({"type":"queue","revision":0,"queueRevision":0,"queue":{"count":0,"currentEntryId":null}}),
+            serde_json::json!({"type":"library","revision":0,"libraryRevision":0}),
+            serde_json::json!({"type":"output","revision":0,"outputRevision":0,"output":{"kind":"pc"},"outputs":[]}),
+            serde_json::json!({"type":"settings","revision":0,"settingsRevision":0,"settings":{}}),
+            serde_json::json!({"type":"capabilities","revision":0,"capabilities":{"queries":[],"intents":[]}}),
+            serde_json::json!({"type":"job","revision":0,"job":{"status":"pending","jobId":"j","progress":null}}),
+        ] {
+            for field in [
+                "revision",
+                "queueRevision",
+                "libraryRevision",
+                "outputRevision",
+                "settingsRevision",
+            ] {
+                if fixture.get(field).is_some() {
+                    rejects_field_values::<HostEvent>(&fixture, field, &invalid_revisions());
+                }
+            }
+        }
+        rejects_field_values::<ApplicationUpdate>(
+            &serde_json::json!({"type":"events","hostEpoch":"e","events":[]}),
+            "hostEpoch",
+            &invalid_identifiers(),
+        );
+        rejects_field_values::<QueryResult>(
+            &serde_json::json!({"type":"outputs","outputs":[],"revision":0}),
+            "revision",
+            &invalid_revisions(),
+        );
+    }
+
+    #[test]
+    fn optional_fields_are_omittable_but_not_explicitly_null() {
+        let null = [serde_json::Value::Null];
+        rejects_field_values::<DisplayTrack>(&track_fixture(), "artwork", &null);
+        rejects_field_values::<PlaybackState>(&playback_fixture(), "error", &null);
+        rejects_field_values::<SettingsProjection>(&serde_json::json!({}), "albumView", &null);
+        rejects_field_values::<SettingsProjection>(&serde_json::json!({}), "reducedMotion", &null);
+        rejects_field_values::<ApplicationQuery>(
+            &serde_json::json!({"type":"albums"}),
+            "sort",
+            &null,
+        );
+    }
+
+    #[test]
+    fn nullable_metadata_numbers_preserve_signed_years_and_safe_numeric_representations() {
+        let album = serde_json::json!({"id":1,"name":"Album","artist":null,"year":null,"qualityBadges":[],"sortSummary":{"artist":null,"year":null,"dateAdded":null,"name":"Album"}});
+        let invalid = [
+            serde_json::json!(9_007_199_254_740_992_i64),
+            serde_json::json!(-9_007_199_254_740_992_i64),
+            serde_json::json!(0.5),
+        ];
+        rejects_field_values::<DisplayAlbum>(&album, "year", &invalid);
+        rejects_field_values::<AlbumSortSummary>(&album["sortSummary"], "year", &invalid);
+        let mut signed = album.clone();
+        signed["year"] = serde_json::json!(-1.0);
+        assert!(serde_json::from_value::<DisplayAlbum>(signed).is_ok());
+        let mut numbered = track_fixture();
+        numbered["trackNumber"] = serde_json::json!(0.0);
+        numbered["discNumber"] = serde_json::json!(1.0);
+        numbered["quality"]["bitrate"] = serde_json::json!(320000.0);
+        assert!(serde_json::from_value::<DisplayTrack>(numbered).is_ok());
+    }
+
+    #[test]
+    fn playback_projection_rejects_volume_outside_the_slider_range() {
+        rejects_field_values::<PlaybackState>(
+            &playback_fixture(),
+            "volume",
+            &[serde_json::json!(-0.1), serde_json::json!(1.01)],
+        );
+    }
+
+    #[test]
+    fn metadata_labels_are_required_strings_not_bounded_identifiers() {
+        for label in [String::new(), "é".repeat(1025)] {
+            let album = serde_json::json!({"id":1,"name":label,"artist":null,"year":null,"qualityBadges":[],"sortSummary":{"artist":null,"year":null,"dateAdded":null,"name":label}});
+            let typed: DisplayAlbum = serde_json::from_value(album.clone()).unwrap();
+            assert_eq!(serde_json::to_value(typed).unwrap(), album);
+            let output = serde_json::json!({"output":{"kind":"pc"},"name":label,"available":true,"capabilities":{"playback":false,"seek":false,"volume":false,"shuffle":false,"repeat":false,"equalizer":false}});
+            assert!(serde_json::from_value::<AvailableOutput>(output).is_ok());
         }
     }
 }

@@ -857,5 +857,33 @@
         "volume": 1
       }
     }
+  },
+  {
+    "name": "protocol version decimal representation",
+    "envelope": {
+      "protocolVersion": 1.0,
+      "requestId": "r",
+      "preconditions": {
+        "hostEpoch": "e",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "pause"
+      }
+    }
+  },
+  {
+    "name": "protocol version exponent representation",
+    "envelope": {
+      "protocolVersion": 1e0,
+      "requestId": "r",
+      "preconditions": {
+        "hostEpoch": "e",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "pause"
+      }
+    }
   }
 ]
