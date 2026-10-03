@@ -39,6 +39,8 @@ export interface PlaybackCoordinator {
   captureSnapshot(): HostSnapshot;
   subscribeSnapshot(listener: (snapshot: HostSnapshot) => void): () => void;
   execute(intent: PlaybackIntent, context: CommandPreconditions): Promise<ExecutionResult>;
+  /** Native desktop binding only; captures revisions after the in-lane refresh. Not a wire trust flag. */
+  executeDesktopIntent?(intent: PlaybackIntent, capturedEpoch: string): Promise<ExecutionResult>;
   enqueueSignal(signal: PlaybackSignal): Promise<void>;
   /** Desktop-only commands use the same lane, never the network protocol. */
   executeLocal(operation: () => Promise<RuntimeResult>, replacesPlayback?: boolean): Promise<ExecutionResult>;
@@ -69,6 +71,55 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
     : { ...value, revision: state.read().revision, partialEffects: [...partialEffects, ...value.partialEffects] };
   const attempt = async (operation: () => Promise<RuntimeResult>): Promise<RuntimeResult> => { try { return await operation(); } catch (error) { return runtimeFailure(error); } };
   const advanceGeneration = (manual: boolean) => { const s = state.read(); state.commit({ transitionGeneration: s.transitionGeneration + 1, ...(manual ? { ownershipGeneration: s.ownershipGeneration + 1 } : {}) }); };
+  const executeIntent = (intent: PlaybackIntent, context: CommandPreconditions | (() => CommandPreconditions)): Promise<ExecutionResult> => {
+    if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
+    return enqueue(async () => {
+      if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
+      if (runtime.refreshLibrary && resolvesTracks(intent)) {
+        const refreshed = await attempt(async () => { await runtime.refreshLibrary!(); return { status: "applied" }; });
+        if (refreshed.status !== "applied") return result(refreshed);
+        if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
+      }
+      const expected = typeof context === "function" ? context() : context;
+      const before = state.read();
+      if (expected.hostEpoch !== before.hostEpoch) return failed("resync_required", "Host epoch changed", "superseded");
+      for (const key of ["queueRevision", "outputRevision", "libraryRevision"] as const) {
+        if (expected[key] !== undefined && expected[key] !== before.revisions[key]) return failed("revision_conflict", `${key} changed`, "superseded");
+      }
+      if (before.selectedOutput.kind === "desktop_only") return failed("unsupported", "Legacy cloud output is desktop-only");
+      const previousOutput = before.selectedOutput;
+      if (intent.type === "select_output") {
+        if (sameOutput(before.selectedOutput, intent.output)) return result({ status: "applied" });
+        const validated = await attempt(() => runtime.validateOutput(intent.output));
+        if (validated.status !== "applied") return result(validated);
+        const stopped = await attempt(() => runtime.stopOwnedOutput(previousOutput));
+        if (stopped.status !== "applied") return result(stopped);
+        // The stop is already a real effect even if selecting the new target fails.
+        advanceGeneration(true);
+        const selected = await attempt(() => runtime.selectOutput(intent.output));
+        if (selected.status !== "applied") return result(selected, ["Previous output stopped"]);
+        state.commit({ selectedOutput: intent.output, revisions: { outputRevision: before.revisions.outputRevision + 1 } });
+        return result(selected);
+      }
+      if ("entryId" in intent) {
+        if (!before.queue.some(entry => entry.entryId === intent.entryId) || intent.type === "queue_reorder" && intent.beforeEntryId !== null && !before.queue.some(entry => entry.entryId === intent.beforeEntryId)) return failed("not_found", "Queue entry no longer exists");
+      }
+      const applied = await attempt(async () => {
+        const resolved = resolvesTracks(intent) ? await runtime.resolvePlayback(intent) : undefined;
+        if (resolved) {
+          await runtime.refreshLibrary?.();
+          if (state.read().revisions.libraryRevision !== before.revisions.libraryRevision) throw new PlaybackFailure({ code: "revision_conflict", message: "Library changed while resolving playback", retryable: false }, "superseded");
+        }
+        return runtime.apply(intent, resolved);
+      });
+      if (applied.status !== "applied" && applied.partialEffects.length && replacement(intent)) advanceGeneration(true);
+      if (applied.status === "applied") {
+        if (replacement(intent)) advanceGeneration(true);
+        else state.commit({});
+      }
+      return result(applied);
+    });
+  };
   return {
     capturePresentation(snapshot) { return projection?.presentation?.(snapshot); },
     captureSnapshot() {
@@ -79,54 +130,8 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
       if (disposed || !projection) throw new Error("Host projection unavailable");
       return projection.subscribe(listener);
     },
-    execute(intent, context) {
-      if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
-      return enqueue(async () => {
-        if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
-        if (runtime.refreshLibrary && resolvesTracks(intent)) {
-          const refreshed = await attempt(async () => { await runtime.refreshLibrary!(); return { status: "applied" }; });
-          if (refreshed.status !== "applied") return result(refreshed);
-          if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
-        }
-        const before = state.read();
-        if (context.hostEpoch !== before.hostEpoch) return failed("resync_required", "Host epoch changed", "superseded");
-        for (const key of ["queueRevision", "outputRevision", "libraryRevision"] as const) {
-          if (context[key] !== undefined && context[key] !== before.revisions[key]) return failed("revision_conflict", `${key} changed`, "superseded");
-        }
-        if (before.selectedOutput.kind === "desktop_only") return failed("unsupported", "Legacy cloud output is desktop-only");
-        const previousOutput = before.selectedOutput;
-        if (intent.type === "select_output") {
-          if (sameOutput(before.selectedOutput, intent.output)) return result({ status: "applied" });
-          const validated = await attempt(() => runtime.validateOutput(intent.output));
-          if (validated.status !== "applied") return result(validated);
-          const stopped = await attempt(() => runtime.stopOwnedOutput(previousOutput));
-          if (stopped.status !== "applied") return result(stopped);
-          // The stop is already a real effect even if selecting the new target fails.
-          advanceGeneration(true);
-          const selected = await attempt(() => runtime.selectOutput(intent.output));
-          if (selected.status !== "applied") return result(selected, ["Previous output stopped"]);
-          state.commit({ selectedOutput: intent.output, revisions: { outputRevision: before.revisions.outputRevision + 1 } });
-          return result(selected);
-        }
-        if ("entryId" in intent) {
-          if (!before.queue.some(entry => entry.entryId === intent.entryId) || intent.type === "queue_reorder" && intent.beforeEntryId !== null && !before.queue.some(entry => entry.entryId === intent.beforeEntryId)) return failed("not_found", "Queue entry no longer exists");
-        }
-        const applied = await attempt(async () => {
-          const resolved = resolvesTracks(intent) ? await runtime.resolvePlayback(intent) : undefined;
-          if (resolved) {
-            await runtime.refreshLibrary?.();
-            if (state.read().revisions.libraryRevision !== before.revisions.libraryRevision) throw new PlaybackFailure({ code: "revision_conflict", message: "Library changed while resolving playback", retryable: false }, "superseded");
-          }
-          return runtime.apply(intent, resolved);
-        });
-        if (applied.status !== "applied" && applied.partialEffects.length && replacement(intent)) advanceGeneration(true);
-        if (applied.status === "applied") {
-          if (replacement(intent)) advanceGeneration(true);
-          else state.commit({});
-        }
-        return result(applied);
-      });
-    },
+    execute: (intent, context) => executeIntent(intent, context),
+    executeDesktopIntent: (intent, capturedEpoch) => executeIntent(intent, () => ({ hostEpoch: capturedEpoch, ...state.read().revisions })),
     enqueueSignal(signal) {
       if (disposed) return Promise.resolve();
       return enqueue(async () => {

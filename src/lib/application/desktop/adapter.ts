@@ -163,7 +163,7 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
     },
   });
   const preconditions = () => ({ hostEpoch, ...value.revisions });
-  const execute = (intent: ApplicationIntent) => unwrap(coordinator.execute(intent, preconditions()));
+  const execute = (intent: ApplicationIntent) => unwrap(coordinator.executeDesktopIntent!(intent, hostEpoch));
   const local = (operation: () => void | Promise<void>, replaces = false) => unwrap(coordinator.executeLocal(async () => { player.invalidateDesktopObservations(); try { await operation(); return applied; } finally { player.invalidateDesktopObservations(); } }, replaces));
   const entryAt = (index: number) => value.queue[index]?.entryId ?? fail("not_found", "Queue entry is unavailable");
   const unregister = registerDesktopPlayer({
@@ -317,10 +317,29 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
       hostId = authority.hostId; hostEpoch = authority.hostEpoch; sequence = 0;
       clearTimeout(libraryTimer); libraryGeneration++; library = authority.library;
       const generation = libraryGeneration;
-      if (library) { const access = library;const revision = await access.revision();checkLibrary(access, generation); if (!Number.isSafeInteger(revision) || revision < value.revisions.libraryRevision) throw new Error("Invalid native library revision"); value = { ...value, revisions: { ...value.revisions, libraryRevision: revision } }; }
       pendingEntries = value.queue.map(item => entry(item.track));
       state.commit({ hostEpoch, ownershipGeneration: value.ownershipGeneration + 1, transitionGeneration: value.transitionGeneration + 1 });
-      await unwrap(coordinator.executeLocal(async () => applied));
+      try {
+        if (library) {
+          const access = library;
+          const revision = await access.revision();
+          checkLibrary(access, generation);
+          if (!Number.isSafeInteger(revision) || revision < value.revisions.libraryRevision) throw new Error("Invalid native library revision");
+          await unwrap(coordinator.executeLocal(async () => {
+            checkLibrary(access, generation);
+            if (revision < value.revisions.libraryRevision) throw new Error("Invalid native library revision");
+            state.commit({ revisions: { libraryRevision: revision } });
+            return applied;
+          }));
+        } else await unwrap(coordinator.executeLocal(async () => applied));
+      } catch (error) {
+        if (!disposed && generation === libraryGeneration) {
+          library = undefined;libraryGeneration++;hostId = "desktop";hostEpoch = crypto.randomUUID();sequence = 0;
+          pendingEntries = value.queue.map(item => entry(item.track));
+          state.commit({ hostEpoch, ownershipGeneration: value.ownershipGeneration + 1, transitionGeneration: value.transitionGeneration + 1 });
+        }
+        throw error;
+      }
       const access = library;
       const observeLibrary = async () => {
         if (disposed || !access || access.active?.() === false || library !== access) return;

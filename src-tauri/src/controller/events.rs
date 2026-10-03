@@ -70,7 +70,8 @@ impl CommandService {
             mut snapshot,
             presentation,
         } = serde_json::from_slice(&bytes).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
-        self.refresh_library()?;
+        // Publication never probes the DB. The bounded observer/query/claim paths refresh the shared clock.
+        // A scan holding the DB must not turn a valid playback projection into terminal bridge failure.
         let mut state = self
             .state
             .lock()
@@ -416,6 +417,54 @@ pub(crate) mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_with_held_database_keeps_ready_lease_and_observer_catches_up() {
+        let (s, d, l) = fixture();
+        initial(&s, &l);
+        let s = Arc::new(s);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::init_schema(&conn).unwrap();
+        let db = crate::db::Database {
+            conn: Arc::new(std::sync::Mutex::new(conn)),
+        };
+        s.install_library(Arc::new(crate::controller::queries::LibraryQueries::new(
+            db.clone(),
+        )))
+        .unwrap();
+        s.refresh_library().unwrap();
+        s.start_library_observer(l.clone());
+        let cursor = cursor(&s);
+        {
+            let held = db.conn.lock().unwrap();
+            held.execute("INSERT INTO tracks(path) VALUES('synthetic')", [])
+                .unwrap();
+            let mut snapshot = projection(&l.host_epoch.to_string());
+            snapshot.playback.position = 42.0;
+            s.publish(
+                "main",
+                &l,
+                HostUpdate::Projection {
+                    snapshot,
+                    presentation: Some(HostPresentation::default()),
+                },
+            )
+            .unwrap();
+            assert!(s.authenticated_snapshot(&d).is_ok());
+            assert_eq!(s.host_epoch().unwrap(), l.host_epoch);
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(s.capture_snapshot().unwrap().revisions.library_revision, 1);
+        let batch = s.poll_events(&d, cursor).await.unwrap();
+        assert!(batch.events.iter().any(|e| matches!(
+            e,
+            HostEvent::Library {
+                library_revision: 1,
+                ..
+            }
+        )));
+        s.release("main", &l).unwrap();
     }
 
     #[tokio::test]

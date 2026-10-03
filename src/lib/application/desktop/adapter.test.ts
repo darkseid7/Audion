@@ -420,3 +420,73 @@ it("pages local queue occurrences and rejects a cursor after queue mutation", as
   await expect(adapter.port.query({ type: "queue", limit: 200, cursor: first.page.nextCursor! })).rejects.toMatchObject({ controlError: { code: "revision_conflict" } });
   await adapter.dispose();
 });
+
+
+it("invalidates queued old commands before awaiting attachment revision", async () => {
+  const adapter = createDesktopAdapter();const oldEpoch=adapter.state.read().hostEpoch;
+  let release!:()=>void;const held=adapter.coordinator.executeLocal(()=>new Promise(resolve=>{release=()=>resolve({status:"applied"});}));
+  await Promise.resolve();const queued=adapter.port.execute({type:"pause"},{hostEpoch:oldEpoch});
+  let finish!:(revision:number)=>void;
+  const attachment=adapter.attachAuthority({hostId:"native",hostEpoch:"new-epoch",library:{revision:()=>new Promise(resolve=>finish=resolve),query:async()=>{throw new Error("unused")},artwork:async()=>{throw new Error("unused")}}});
+  const synchronousEpoch=adapter.state.read().hostEpoch;release();await held;
+  const result=await queued;finish(0);await attachment;
+  expect(synchronousEpoch).toBe("new-epoch");expect(result).toMatchObject({status:"superseded",error:{code:"resync_required"}});await adapter.dispose();
+});
+
+it("keeps bound local playback coherent after attachment revision rejection", async () => {
+  const adapter=createDesktopAdapter();
+  await expect(adapter.attachAuthority({hostId:"native",hostEpoch:"failed-epoch",library:{revision:async()=>{throw new Error("Busy")},query:async()=>{throw new Error("unused")},artwork:async()=>{throw new Error("unused")}}})).rejects.toThrow("Busy");
+  const player=await import("$lib/stores/player");await expect(player.pause()).resolves.toBeUndefined();
+  expect((await adapter.port.query({type:"snapshot"}))).toMatchObject({snapshot:{hostEpoch:adapter.state.read().hostEpoch}});await adapter.dispose();
+});
+
+it("refreshes actual registered local entity commands without weakening remote assertions", async () => {
+  const player=await import("$lib/stores/player");const registered=vi.spyOn(player,"registerDesktopPlayer");let revision=4;
+  const access={revision:async()=>revision,query:async()=>({type:"tracks" as const,page:{items:[],revision,nextCursor:null}}),artwork:async()=>{throw new Error("unused")}};
+  commitSqueezeTarget("A");const adapter=createDesktopAdapter(access);const local=registered.mock.calls[0][0];
+  await adapter.port.query({type:"tracks"});revision=5;
+  await expect(local.execute({type:"play_album",albumId:1,playMode:"all"})).resolves.toBeUndefined();expect(api.play).toHaveBeenCalledOnce();
+  api.play.mockClear();revision=6;
+  expect(await adapter.port.execute({type:"play_album",albumId:1,playMode:"all"},{hostEpoch:adapter.state.read().hostEpoch,libraryRevision:5})).toMatchObject({status:"superseded",error:{code:"revision_conflict"}});
+  expect(api.play).not.toHaveBeenCalled();await adapter.dispose();registered.mockRestore();
+});
+
+
+it("keeps the real publisher and bridge lease during busy revision observation and catches up", async () => {
+  vi.useFakeTimers();const { connectHostBridge }=await import("./bridge");
+  let busy=false;let revision=0;let replay=0;const phases:string[]=[];const snapshots:import("../types").HostSnapshot[]=[];
+  const adapter=createDesktopAdapter();
+  const lease={leaseId:"same-lease",hostEpoch:"same-epoch"};
+  const bridge=await connectHostBridge(adapter.port,adapter.attachAuthority,adapter.coordinator,{
+    library:()=>({revision:async()=>{if(busy)throw {code:"busy"};return revision;},query:async()=>{throw new Error("unused")},artwork:async()=>{throw new Error("unused")}}),
+    async listen(){return()=>{};},
+    async register(request){phases.push(request.phase);if(request.phase==="publish"){snapshots.push(request.update.snapshot);replay++;}return {hostId:"host",lease,revision:replay};},
+    async authorize(){throw new Error("unused")},async complete(){},
+  });
+  try {
+    busy=true;adapter.state.commit({});state.currentTime.set(42);
+    await vi.advanceTimersByTimeAsync(300);expect(phases).not.toContain("release");expect(snapshots.at(-1)?.hostEpoch).toBe(lease.hostEpoch);
+    busy=false;revision=1;await vi.advanceTimersByTimeAsync(300);
+    expect(adapter.state.read().revisions.libraryRevision).toBe(1);expect(snapshots.at(-1)?.revisions.libraryRevision).toBe(1);expect(phases.filter(p=>p==="ready")).toHaveLength(1);
+  } finally {await bridge.dispose();await adapter.dispose();vi.useRealTimers();}
+});
+
+
+it("does not regress a revision advanced by earlier lane work during attachment", async () => {
+  const adapter=createDesktopAdapter();let finish!:()=>void;
+  const earlier=adapter.coordinator.executeLocal(async()=>{await new Promise<void>(resolve=>finish=resolve);adapter.state.commit({revisions:{libraryRevision:7}});return {status:"applied"};});
+  await Promise.resolve();
+  const attaching=adapter.attachAuthority({hostId:"native",hostEpoch:"pending",library:{revision:async()=>5,query:async()=>{throw new Error("unused")},artwork:async()=>{throw new Error("unused")}}});
+  await Promise.resolve();await Promise.resolve();finish();await earlier;
+  await expect(attaching).rejects.toThrow("Invalid native library revision");expect(adapter.state.read().revisions.libraryRevision).toBe(7);await adapter.dispose();
+});
+
+
+it.each(["queue_insert", "queue_append"] as const)("refreshes bound local %s on the first action while remote stale assertions fail", async type => {
+  const player=await import("$lib/stores/player");const registered=vi.spyOn(player,"registerDesktopPlayer");let revision=1;
+  const adapter=createDesktopAdapter({revision:async()=>revision,query:async()=>({type:"tracks",page:{items:[],revision,nextCursor:null}}),artwork:async()=>{throw new Error("unused")}});
+  const local=registered.mock.calls[0][0];await adapter.port.query({type:"tracks"});revision=2;
+  const intent=type==="queue_insert"?{type,trackIds:[7],placement:"next" as const}:{type,trackIds:[7]};
+  await expect(local.execute(intent)).resolves.toBeUndefined();expect(adapter.state.read().queue.map(e=>e.track.id)).toEqual([7]);
+  revision=3;expect(await adapter.port.execute(intent,{hostEpoch:adapter.state.read().hostEpoch,libraryRevision:2})).toMatchObject({status:"superseded",error:{code:"revision_conflict"}});expect(adapter.state.read().queue).toHaveLength(1);await adapter.dispose();registered.mockRestore();
+});

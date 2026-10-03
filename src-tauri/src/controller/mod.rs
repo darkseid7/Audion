@@ -22,3 +22,6 @@ pub mod events;
 pub mod queries;
 #[cfg(desktop)]
 pub mod resources;
+
+#[cfg(desktop)]
+mod query_input;

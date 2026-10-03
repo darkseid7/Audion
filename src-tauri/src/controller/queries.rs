@@ -1,8 +1,8 @@
 //! Revision-consistent, pathless PC library projections. No controller cache owns order.
-use super::{commands::error, protocol::*};
+use super::{commands::error, protocol::*, query_input::CapturedLibrary};
 use crate::db::{queries as db, Database};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
@@ -40,6 +40,8 @@ pub struct LibraryQueries {
     work: Arc<tokio::sync::Semaphore>,
     clock: Arc<Mutex<LibraryRevision>>,
     local_epoch: uuid::Uuid,
+    #[cfg(test)]
+    projection_probe: Option<Arc<dyn Fn(&str, usize) + Send + Sync>>,
 }
 impl LibraryQueries {
     pub fn new(db: Database) -> Self {
@@ -52,6 +54,8 @@ impl LibraryQueries {
             work: Arc::new(tokio::sync::Semaphore::new(4)),
             clock: Arc::new(Mutex::new(LibraryRevision::default())),
             local_epoch: uuid::Uuid::new_v4(),
+            #[cfg(test)]
+            projection_probe: None,
         }
     }
     pub(crate) fn set_host_owner(&self, owner: Option<uuid::Uuid>) -> Result<(), ControlError> {
@@ -107,8 +111,8 @@ impl LibraryQueries {
         validate_pins(&pins)?;
         let mut clock = self
             .clock
-            .try_lock()
-            .map_err(|_| error(ControlErrorCode::Busy))?;
+            .lock()
+            .map_err(|_| error(ControlErrorCode::HostNotReady))?;
         if clock.owner != Some(owner) {
             return Err(error(ControlErrorCode::ResyncRequired));
         }
@@ -191,9 +195,34 @@ impl LibraryQueries {
             .map_err(|_| error(ControlErrorCode::Busy))?;
         let db = self.db.clone();
         let resources = self.resources.clone();
+        #[cfg(test)]
+        let probe = self.projection_probe.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            // try_lock bounds work even if scanning owns the connection; retry is explicit.
+            let window = PageWindow::new(&query, &context)?;
+            let input = {
+                let conn = db
+                    .conn
+                    .try_lock()
+                    .map_err(|_| error(ControlErrorCode::Busy))?;
+                if db::controller_library_stamp(&conn).map_err(db_error)? != context.stamp {
+                    return Err(error(ControlErrorCode::RevisionConflict));
+                }
+                CapturedLibrary::read(&conn, &query, &context, window.offset, window.limit)?
+            };
+            #[cfg(test)]
+            {
+                MEMBERSHIP_VISITS.with(|v| v.set(0));
+                if let Some(p) = &probe {
+                    p("captured", input.tracks.len());
+                }
+            }
+            let mut result = project(input, query, &context, &window)?;
+            #[cfg(test)]
+            if let Some(p) = &probe {
+                p("projected", MEMBERSHIP_VISITS.with(|v| v.get()));
+            }
+            attach_artwork(&mut result, &resources, &db, &context)?;
             let conn = db
                 .conn
                 .try_lock()
@@ -201,8 +230,6 @@ impl LibraryQueries {
             if db::controller_library_stamp(&conn).map_err(db_error)? != context.stamp {
                 return Err(error(ControlErrorCode::RevisionConflict));
             }
-            let mut result = project(&conn, query, &context)?;
-            attach_artwork(&mut result, &resources, &conn, &context)?;
             Ok(result)
         })
         .await
@@ -529,24 +556,28 @@ struct AlbumProjection {
     oldest: Option<i64>,
     newest: Option<i64>,
 }
-fn album_projection(a: db::Album, tracks: &[db::Track]) -> AlbumProjection {
-    let members = tracks
-        .iter()
-        .filter(|t| t.album_id == Some(a.id))
-        .collect::<Vec<_>>();
+#[cfg(test)]
+thread_local! { static MEMBERSHIP_VISITS:std::cell::Cell<usize>=const {std::cell::Cell::new(0)}; }
+fn membership_visit() {
+    #[cfg(test)]
+    MEMBERSHIP_VISITS.with(|v| v.set(v.get() + 1));
+}
+fn album_projection(a: db::Album, members: &[&db::Track]) -> AlbumProjection {
     let mut formats: Vec<(String, usize)> = Vec::new();
+    let mut format_positions: HashMap<String, usize> = HashMap::new();
     let (mut bitrate, mut rate, mut bits, mut year, mut newest, mut oldest) =
         (None, None, None, None, None, None);
-    for t in &members {
+    for t in members {
         if let Some(f) = t
             .format
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(normalized_format)
         {
-            if let Some((_, n)) = formats.iter_mut().find(|(s, _)| s == &f) {
-                *n += 1;
+            if let Some(index) = format_positions.get(&f) {
+                formats[*index].1 += 1;
             } else {
+                format_positions.insert(f.clone(), formats.len());
                 formats.push((f, 1));
             }
         }
@@ -598,67 +629,88 @@ fn album_projection(a: db::Album, tracks: &[db::Track]) -> AlbumProjection {
         },
     }
 }
-fn ids(conn: &Connection, table: &str, column: &str) -> Result<HashSet<i64>, ControlError> {
-    conn.prepare(&format!("SELECT {column} FROM {table}"))
-        .map_err(db_error)?
-        .query_map([], |r| r.get(0))
-        .map_err(db_error)?
-        .collect::<rusqlite::Result<HashSet<_>>>()
-        .map_err(db_error)
+struct PageWindow {
+    offset: usize,
+    limit: usize,
+    revision: u64,
+    fingerprint: String,
 }
-fn project(
-    conn: &Connection,
-    query: ApplicationQuery,
-    c: &QueryContext,
-) -> Result<QueryResult, ControlError> {
-    let mut fingerprint =
-        serde_json::to_value(&query).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
-    let object = fingerprint.as_object_mut().unwrap();
-    let cursor = object
-        .remove("cursor")
-        .and_then(|v| v.as_str().map(str::to_owned));
-    let limit = object.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
-    if !(1..=200).contains(&limit) {
-        return Err(error(ControlErrorCode::InvalidRequest));
-    }
-    let fingerprint = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(fingerprint, &c.pinned_albums)).unwrap())
-    );
-    let revision = if matches!(query, ApplicationQuery::Queue { .. }) {
-        c.queue_revision
-    } else {
-        c.revision
-    };
-    let mut offset = 0usize;
-    if let Some(cursor) = cursor {
-        let bytes = URL_SAFE_NO_PAD
-            .decode(cursor)
-            .map_err(|_| error(ControlErrorCode::InvalidRequest))?;
-        let (epoch, rev, stamp, hash, at): (String, u64, u64, String, usize) =
-            serde_json::from_slice(&bytes).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
-        if epoch != c.host_epoch || rev != revision || stamp != c.stamp || hash != fingerprint {
-            return Err(error(ControlErrorCode::RevisionConflict));
-        }
-        offset = at;
-    }
-    let page = |len: usize| -> Result<Option<String>, ControlError> {
-        if offset > len {
+impl PageWindow {
+    fn new(query: &ApplicationQuery, c: &QueryContext) -> Result<Self, ControlError> {
+        let mut fingerprint =
+            serde_json::to_value(query).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
+        let object = fingerprint.as_object_mut().unwrap();
+        let cursor = object
+            .remove("cursor")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let limit = object.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        if !(1..=200).contains(&limit) {
             return Err(error(ControlErrorCode::InvalidRequest));
         }
-        Ok((offset.saturating_add(limit) < len).then(|| {
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(fingerprint, &c.pinned_albums)).unwrap())
+        );
+        let revision = if matches!(query, ApplicationQuery::Queue { .. }) {
+            c.queue_revision
+        } else {
+            c.revision
+        };
+        let mut offset = 0usize;
+        if let Some(cursor) = cursor {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(cursor)
+                .map_err(|_| error(ControlErrorCode::InvalidRequest))?;
+            let (epoch, rev, stamp, hash, at): (String, u64, u64, String, usize) =
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| error(ControlErrorCode::InvalidRequest))?;
+            if epoch != c.host_epoch || rev != revision || stamp != c.stamp || hash != fingerprint {
+                return Err(error(ControlErrorCode::RevisionConflict));
+            }
+            offset = at;
+        }
+        Ok(Self {
+            offset,
+            limit,
+            revision,
+            fingerprint,
+        })
+    }
+    fn next(&self, c: &QueryContext, len: usize) -> Result<Option<String>, ControlError> {
+        if self.offset > len {
+            return Err(error(ControlErrorCode::InvalidRequest));
+        }
+        Ok((self.offset.saturating_add(self.limit) < len).then(|| {
             URL_SAFE_NO_PAD.encode(
                 serde_json::to_vec(&(
                     &c.host_epoch,
-                    revision,
+                    self.revision,
                     c.stamp,
-                    &fingerprint,
-                    offset + limit,
+                    &self.fingerprint,
+                    self.offset + self.limit,
                 ))
                 .unwrap(),
             )
         }))
-    };
+    }
+}
+fn project(
+    input: CapturedLibrary,
+    query: ApplicationQuery,
+    c: &QueryContext,
+    window: &PageWindow,
+) -> Result<QueryResult, ControlError> {
+    let offset = window.offset;
+    let limit = window.limit;
+    let revision = window.revision;
+    let page = |len| window.next(c, len);
+    let CapturedLibrary {
+        mut tracks,
+        albums,
+        liked,
+        liked_albums,
+        playlists,
+    } = input;
     macro_rules! paged {
         ($items:expr,$variant:ident) => {{
             let items = $items;
@@ -674,22 +726,17 @@ fn project(
     }
     if matches!(query, ApplicationQuery::Queue { .. }) {
         let next_cursor = page(c.queue.len())?;
-        let liked = ids(conn, "liked_tracks", "track_id")?;
         let items = c
             .queue
             .iter()
             .skip(offset)
             .take(limit)
-            .map(|entry| {
-                let track = db::get_track_by_id(conn, entry.track.id as i64)
-                    .map_err(db_error)?
-                    .ok_or_else(|| error(ControlErrorCode::NotFound))?;
-                Ok(QueueEntry {
-                    entry_id: entry.entry_id.clone(),
-                    track: display_track(&track, liked.contains(&track.id)),
-                })
+            .zip(tracks.iter())
+            .map(|(entry, track)| QueueEntry {
+                entry_id: entry.entry_id.clone(),
+                track: display_track(track, liked.contains(&track.id)),
             })
-            .collect::<Result<Vec<_>, ControlError>>()?;
+            .collect();
         return Ok(QueryResult::Queue {
             page: Page {
                 items,
@@ -698,22 +745,63 @@ fn project(
             },
         });
     }
-    let mut tracks = db::get_all_tracks_lightweight(conn).map_err(db_error)?;
     // Preserve PC SQL encounter order for dominant-format ties; add ID for equal rows.
-    tracks.sort_by(|a, b| {
-        a.artist
-            .cmp(&b.artist)
-            .then(a.album.cmp(&b.album))
-            .then(a.disc_number.cmp(&b.disc_number))
-            .then(a.track_number.cmp(&b.track_number))
-            .then(a.title.cmp(&b.title))
-            .then(a.id.cmp(&b.id))
-    });
-    let liked = ids(conn, "liked_tracks", "track_id")?;
+    if !matches!(
+        query,
+        ApplicationQuery::PlaylistTracks { .. } | ApplicationQuery::LikedTracks { .. }
+    ) {
+        tracks.sort_by(|a, b| {
+            a.artist
+                .cmp(&b.artist)
+                .then(a.album.cmp(&b.album))
+                .then(a.disc_number.cmp(&b.disc_number))
+                .then(a.track_number.cmp(&b.track_number))
+                .then(a.title.cmp(&b.title))
+                .then(a.id.cmp(&b.id))
+        });
+    }
+    let mut groups: HashMap<i64, Vec<&db::Track>> = HashMap::new();
+    if matches!(
+        query,
+        ApplicationQuery::Albums { .. }
+            | ApplicationQuery::AlbumDetail { .. }
+            | ApplicationQuery::ArtistAlbums { .. }
+            | ApplicationQuery::Search { .. }
+    ) {
+        for track in &tracks {
+            membership_visit();
+            if let Some(id) = track.album_id {
+                groups.entry(id).or_default().push(track);
+            }
+        }
+    }
+    let summarize = |a: db::Album| {
+        let members = groups.get(&a.id).map(Vec::as_slice).unwrap_or(&[]);
+        album_projection(a, members)
+    };
     let display = |t: &db::Track| display_track(t, liked.contains(&t.id));
+    macro_rules! track_page {
+        ($items:expr,$variant:ident) => {{
+            let items = $items;
+            let next_cursor = page(items.len())?;
+            Ok(QueryResult::$variant {
+                page: Page {
+                    items: items
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .map(display)
+                        .collect(),
+                    next_cursor,
+                    revision,
+                },
+            })
+        }};
+    }
+
     match query {
         ApplicationQuery::Tracks { .. } => {
-            paged!(tracks.iter().map(display).collect::<Vec<_>>(), Tracks)
+            track_page!(tracks.iter().collect::<Vec<_>>(), Tracks)
         }
         ApplicationQuery::AlbumTracks { album_id, .. } => {
             let mut ts = tracks
@@ -721,77 +809,18 @@ fn project(
                 .filter(|t| t.album_id == Some(album_id as i64))
                 .collect::<Vec<_>>();
             ts.sort_by_key(|t| (t.disc_number, t.track_number, &t.title, t.id));
-            paged!(ts.into_iter().map(display).collect::<Vec<_>>(), AlbumTracks)
+            track_page!(ts, AlbumTracks)
         }
-        ApplicationQuery::ArtistTracks { artist_name, .. } => paged!(
-            tracks
-                .iter()
-                .filter(|t| t.artist.as_deref() == Some(&artist_name))
-                .map(display)
-                .collect::<Vec<_>>(),
-            ArtistTracks
-        ),
+        ApplicationQuery::ArtistTracks { .. } => {
+            track_page!(tracks.iter().collect::<Vec<_>>(), ArtistTracks)
+        }
         ApplicationQuery::LikedTracks { .. } => {
-            let order = conn
-                .prepare("SELECT track_id FROM liked_tracks ORDER BY liked_at DESC,track_id")
-                .map_err(db_error)?
-                .query_map([], |r| r.get::<_, i64>(0))
-                .map_err(db_error)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(db_error)?;
-            let ts = tracks.iter().map(|t| (t.id, t)).collect::<HashMap<_, _>>();
-            paged!(
-                order
-                    .iter()
-                    .filter_map(|id| ts.get(id))
-                    .map(|t| display(t))
-                    .collect::<Vec<_>>(),
-                LikedTracks
-            )
+            track_page!(tracks.iter().collect::<Vec<_>>(), LikedTracks)
         }
-        ApplicationQuery::PlaylistTracks { playlist_id, .. } => {
-            let exists = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1 AND COALESCE(deleted,0)=0)",
-                    [playlist_id],
-                    |r| r.get::<_, bool>(0),
-                )
-                .map_err(db_error)?;
-            if !exists {
-                return Err(error(ControlErrorCode::NotFound));
-            }
-            paged!(
-                db::get_playlist_tracks(conn, playlist_id as i64)
-                    .map_err(db_error)?
-                    .iter()
-                    .map(display)
-                    .collect::<Vec<_>>(),
-                PlaylistTracks
-            )
+        ApplicationQuery::PlaylistTracks { .. } => {
+            track_page!(tracks.iter().collect::<Vec<_>>(), PlaylistTracks)
         }
-        ApplicationQuery::Playlists { .. } => {
-            let active = ids_query(conn, "SELECT id FROM playlists WHERE COALESCE(deleted,0)=0")?;
-            let ps = db::get_all_playlists(conn)
-                .map_err(db_error)?
-                .into_iter()
-                .filter(|p| active.contains(&p.id))
-                .map(|p| {
-                    Ok(DisplayPlaylist {
-                        id: p.id as u64,
-                        name: p.name,
-                        track_count: conn
-                            .query_row(
-                                "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id=?1",
-                                [p.id],
-                                |r| r.get(0),
-                            )
-                            .map_err(db_error)?,
-                        artwork: None,
-                    })
-                })
-                .collect::<Result<Vec<_>, ControlError>>()?;
-            paged!(ps, Playlists)
-        }
+        ApplicationQuery::Playlists { .. } => paged!(playlists, Playlists),
         ApplicationQuery::Artists { .. } => paged!(artists(&tracks), Artists),
         ApplicationQuery::Albums {
             sort,
@@ -799,10 +828,8 @@ fn project(
             text,
             ..
         } => {
-            let liked_albums = ids(conn, "liked_albums", "album_id")?;
             let text = text.map(|t| normalize(t.trim()));
-            let mut albums = db::get_all_albums_with_paths(conn)
-                .map_err(db_error)?
+            let mut albums = albums
                 .into_iter()
                 .filter(|a| {
                     (!liked_only.unwrap_or(false) || liked_albums.contains(&a.id))
@@ -811,15 +838,16 @@ fn project(
                                 || normalize(a.artist.as_deref().unwrap_or("")).contains(s)
                         })
                 })
-                .map(|a| album_projection(a, &tracks))
+                .map(summarize)
                 .collect::<Vec<_>>();
+            let pinned = c.pinned_albums.iter().copied().collect::<HashSet<_>>();
             let sort = sort.unwrap_or(AlbumSort::NameAsc);
             albums.sort_by(|a, b| {
                 let a_id = a.display.id;
                 let b_id = b.display.id;
-                c.pinned_albums
+                pinned
                     .contains(&b_id)
-                    .cmp(&c.pinned_albums.contains(&a_id))
+                    .cmp(&pinned.contains(&a_id))
                     .then_with(|| (b.count > 0).cmp(&(a.count > 0)))
                     .then_with(|| {
                         let artist = |a: &AlbumProjection| {
@@ -863,16 +891,17 @@ fn project(
             )
         }
         ApplicationQuery::AlbumDetail { album_id } => {
-            let a = db::get_album_by_id(conn, album_id as i64)
-                .map_err(db_error)?
+            let a = albums
+                .into_iter()
+                .find(|a| a.id == album_id as i64)
                 .ok_or_else(|| error(ControlErrorCode::NotFound))?;
-            let a = album_projection(a, &tracks);
+            let a = summarize(a);
             Ok(QueryResult::AlbumDetail {
                 detail: AlbumDetail {
                     album: a.display,
                     original_year: a.original_year,
                     track_count: a.count,
-                    liked: ids(conn, "liked_albums", "album_id")?.contains(&(album_id as i64)),
+                    liked: liked_albums.contains(&(album_id as i64)),
                 },
                 revision,
             })
@@ -883,11 +912,10 @@ fn project(
                 .filter(|t| t.artist.as_deref() == Some(&artist_name))
                 .filter_map(|t| t.album_id)
                 .collect::<HashSet<_>>();
-            let mut albums = db::get_all_albums_with_paths(conn)
-                .map_err(db_error)?
+            let mut albums = albums
                 .into_iter()
                 .filter(|a| album_ids.contains(&a.id))
-                .map(|a| album_projection(a, &tracks).display)
+                .map(|a| summarize(a).display)
                 .collect::<Vec<_>>();
             albums.sort_by(|a, b| compare_text(&a.name, &b.name).then(a.id.cmp(&b.id)));
             paged!(albums, ArtistAlbums)
@@ -904,12 +932,12 @@ fn project(
                     matches.push(SearchMatch::Track { track: display(t) });
                 }
             }
-            for a in db::get_all_albums_with_paths(conn).map_err(db_error)? {
+            for a in albums {
                 if normalize(&a.name).contains(&needle)
                     || normalize(a.artist.as_deref().unwrap_or("")).contains(&needle)
                 {
                     matches.push(SearchMatch::Album {
-                        album: album_projection(a, &tracks).display,
+                        album: summarize(a).display,
                     });
                 }
             }
@@ -922,14 +950,6 @@ fn project(
         }
         _ => Err(error(ControlErrorCode::Unsupported)),
     }
-}
-fn ids_query(conn: &Connection, sql: &str) -> Result<HashSet<i64>, ControlError> {
-    conn.prepare(sql)
-        .map_err(db_error)?
-        .query_map([], |r| r.get(0))
-        .map_err(db_error)?
-        .collect::<rusqlite::Result<HashSet<_>>>()
-        .map_err(db_error)
 }
 fn artists(tracks: &[db::Track]) -> Vec<DisplayArtist> {
     let mut map: HashMap<String, (u64, HashSet<i64>)> = HashMap::new();
@@ -1059,6 +1079,122 @@ mod tests {
             .unwrap();
             assert!(q.stamp_async().await.is_ok());
         });
+    }
+
+    #[tokio::test]
+    async fn cpu_projection_releases_db_and_rejects_a_write_after_capture() {
+        let mut q = fixture();
+        let db = q.db.clone();
+        q.projection_probe = Some(Arc::new(move |stage, _| {
+            if stage == "captured" {
+                let conn = db
+                    .conn
+                    .try_lock()
+                    .expect("projection still owns desktop DB");
+                conn.execute("UPDATE tracks SET title='after capture' WHERE id=1", [])
+                    .unwrap();
+            }
+        }));
+        let result = q
+            .query_library(
+                query(serde_json::json!({"type":"albums","limit":1})),
+                context(&q),
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code, ControlErrorCode::RevisionConflict);
+    }
+    #[tokio::test]
+    async fn desktop_db_is_available_while_projection_is_paused_at_a_controlled_barrier() {
+        let mut q = fixture();
+        let db = q.db.clone();
+        let context = context(&q);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered = Mutex::new(Some(entered_tx));
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let resume = Mutex::new(resume_rx);
+        q.projection_probe = Some(Arc::new(move |stage, _| {
+            if stage == "captured" {
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+            }
+        }));
+        let pending = tokio::spawn(async move {
+            q.query_library(
+                query(serde_json::json!({"type":"albums","limit":1})),
+                context,
+            )
+            .await
+        });
+        entered_rx.await.unwrap();
+        {
+            let conn = db
+                .conn
+                .try_lock()
+                .expect("desktop query must not wait for projection CPU");
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get::<_, usize>(0))
+                    .unwrap(),
+                2
+            );
+            conn.execute(
+                "UPDATE tracks SET title='committed during projection' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        }
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            pending.await.unwrap().unwrap_err().code,
+            ControlErrorCode::RevisionConflict
+        );
+    }
+
+    #[tokio::test]
+    async fn album_membership_is_linear_for_large_synthetic_one_item_pages() {
+        let mut q = fixture();
+        q.db.conn.lock().unwrap().execute_batch("WITH RECURSIVE n(x) AS(SELECT 100 UNION ALL SELECT x+1 FROM n WHERE x<1099) INSERT INTO albums(id,name) SELECT x,printf('Album %04d',x) FROM n;WITH RECURSIVE n(x) AS(SELECT 100 UNION ALL SELECT x+1 FROM n WHERE x<10099) INSERT INTO tracks(id,path,album_id,title,metadata_json) SELECT x,printf('synthetic-%d',x),100+(x-100)/10,'Title','{}' FROM n;").unwrap();
+        q.projection_probe = Some(Arc::new(|stage, count| {
+            if stage == "projected" {
+                assert_eq!(
+                    count, 10002,
+                    "album membership must visit each track once, not once per album"
+                );
+            }
+        }));
+        let QueryResult::Albums { page } = q
+            .query_library(
+                query(serde_json::json!({"type":"albums","limit":1})),
+                context(&q),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(page.items.len(), 1);
+        assert!(page.next_cursor.is_some());
+    }
+    #[tokio::test]
+    async fn playlist_and_detail_queries_do_not_load_unrelated_track_rows() {
+        let q = fixture();
+        q.db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET duration='unrelated-invalid-integer' WHERE id=2",
+                [],
+            )
+            .unwrap();
+        for request in [
+            serde_json::json!({"type":"playlists","limit":1}),
+            serde_json::json!({"type":"album_detail","albumId":1}),
+        ] {
+            assert!(q.query_library(query(request), context(&q)).await.is_ok());
+        }
     }
 
     #[tokio::test]
@@ -1416,25 +1552,50 @@ mod tests {
 fn attach_artwork(
     result: &mut QueryResult,
     resources: &super::resources::ManagedResources,
-    conn: &Connection,
+    db: &Database,
     c: &QueryContext,
 ) -> Result<(), ControlError> {
     use super::resources::Entity;
+    let register = |entity| -> Result<Option<ArtworkReference>, ControlError> {
+        let source = {
+            let conn = db
+                .conn
+                .try_lock()
+                .map_err(|_| error(ControlErrorCode::Busy))?;
+            if db::controller_library_stamp(&conn).map_err(db_error)? != c.stamp {
+                return Err(error(ControlErrorCode::RevisionConflict));
+            }
+            resources.capture(&conn, entity)?
+        };
+        // Encoded-source hashing and registry work occur only after the DB guard is gone.
+        source
+            .map(|source| resources.register_captured(source, c))
+            .transpose()
+    };
     let album_art = |a: &mut DisplayAlbum| -> Result<(), ControlError> {
-        a.artwork = resources.register(conn, Entity::Album(a.id), c)?;
+        a.artwork = register(Entity::Album(a.id))?;
         if a.artwork.is_none() {
-            let id=conn.query_row("SELECT id FROM tracks WHERE album_id=?1 ORDER BY disc_number,track_number,title,id LIMIT 1",[a.id],|r|r.get::<_,u64>(0)).ok();
+            let id = {
+                let conn = db
+                    .conn
+                    .try_lock()
+                    .map_err(|_| error(ControlErrorCode::Busy))?;
+                if db::controller_library_stamp(&conn).map_err(db_error)? != c.stamp {
+                    return Err(error(ControlErrorCode::RevisionConflict));
+                }
+                conn.query_row("SELECT id FROM tracks WHERE album_id=?1 ORDER BY disc_number,track_number,title,id LIMIT 1",[a.id],|r|r.get::<_,u64>(0)).optional().map_err(db_error)?
+            };
             if let Some(id) = id {
-                a.artwork = resources.register(conn, Entity::Track(id), c)?;
+                a.artwork = register(Entity::Track(id))?;
             }
         }
         Ok(())
     };
     let track_art = |t: &mut DisplayTrack| -> Result<(), ControlError> {
-        t.artwork = resources.register(conn, Entity::Track(t.id), c)?;
+        t.artwork = register(Entity::Track(t.id))?;
         if t.artwork.is_none() {
             if let Some(id) = t.album_id {
-                t.artwork = resources.register(conn, Entity::Album(id), c)?;
+                t.artwork = register(Entity::Album(id))?;
             }
         }
         Ok(())

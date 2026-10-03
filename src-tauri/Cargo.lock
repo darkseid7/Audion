@@ -403,6 +403,7 @@ dependencies = [
  "rodio",
  "rubato",
  "rusqlite",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",

@@ -258,6 +258,9 @@ impl CommandService {
     }
     pub fn ready(&self, window: &str, lease: &CoordinatorLease) -> Result<(), ControlError> {
         self.ensure_running()?;
+        // Establish the committed baseline before accepting commands. Regular publication is DB-free.
+        // Refresh probes DB and state separately; it cannot initialize the baseline only after a write at claim time.
+        self.refresh_library()?;
         let mut state = self
             .state
             .lock()

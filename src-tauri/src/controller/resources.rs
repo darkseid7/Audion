@@ -47,6 +47,12 @@ mod tests {
     use super::*;
     use base64::Engine;
     #[test]
+    fn unix_confinement_source_does_not_validate_by_following_the_raced_name_again() {
+        let source = include_str!("resources.rs");
+        assert!(!source.contains(concat!("opened.ino()", " != current.ino()")));
+        assert!(source.contains(concat!("OFlags::", "NOFOLLOW")));
+    }
+    #[test]
     fn valid_png_is_decoded_not_only_sniffed() {
         let bytes=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
         let media = validate_image(bytes).unwrap();
@@ -253,6 +259,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 #[derive(Clone, PartialEq)]
+pub(super) struct CapturedResource {
+    entity: Entity,
+    source: Source,
+}
+
+#[derive(Clone, PartialEq)]
 enum Source {
     File(String),
     Embedded(String),
@@ -295,12 +307,22 @@ impl ManagedResources {
             work: Arc::new(tokio::sync::Semaphore::new(4)),
         }
     }
+    #[cfg(test)]
     pub fn register(
         &self,
         conn: &rusqlite::Connection,
         entity: Entity,
         c: &QueryContext,
     ) -> Result<Option<ArtworkReference>, ControlError> {
+        self.capture(conn, entity)?
+            .map(|source| self.register_captured(source, c))
+            .transpose()
+    }
+    pub(super) fn capture(
+        &self,
+        conn: &rusqlite::Connection,
+        entity: Entity,
+    ) -> Result<Option<CapturedResource>, ControlError> {
         let Some(source) = source(conn, entity)? else {
             return Ok(None);
         };
@@ -310,6 +332,14 @@ impl ManagedResources {
                 return Ok(None);
             }
         }
+        Ok(Some(CapturedResource { entity, source }))
+    }
+    pub(super) fn register_captured(
+        &self,
+        captured: CapturedResource,
+        c: &QueryContext,
+    ) -> Result<ArtworkReference, ControlError> {
+        let CapturedResource { entity, source } = captured;
         let source = source_hash(&source);
         let mut state = self
             .state
@@ -322,10 +352,10 @@ impl ManagedResources {
                 && e.stamp == c.stamp
                 && e.source == source
         }) {
-            return Ok(Some(ArtworkReference {
+            return Ok(ArtworkReference {
                 resource_id: id.clone(),
                 revision: c.revision,
-            }));
+            });
         }
         while state.entries.len() >= 2048 {
             if let Some(id) = state.order.pop_front() {
@@ -345,10 +375,10 @@ impl ManagedResources {
                 bytes: None,
             },
         );
-        Ok(Some(ArtworkReference {
+        Ok(ArtworkReference {
             resource_id: id,
             revision: c.revision,
-        }))
+        })
     }
     pub(crate) async fn read_resource(
         &self,
@@ -529,6 +559,14 @@ fn read_managed(
     if !canonical.starts_with(&canonical_root) {
         return Err(error(ControlErrorCode::PermissionRequired));
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let file = open_anchored(
+        &canonical_root,
+        path.strip_prefix(root)
+            .map_err(|_| error(ControlErrorCode::PermissionRequired))?,
+        |_| {},
+    )?;
+    #[cfg(windows)]
     let file = std::fs::File::open(path).map_err(io_error)?;
     // Verify the opened handle, not merely the name checked before open.
     #[cfg(windows)]
@@ -556,15 +594,6 @@ fn read_managed(
             return Err(error(ControlErrorCode::PermissionRequired));
         }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let opened = file.metadata().map_err(io_error)?;
-        let current = std::fs::metadata(&canonical).map_err(io_error)?;
-        if opened.dev() != current.dev() || opened.ino() != current.ino() {
-            return Err(error(ControlErrorCode::PermissionRequired));
-        }
-    }
     if !file.metadata().map_err(io_error)?.is_file() {
         return Err(error(ControlErrorCode::PermissionRequired));
     }
@@ -579,4 +608,127 @@ fn read_managed(
         return Err(error(ControlErrorCode::TooLarge));
     }
     Ok(bytes)
+}
+
+/// Each lookup is relative to an owned directory handle and never follows a symlink.
+/// No post-open name lookup is treated as proof of the opened object's ancestry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_anchored(
+    root: &Path,
+    relative: &Path,
+    mut before_open: impl FnMut(&Path),
+) -> Result<std::fs::File, ControlError> {
+    use rustix::fs::{open, openat, Mode, OFlags};
+    use std::path::Component;
+    let denied = |_| error(ControlErrorCode::PermissionRequired);
+    if !root.is_absolute() || relative.is_absolute() {
+        return Err(error(ControlErrorCode::PermissionRequired));
+    }
+    let directories = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut anchors = vec![open("/", directories, Mode::empty()).map_err(denied)?];
+    let mut traversed = PathBuf::from("/");
+    for component in root.components().skip(1) {
+        let Component::Normal(name) = component else {
+            return Err(error(ControlErrorCode::PermissionRequired));
+        };
+        traversed.push(name);
+        before_open(&traversed);
+        anchors.push(
+            openat(anchors.last().unwrap(), name, directories, Mode::empty()).map_err(denied)?,
+        );
+    }
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(error(ControlErrorCode::PermissionRequired));
+        };
+        traversed.push(name);
+        before_open(&traversed);
+        if components.peek().is_none() {
+            // NONBLOCK prevents a raced FIFO from hanging before the regular-file check.
+            let fd = openat(
+                anchors.last().unwrap(),
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(denied)?;
+            let file = std::fs::File::from(fd);
+            if !file
+                .metadata()
+                .map_err(|_| error(ControlErrorCode::NotFound))?
+                .is_file()
+            {
+                return Err(error(ControlErrorCode::PermissionRequired));
+            }
+            return Ok(file);
+        }
+        anchors.push(
+            openat(anchors.last().unwrap(), name, directories, Mode::empty()).map_err(denied)?,
+        );
+    }
+    Err(error(ControlErrorCode::PermissionRequired))
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_race_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    #[test]
+    fn root_parent_and_file_swaps_never_open_outside_bytes() {
+        for target in ["covers", "tracks", "1.png"] {
+            let base =
+                std::env::temp_dir().join(format!("audion-unix-race-{}", uuid::Uuid::new_v4()));
+            let root = base.join("covers");
+            let outside = base.join("outside");
+            std::fs::create_dir_all(root.join("tracks")).unwrap();
+            std::fs::create_dir_all(outside.join("tracks")).unwrap();
+            std::fs::write(root.join("tracks/1.png"), b"authorized").unwrap();
+            std::fs::write(outside.join("1.png"), b"outside").unwrap();
+            std::fs::write(outside.join("tracks/1.png"), b"outside").unwrap();
+            let root = root.canonicalize().unwrap();
+            let mut swapped = false;
+            let result = open_anchored(&root, Path::new("tracks/1.png"), |next| {
+                if !swapped && next.file_name() == Some(std::ffi::OsStr::new(target)) {
+                    swapped = true;
+                    let replacement = if target == "1.png" {
+                        outside.join("1.png")
+                    } else {
+                        outside.clone()
+                    };
+                    std::fs::rename(next, base.join("moved")).unwrap();
+                    symlink(replacement, next).unwrap();
+                }
+            });
+            assert!(swapped);
+            assert!(
+                result.is_err(),
+                "no-follow must reject the swapped component"
+            );
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+    #[test]
+    fn an_already_open_parent_remains_anchored_after_rename_and_symlink_swap() {
+        let base =
+            std::env::temp_dir().join(format!("audion-unix-anchored-{}", uuid::Uuid::new_v4()));
+        let root = base.join("covers");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("tracks")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("tracks/1.png"), b"authorized").unwrap();
+        std::fs::write(outside.join("1.png"), b"outside").unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut file = open_anchored(&root, Path::new("tracks/1.png"), |next| {
+            if next.file_name() == Some(std::ffi::OsStr::new("1.png")) {
+                std::fs::rename(root.join("tracks"), base.join("moved")).unwrap();
+                symlink(&outside, root.join("tracks")).unwrap();
+            }
+        })
+        .unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"authorized");
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
