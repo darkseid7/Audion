@@ -8,16 +8,28 @@ pub fn get_application_mode() -> ApplicationMode {
 
 pub fn native_application_mode() -> ApplicationMode {
     #[cfg(target_os = "android")]
-    { ApplicationMode::Controller }
+    {
+        ApplicationMode::Controller
+    }
     #[cfg(not(target_os = "android"))]
-    { ApplicationMode::Desktop }
+    {
+        ApplicationMode::Desktop
+    }
 }
 
 #[cfg(mobile)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_os::init())
-        .invoke_handler(tauri::generate_handler![get_application_mode])
+    let builder = tauri::Builder::default().plugin(tauri_plugin_os::init());
+    #[cfg(target_os = "android")]
+    let builder = builder
+        .plugin(super::mobile::native_plugin())
+        .invoke_handler(tauri::generate_handler![
+            get_application_mode,
+            super::mobile::controller_scan_pair
+        ]);
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![get_application_mode]);
+    builder
         .run(tauri::generate_context!())
         .expect("error while running controller application");
 }
