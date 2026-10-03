@@ -29,6 +29,7 @@
   } from "$lib/api/tauri";
   import { trackCount, playlists, loadLibrary } from "$lib/stores/library";
   import UpdatePopup from "./UpdatePopup.svelte";
+  import LanControllerSettings from "./LanControllerSettings.svelte";
   import { confirm } from "$lib/stores/dialogs";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, onDestroy } from "svelte";
@@ -628,6 +629,9 @@
 
   <div class="settings-content">
     <div class="settings-container">
+      {#if !isAndroid()}
+        <LanControllerSettings />
+      {/if}
       <!-- Section: Support -->
       <section class="settings-section" aria-labelledby="support-heading">
         <h2 id="support-heading" class="section-label">{$_('settings.support', { default: 'Support' })}</h2>

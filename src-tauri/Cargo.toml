@@ -149,7 +149,23 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 notify = "7"
 notify-debouncer-full = "0.4"
 
+# LAN host identity and TLS. Never initialized by the Android controller.
+axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = { version = "=0.14.7", features = ["x509-parser"] }
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+time = "=0.3.47"
+zeroize = "=1.8.2"
+subtle = "=2.6.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_System_Com",
