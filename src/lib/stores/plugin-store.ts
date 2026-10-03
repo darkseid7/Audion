@@ -3,8 +3,9 @@ import { writable, derived, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { AudionPluginManifest } from '../plugins/schema';
-import { fetchMarketplacePlugins, searchPlugins, filterByCategory, type MarketplacePlugin } from '../plugins/marketplace';
-import { PluginRuntime, setGlobalPermissionManager } from '../plugins/runtime';
+import { initializeMarketplace, cleanupMarketplace, fetchMarketplacePlugins, searchPlugins, filterByCategory, type MarketplacePlugin } from '../plugins/marketplace';
+import type { PluginRuntime } from '../plugins/runtime';
+import { desktopEffectsEnabled } from '$lib/application/bootstrap';
 import { pingPluginInstall, fetchPluginStats } from '../api/audion-api';
 
 const COMMUNITY_URLS_KEY = 'audion_community_plugin_urls';
@@ -65,7 +66,7 @@ export interface PluginError {
 const initialState: PluginStoreState = {
     installed: [],
     marketplace: [],
-    communityUrls: loadCommunityUrls(),
+    communityUrls: [],
     loading: false,
     error: null,
     searchQuery: '',
@@ -122,8 +123,18 @@ function createPluginStore() {
     return {
         subscribe,
 
+        async dispose() {
+            cleanupMarketplace();
+            if (runtime) for (const plugin of runtime.getLoadedPlugins()) await runtime.unloadPlugin(plugin.manifest.name);
+            runtime = null;
+        },
+
         // Initialize the store
         async init() {
+            if (!get(desktopEffectsEnabled)) throw new Error("Desktop plugins unavailable");
+            initializeMarketplace();
+            const { PluginRuntime, setGlobalPermissionManager } = await import("../plugins/runtime");
+            update(s => ({ ...s, communityUrls: loadCommunityUrls() }));
             if (runtime) {
                 console.warn('[PluginStore] init() called more than once — ignoring');
                 return;

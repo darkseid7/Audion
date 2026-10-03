@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount, onDestroy } from 'svelte';
     import { convertFileSrc } from '$lib/api/tauri';
     import { queue, queueIndex } from '$lib/stores/player';
@@ -33,7 +34,7 @@
 
     $: {
         const path = track?.path;
-        if (path && canDecodeWaveformPath(path)) {
+        if ($desktopEffectsEnabled && path && canDecodeWaveformPath(path)) {
             loadWaveform(path);
         } else {
             rawData = null;
@@ -48,8 +49,10 @@
     $: {
         const tracks = $queue;
         const idx = $queueIndex;
-        enqueueQueuePrefetch(tracks, idx);
-        pumpPrefetch();
+        if ($desktopEffectsEnabled) {
+            enqueueQueuePrefetch(tracks, idx);
+            pumpPrefetch();
+        }
     }
     $: { progress; hoverPos; scheduleRedraw(); }
 

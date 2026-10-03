@@ -31,10 +31,13 @@ function saveToStorage(state: PinnedItems) {
     }
 }
 
-const initial = loadFromStorage();
+const initial = { playlists: [], albums: [], artists: [] };
 export const pinnedItems = writable<PinnedItems>(initial);
 
-pinnedItems.subscribe((v) => saveToStorage(v));
+export function initializePinned(): () => void {
+    pinnedItems.set(loadFromStorage());
+    return pinnedItems.subscribe(saveToStorage);
+}
 
 export function pinItem(type: PinnedType, id: number | string) {
     pinnedItems.update((state) => {

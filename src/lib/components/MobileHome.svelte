@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount } from "svelte";
     import {
         tracks,
@@ -51,6 +52,7 @@
     let loadingCharts = true;
 
     onMount(async () => {
+        if (!$desktopEffectsEnabled) { loadingCharts = false; return; }
         loadActivityData();
         
         try {
@@ -97,7 +99,7 @@
     // Liked tracks
     let likedTracks: Track[] = [];
 
-    $: if ($likedTrackIds) {
+    $: if ($desktopEffectsEnabled && $likedTrackIds) {
         loadLiked();
     }
 

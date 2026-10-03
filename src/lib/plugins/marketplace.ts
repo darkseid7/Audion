@@ -30,10 +30,7 @@ class PluginCache {
   private cache = new Map<string, { data: MarketplacePlugin; timestamp: number }>();
   private cleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor() {
-    // Start periodic cleanup
-    this.startCleanup();
-  }
+
 
   get(url: string): MarketplacePlugin | null {
     const entry = this.cache.get(url);
@@ -125,7 +122,7 @@ class PluginCache {
   /**
    * Start periodic cleanup
    */
-  private startCleanup(): void {
+  startCleanup(): void {
     if (this.cleanupTimer) return;
 
     this.cleanupTimer = setInterval(() => {
@@ -373,3 +370,6 @@ export function cleanupMarketplace(): void {
 export function getCacheStats(): { size: number; maxSize: number } {
   return pluginCache.getStats();
 }
+
+/** Called only by the desktop plugin lifecycle. */
+export function initializeMarketplace(): void { pluginCache.startCleanup(); }

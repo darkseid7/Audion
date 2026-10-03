@@ -16,10 +16,10 @@ vi.mock("$lib/api/tauri", () => ({
   getTrackCoverSrc: vi.fn(),
   getTrackById: vi.fn(),
 }));
-vi.mock("$lib/stores/player", async () => {
+vi.mock("$lib/stores/playback-state", async () => {
   const { writable } = await import("svelte/store");
   return {
-    activeBackend: writable("none"),
+    playbackStateWriter: { activeBackend: writable("none"),
     currentTrack: writable(null),
     isPlaying: writable(false),
     currentTime: writable(0),
@@ -27,6 +27,7 @@ vi.mock("$lib/stores/player", async () => {
     volume: writable(0),
     shuffle: writable(false),
     repeat: writable("none"),
+    }
   };
 });
 vi.mock("$lib/stores/websocket", async () => {
@@ -41,7 +42,9 @@ vi.mock("$lib/stores/library", () => ({
 vi.mock("$lib/stores/activity", () => ({ recordTrackPlay: vi.fn() }));
 
 import * as squeeze from "$lib/stores/squeeze";
-import { activeBackend, currentTrack, currentTime, duration, isPlaying } from "$lib/stores/player";
+import { playbackStateWriter } from "$lib/stores/playback-state";
+const { activeBackend, currentTrack, currentTime, duration, isPlaying } = playbackStateWriter;
+squeeze.initializeSqueeze();
 
 // Execute the production event handler without introducing a DOM dependency
 // or exporting a component-internal function solely for tests.

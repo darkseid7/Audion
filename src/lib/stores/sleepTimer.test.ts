@@ -16,6 +16,7 @@ vi.mock('$lib/stores/toast', () => ({
 // ── Actual imports ─────────────────────────────────────────────────────
 import { get } from 'svelte/store';
 import {
+  initializeSleepTimer,
   handleSleepTimerCheck,
   armTrackEndTimer,
   armAlbumEndTimer,
@@ -23,7 +24,7 @@ import {
   stopSleepTimer,
   sleepTimerTriggerMode,
 } from '$lib/stores/sleepTimer';
-import { playNext } from '$lib/stores/player';
+import { playNext, pause } from '$lib/application/desktop/player-runtime';
 import {
   queue,
   queueIndex,
@@ -31,7 +32,7 @@ import {
   shuffledIndex,
   shuffle,
   userQueueCount,
-} from '$lib/stores/player';
+} from '$lib/application/desktop/player-runtime';
 import type { Track } from '$lib/api/tauri';
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ function makeTrack(overrides: Partial<Track> = {}): Track {
 }
 
 function resetSleepTimer(): void {
+  initializeSleepTimer(pause);
   stopSleepTimer(false);
 }
 

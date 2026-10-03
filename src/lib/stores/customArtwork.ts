@@ -27,10 +27,13 @@ function saveToStorage(map: ArtworkMap) {
     }
 }
 
-const initial = loadFromStorage();
+const initial = {};
 export const customArtworks = writable<ArtworkMap>(initial);
 
-customArtworks.subscribe((v) => saveToStorage(v));
+export function initializeCustomArtwork(): () => void {
+    customArtworks.set(loadFromStorage());
+    return customArtworks.subscribe(saveToStorage);
+}
 
 function getStoreKey(type: ArtworkType, id: number | string): string {
     return `${type}:${id}`;

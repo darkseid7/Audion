@@ -9,16 +9,8 @@ import {
   getTrackById,
   type SqueezePlayerInfo,
 } from "$lib/api/tauri";
-import {
-  currentTrack,
-  isPlaying,
-  currentTime,
-  duration,
-  volume,
-  activeBackend,
-  shuffle,
-  repeat,
-} from "$lib/stores/player";
+import { playbackStateWriter } from "$lib/stores/playback-state";
+const { currentTrack, isPlaying, currentTime, duration, volume, activeBackend, shuffle, repeat } = playbackStateWriter;
 import { activeRemoteDevice } from "$lib/stores/websocket";
 import {
   getTrackByIdSync,
@@ -181,22 +173,31 @@ export function captureSqueezeTargetOwnership(mac: string): () => boolean {
   return () => ownsSqueezePoll(owner);
 }
 
-activeSqueezePlayer.subscribe((mac) => {
-  invalidateSqueezePollOwnership();
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
-
-  if (mac) {
-    void pollSqueezeState(captureSqueezePollOwner(mac));
-    pollInterval = setInterval(() => {
-      void pollSqueezeState(captureSqueezePollOwner(mac));
-    }, 500);
-  } else {
-    squeezePlayerState.set(null);
-  }
-});
+export function initializeSqueeze(): () => void {
+    const unsubscribe = activeSqueezePlayer.subscribe((mac) => {
+        invalidateSqueezePollOwnership();
+        if (pollInterval) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+        }
+        if (mac) {
+            void pollSqueezeState(captureSqueezePollOwner(mac));
+            pollInterval = setInterval(() => {
+                void pollSqueezeState(captureSqueezePollOwner(mac));
+            }, 500);
+        }
+        else {
+            squeezePlayerState.set(null);
+        }
+    });
+    return () => {
+        unsubscribe();
+        invalidateSqueezePollOwnership();
+        if (pollInterval) clearInterval(pollInterval);
+        pollInterval = null;
+        stopGlobalSqueezeDiscovery();
+    };
+}
 
 async function pollSqueezeState(owner: SqueezePollOwner) {
   if (!ownsSqueezePoll(owner)) return;

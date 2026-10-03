@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount } from "svelte";
     import { formatDuration, type Track, type Album } from "$lib/api/tauri";
     import {
@@ -59,6 +60,7 @@
     let loadingCharts = true;
 
     onMount(async () => {
+        if (!$desktopEffectsEnabled) { loadingCharts = false; return; }
         loadActivityData();
         const saved = getScroll("home");
         if (saved > 0 && homeEl) {

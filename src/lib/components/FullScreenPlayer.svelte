@@ -25,6 +25,7 @@
     toggleShuffle,
     cycleRepeat,
     volume,
+    setVolume,
     addToQueue,
     playNext,
   } from "$lib/stores/player";
@@ -246,7 +247,7 @@
   // --- Volume Management ---
   function handleVolumeChange(e: Event) {
     const val = parseFloat((e.target as HTMLInputElement).value);
-    volume.set(val);
+    void setVolume(val);
   }
 
   // --- Context Menu Management ---

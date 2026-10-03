@@ -1,63 +1,27 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
-  import { appSettings } from "$lib/stores/settings";
+  import { invoke } from "@tauri-apps/api/core";
+  import { bootstrapApplication, defaultBootstrapLoaders, desktopEffectsEnabled, migrationStatus, type ApplicationHandle } from "$lib/application/bootstrap";
+  import type { ApplicationMode } from "$lib/application/types";
   import { theme } from "$lib/stores/theme";
-  import { cleanupPlayer, initAudioBackend } from "$lib/stores/player";
-  import {
-    initDiscordPresence,
-    disposeDiscordPresence,
-  } from "$lib/stores/discordPresence";
-  import {
-    migrateCoversToFiles,
-    isAndroid,
-    isTauri,
-    startWatcher,
-    ensureAudioPermission,
-    openAppSettings,
-    initPlatformDetection,
-  } from "$lib/api/tauri";
-  import { initMobileDetection, isMobile } from "$lib/stores/mobile";
-  import { mobileSearchOpen } from "$lib/stores/mobile";
-  import { initAndroidNotification } from "$lib/services/android-notification";
-  import { loadLikedTracks } from "$lib/stores/liked";
-  import { loadLikedAlbums } from "$lib/stores/liked-albums";
-  import { loadListenLaterAlbums } from "$lib/stores/listen-later";
-  import { loadLibrary, refreshLibrarySilently } from "$lib/stores/library";
-  import { progressiveScan } from "$lib/stores/progressiveScan";
+  import { isAndroid, isTauri, initPlatformDetection } from "$lib/api/tauri";
+  import { initMobileDetection, isMobile, mobileSearchOpen } from "$lib/stores/mobile";
   import { goBack, navigationHistory } from "$lib/stores/view";
-  import {
-    isFullScreen,
-    isQueueVisible,
-    contextMenu,
-    isMiniPlayer,
-  } from "$lib/stores/ui";
-  import { pluginStore } from "$lib/stores/plugin-store";
+  import { isFullScreen, isQueueVisible, contextMenu, isMiniPlayer } from "$lib/stores/ui";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import PromptDialog from "$lib/components/PromptDialog.svelte";
   import TitleBar from "$lib/components/TitleBar.svelte";
   import ProgressiveScanStatus from "$lib/components/ProgressiveScanStatus.svelte";
   import SyncProgressOverlay from "$lib/components/SyncProgressOverlay.svelte";
   import LoginModal from "$lib/components/LoginModal.svelte";
-  import { initSync, destroySync } from "$lib/stores/sync";
   import { setupI18n } from "$lib/i18n";
   import { isLoading } from "svelte-i18n";
   import "../app.css";
-
-  let handleVisibilityChange: (() => void) | null = null;
-  let watcherUnlisten: (() => void) | null = null;
-  let migrationStatus = "";
-  let showMigrationBanner = false;
-  let showPermissionBanner = false;
-  let permissionDenied = false;
-
-  // =========================================================================
-  // ANDROID BACK BUTTON HANDLER
-  // =========================================================================
-  // Called from native Android (MainActivity.kt) via evaluateJavascript().
-  // Dismisses overlays first, then navigates back through view history.
-  // Returns true if handled, false if at root (so native side can minimize).
-  // =========================================================================
+  let application: ApplicationHandle | undefined;
+  let destroyed = false;
+  let ready = false;
+  let startupError = "";
   function setupAndroidBackHandler() {
     (window as any).__audionHandleBack = (): boolean => {
       // 1. Close context menu if open
@@ -101,377 +65,46 @@
     delete (window as any).__audionHandleBack;
   }
 
+
   onMount(async () => {
-    // Detect platform early for Linux-specific fixes (asset:// -> file://)
-    await initPlatformDetection();
-
-    appSettings.initialize();
     theme.initialize();
-
-    // Auto-start file watcher if enabled (desktop only)
-    if (!isAndroid() && isTauri()) {
-      const settings = get(appSettings);
-      if (settings.autoScanLibrary) {
-        startWatcher().catch((e: unknown) => console.warn('[Layout] Auto-start watcher failed:', e));
-      }
-
-      // Reload library when watcher detects file changes
-      const { listen } = await import("@tauri-apps/api/event");
-      const unlistenWatcher = await listen("watcher-files-changed", (event: any) => {
-        console.log('[Watcher] Files changed:', event.payload);
-        refreshLibrarySilently();
-      });
-      watcherUnlisten = unlistenWatcher;
-    }
-    
-    // Initialize i18n with saved preference or navigator default
-    const savedLang = localStorage.getItem("audion_language");
-    setupI18n(savedLang || undefined);
-
+    setupI18n(localStorage.getItem("audion_language") || undefined);
     initMobileDetection();
-    await initAudioBackend();
-    initDiscordPresence();
-
-    // Load liked tracks and albums from database
-    loadLikedTracks();
-    loadLikedAlbums();
-    loadListenLaterAlbums();
-
-    // Initialize sync state (auth check, event listeners)
-    initSync();
-
-    // Initialize Android-specific features
-    if (isAndroid() && isTauri()) {
-      setupAndroidBackHandler();
-      await checkAndroidPermissions();
-      initAndroidNotification();
-    }
-
-    const migrationStart = performance.now();
-
-    // Run cover migration if needed
-    await runCoverMigration();
-
-    console.log(
-      `  [LAYOUT] Cover migration: ${(performance.now() - migrationStart).toFixed(2)}ms`,
-    );
-
-    // handle page visibility
-    handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Tab hidden - we could pause here if desired
-        // But DON'T call cleanupPlayer() - too aggressive
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    if (!isTauri()) { ready = true; return; }
+    try {
+      await initPlatformDetection();
+      const mode = await invoke<ApplicationMode>("get_application_mode");
+      if (destroyed) return;
+      if (isAndroid()) setupAndroidBackHandler();
+      application = await bootstrapApplication(mode, defaultBootstrapLoaders);
+      if (destroyed) { await application.dispose(); return; }
+      ready = true;
+    } catch (error) { startupError = String(error); }
   });
-
-  async function checkAndroidPermissions() {
-    console.log("[PERMISSIONS] Checking Android audio permissions...");
-    const granted = await ensureAudioPermission();
-
-    if (!granted) {
-      console.warn("[PERMISSIONS] Audio permission not granted");
-      showPermissionBanner = true;
-      permissionDenied = true;
-    } else {
-      console.log("[PERMISSIONS] Audio permission granted");
-      showPermissionBanner = false;
-      permissionDenied = false;
-    }
-  }
-
-  async function handleOpenSettings() {
-    await openAppSettings();
-    // Re-check after returning from settings
-    setTimeout(async () => {
-      await checkAndroidPermissions();
-    }, 1000);
-  }
-
-  async function runCoverMigration() {
-    const migrated = localStorage.getItem("covers_migrated");
-
-    if (migrated !== "true") {
-      try {
-        showMigrationBanner = true;
-        migrationStatus = "Migrating cover images to file storage...";
-        console.log("[MIGRATION FRONTEND] Starting migration...");
-
-        const result = await migrateCoversToFiles();
-
-        console.log("[MIGRATION FRONTEND] Migration result:", result);
-        console.log("[MIGRATION FRONTEND] Total:", result.total);
-        console.log("[MIGRATION FRONTEND] Processed:", result.processed);
-        console.log(
-          "[MIGRATION FRONTEND] Tracks migrated:",
-          result.tracks_migrated,
-        );
-        console.log(
-          "[MIGRATION FRONTEND] Albums migrated:",
-          result.albums_migrated,
-        );
-        console.log("[MIGRATION FRONTEND] Errors:", result.errors.length);
-
-        if (result.errors.length > 0) {
-          console.error("[MIGRATION FRONTEND] Errors encountered:");
-          result.errors.forEach((error, i) => {
-            console.error(`[MIGRATION FRONTEND]   ${i + 1}. ${error}`);
-          });
-        }
-
-        if (result.errors.length === 0) {
-          localStorage.setItem("covers_migrated", "true");
-          migrationStatus = ` Successfully migrated ${result.tracks_migrated} track covers and ${result.albums_migrated} album covers`;
-          console.log("[MIGRATION FRONTEND] Migration completed successfully!");
-
-          setTimeout(() => {
-            showMigrationBanner = false;
-          }, 3000);
-        } else {
-          console.error("[MIGRATION FRONTEND] Migration completed with errors");
-          migrationStatus = `Migration completed with ${result.errors.length} errors. Check console for details.`;
-
-          setTimeout(() => {
-            showMigrationBanner = false;
-          }, 5000);
-        }
-      } catch (error) {
-        console.error("[MIGRATION FRONTEND] Migration failed:", error);
-        migrationStatus = "Migration failed. Please try again from settings.";
-
-        setTimeout(() => {
-          showMigrationBanner = false;
-        }, 5000);
-      }
-    } else {
-      console.log(
-        "[MIGRATION FRONTEND] Migration already completed (skipping)",
-      );
-    }
-  }
-
-  // Cleanup on component unmount
-  onDestroy(() => {
-    console.log("[App] Cleaning up on unmount");
-
-    // Remove visibility change listener
-    if (handleVisibilityChange) {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    }
-
-    // Cleanup Android back handler
+  function dispose() {
+    destroyed = true;
     cleanupAndroidBackHandler();
-
-    // Cleanup player resources
-    cleanupPlayer();
-
-    // Cleanup Discord Rich Presence
-    disposeDiscordPresence();
-
-    // Cleanup file watcher listener
-    watcherUnlisten?.();
-
-    // Cleanup sync event listeners
-    destroySync();
-  });
-
-  // Cleanup on hot reload (development only)
-  if (import.meta.hot) {
-    import.meta.hot.dispose(() => {
-      console.log("[App] Cleaning up on hot reload");
-      cleanupPlayer();
-      disposeDiscordPresence();
-      const runtime = pluginStore.getRuntime();
-      if (runtime) {
-        for (const plugin of runtime.getLoadedPlugins()) {
-            runtime.unloadPlugin(plugin.manifest.name);
-        }
-      }
-    });
+    void application?.dispose();
   }
+  onDestroy(dispose);
+  if (import.meta.hot) import.meta.hot.dispose(dispose);
 </script>
 
-{#if !$isLoading}
-{#if !$isMobile && !$isMiniPlayer}
-  <TitleBar />
+{#if $migrationStatus}<div class="migration-banner" role="status">{$migrationStatus}</div>{/if}
+{#if startupError}<p role="alert">{startupError}</p>{/if}
+{#if !$isLoading && ready}
+  {#if !$isMobile && !$isMiniPlayer}<TitleBar />{/if}
+  <ConfirmDialog />
+  <PromptDialog />
+  {#if $desktopEffectsEnabled}
+    <ProgressiveScanStatus />
+    <SyncProgressOverlay />
+    <LoginModal />
+  {/if}
+  <div class="app-content" class:mobile={$isMobile} class:pip={$isMiniPlayer}><slot /></div>
 {/if}
-<ConfirmDialog />
-<PromptDialog />
-<ProgressiveScanStatus />
-<SyncProgressOverlay />
-<LoginModal />
-
-{#if showMigrationBanner}
-  <div class="migration-banner">
-    <div class="migration-content">
-      {#if migrationStatus.startsWith("")}
-        <span class="success-icon"></span>
-      {:else if migrationStatus.includes("error") || migrationStatus.includes("failed")}
-        <span class="error-icon"></span>
-      {:else}
-        <span class="loading-icon">⏳</span>
-      {/if}
-      <span class="migration-text">{migrationStatus}</span>
-    </div>
-  </div>
-{/if}
-
-{#if showPermissionBanner}
-  <div class="permission-banner">
-    <div class="permission-content">
-      <span class="permission-icon">🎵</span>
-      <span class="permission-text">
-        {#if permissionDenied}
-          Audio permission required to play local music files.
-        {:else}
-          Requesting audio permission...
-        {/if}
-      </span>
-      {#if permissionDenied}
-        <button class="permission-button" on:click={handleOpenSettings}>
-          Open Settings
-        </button>
-      {/if}
-    </div>
-  </div>
-{/if}
-
-<div class="app-content" class:mobile={$isMobile} class:pip={$isMiniPlayer}>
-  <slot />
-</div>
-{/if}
-
 <style>
-  .app-content {
-    padding-top: 48px; /* Height of TitleBar */
-    height: 100vh;
-    width: 100%;
-    overflow: hidden; /* Prevent body scroll if content handles it, otherwise auto */
-  }
-
-  .migration-banner {
-    position: fixed;
-    top: 48px; /* Below TitleBar */
-    left: 0;
-    right: 0;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    padding: 0.75rem 1rem;
-    text-align: center;
-    z-index: 999;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    animation: slideDown 0.3s ease-out;
-  }
-
-  @keyframes slideDown {
-    from {
-      transform: translateY(-100%);
-      opacity: 0;
-    }
-    to {
-      transform: translateY(0);
-      opacity: 1;
-    }
-  }
-
-  .migration-content {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-  }
-
-  .success-icon {
-    color: #4ade80;
-    font-size: 1.2rem;
-    font-weight: bold;
-  }
-
-  .error-icon {
-    color: #fbbf24;
-    font-size: 1.2rem;
-  }
-
-  .loading-icon {
-    font-size: 1.2rem;
-    animation: pulse 1.5s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.5;
-    }
-  }
-
-  .migration-text {
-    font-size: 0.9rem;
-    font-weight: 500;
-  }
-
-  .app-content.mobile {
-    padding-top: 0;
-  }
-
-  /* PIP mode: no title bar, no padding */
-  .app-content.pip {
-    padding-top: 0;
-  }
-
-  /* Permission Banner Styles */
-  .permission-banner {
-    position: fixed;
-    top: 48px;
-    left: 0;
-    right: 0;
-    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-    color: white;
-    padding: 0.75rem 1rem;
-    text-align: center;
-    z-index: 1000;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-    animation: slideDown 0.3s ease-out;
-  }
-
-  .permission-content {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-
-  .permission-icon {
-    font-size: 1.2rem;
-  }
-
-  .permission-text {
-    font-size: 0.9rem;
-    font-weight: 500;
-  }
-
-  .permission-button {
-    background: rgba(255, 255, 255, 0.2);
-    border: 1px solid rgba(255, 255, 255, 0.4);
-    color: white;
-    padding: 0.4rem 0.8rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .permission-button:hover {
-    background: rgba(255, 255, 255, 0.3);
-  }
-
-  .permission-button:active {
-    background: rgba(255, 255, 255, 0.4);
-  }
+  .migration-banner { position: fixed; top: 48px; left: 0; right: 0; background: var(--bg-secondary); color: var(--text-primary); padding: 0.75rem 1rem; text-align: center; z-index: 999; }
+  .app-content { padding-top: 48px; height: 100vh; width: 100%; overflow: hidden; }
+  .app-content.mobile, .app-content.pip { padding-top: 0; }
 </style>

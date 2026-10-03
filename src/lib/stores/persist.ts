@@ -1,10 +1,7 @@
 // Simple JSON state persistence for player settings
 import { get } from 'svelte/store';
-import {
-    volume, currentTrack, queue, queueIndex, userQueueCount,
-    shuffle, repeat, shuffledIndices, shuffledIndex,
-    playbackContext, currentTime, duration, type PlaybackContext
-} from './player';
+import { playbackStateWriter, type PlaybackContext } from "$lib/stores/playback-state";
+const { volume, currentTrack, queue, queueIndex, userQueueCount, shuffle, repeat, shuffledIndices, shuffledIndex, playbackContext, currentTime, duration } = playbackStateWriter;
 import { lyricsVisible } from './lyrics';
 import type { Track } from '$lib/api/tauri';
 
@@ -179,16 +176,17 @@ export function scheduleStateSave(): void {
 }
 
 // Subscribe to store changes for auto-save
-export function setupAutoSave(): void {
-    volume.subscribe(() => scheduleStateSave());
-    lyricsVisible.subscribe(() => scheduleStateSave());
+export function setupAutoSave(): () => void {
+    const subscriptions: (() => void)[] = [];
+    subscriptions.push(volume.subscribe(() => scheduleStateSave()));
+    subscriptions.push(lyricsVisible.subscribe(() => scheduleStateSave()));
     // Trigger save on track change
-    currentTrack.subscribe(() => scheduleStateSave());
+    subscriptions.push(currentTrack.subscribe(() => scheduleStateSave()));
     // Trigger save on shuffle/repeat toggle
-    shuffle.subscribe(() => scheduleStateSave());
-    repeat.subscribe(() => scheduleStateSave());
+    subscriptions.push(shuffle.subscribe(() => scheduleStateSave()));
+    subscriptions.push(repeat.subscribe(() => scheduleStateSave()));
     // Trigger save on queue changes (might be frequent for big adds, but debounced)
-    queue.subscribe(() => scheduleStateSave());
+    subscriptions.push(queue.subscribe(() => scheduleStateSave()));
 
     // We do NOT subscribe to currentTime because it changes every ~16ms
     // Instead, we rely on the debounced save from other events, 
@@ -199,11 +197,12 @@ export function setupAutoSave(): void {
     // We can add a periodic save if playing?
 
     // Optional: Periodic save while playing
-    setInterval(() => {
+    const interval = setInterval(() => {
         // Only save if playing (we can check simple flag or just save)
         // We can't easily check 'isPlaying' store here without importing it,
         // imports are fine.
         // But let's keep it simple. Schedule save every 10s?
         scheduleStateSave();
     }, 5000);
+    return () => { subscriptions.forEach(stop => stop()); clearInterval(interval); if (saveTimeout) clearTimeout(saveTimeout); saveTimeout = null; };
 }

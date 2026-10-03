@@ -3,6 +3,7 @@ import { get } from "svelte/store";
 
 const { squeezePlay } = vi.hoisted(() => ({ squeezePlay: vi.fn() }));
 vi.mock("$lib/api/tauri", () => ({
+  isTauri: () => false,
   squeezePlay,
   squeezeGetPlayerState: vi.fn(() => new Promise(() => {})),
   squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined),
@@ -12,7 +13,7 @@ vi.mock("$lib/api/tauri", () => ({
   convertFileSrc: vi.fn(),
   listen: vi.fn(),
   initWindowsThumbar: vi.fn(),
-  updateWindowsThumbarState: vi.fn(),
+  updateWindowsThumbarState: vi.fn().mockResolvedValue(undefined),
   submitListenbrainzListen: vi.fn(),
   squeezePause: vi.fn(),
   squeezeResume: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("$lib/stores/toast", () => ({ addToast: vi.fn() }));
 
 import {
+  pluginEvents,
   activeBackend,
   currentTrack,
   currentTime,
@@ -37,13 +39,16 @@ import {
   playTrack,
   playTrackOnSqueeze,
   queue,
-} from "./player";
+} from "$lib/application/desktop/player-runtime";
 import {
+  initializeSqueeze,
   activeSqueezePlayer,
   activateSqueezeTarget,
   disconnectSqueezePlayer,
   resetSqueezePollingForTests,
 } from "./squeeze";
+
+initializeSqueeze();
 
 describe("success-gated Squeeze play", () => {
   beforeEach(() => squeezePlay.mockReset());
@@ -163,4 +168,28 @@ describe("Squeeze play request ownership", () => {
       expect(get(isPlaying)).toBe(false);
     },
   );
+});
+
+it("preserves the plugin event singleton across facade and desktop runtime", async () => {
+  const facade = await import("./player");
+  expect(facade.pluginEvents).toBe(pluginEvents);
+});
+
+
+it("disposes runtime subscriptions before a subsequent desktop startup", async () => {
+  vi.stubGlobal("navigator", {});
+  const { initAudioBackend, cleanupPlayer } = await import("$lib/application/desktop/player-runtime");
+  const { updateWindowsThumbarState } = await import("$lib/api/tauri");
+  await initAudioBackend();
+  cleanupPlayer();
+  vi.mocked(updateWindowsThumbarState).mockClear();
+  activeBackend.set("remote");
+  isPlaying.set(true);
+  expect(updateWindowsThumbarState).not.toHaveBeenCalled();
+  await initAudioBackend();
+  vi.mocked(updateWindowsThumbarState).mockClear();
+  isPlaying.set(false);
+  expect(updateWindowsThumbarState).toHaveBeenCalledTimes(1);
+  cleanupPlayer();
+  vi.unstubAllGlobals();
 });

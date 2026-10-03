@@ -1,3 +1,4 @@
+import { playbackStateWriter } from "$lib/stores/playback-state";
 
 import { get } from 'svelte/store';
 import { currentTrack, isPlaying, togglePlay, nextTrack, previousTrack, currentTime, duration } from '$lib/stores/player';
@@ -70,7 +71,8 @@ export async function initAndroidNotification() {
                 break;
             case 'stop':
                 nativeAudioStop();
-                isPlaying.set(false);
+                // Android controller startup never installs this legacy audio integration.
+                playbackStateWriter.isPlaying.set(false);
                 break;
         }
     };

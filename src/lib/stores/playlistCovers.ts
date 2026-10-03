@@ -25,10 +25,13 @@ function saveToStorage(map: CoversMap) {
     }
 }
 
-const initial = loadFromStorage();
+const initial = {};
 export const playlistCovers = writable<CoversMap>(initial);
 
-playlistCovers.subscribe((v) => saveToStorage(v));
+export function initializePlaylistCovers(): () => void {
+    playlistCovers.set(loadFromStorage());
+    return playlistCovers.subscribe(saveToStorage);
+}
 
 export function setPlaylistCover(playlistId: number, dataUrl: string) {
     playlistCovers.update((m) => ({ ...m, [playlistId]: dataUrl }));

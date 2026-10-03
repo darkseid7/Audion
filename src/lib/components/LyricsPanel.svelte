@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount } from "svelte";
     import { derived } from "svelte/store";
     import {
@@ -240,6 +241,7 @@
     // -------------------------------------------------------------------------
 
     onMount(() => {
+        if (!$desktopEffectsEnabled) return;
         initLyricsSync();
         return () => destroyLyricsSync();
     });

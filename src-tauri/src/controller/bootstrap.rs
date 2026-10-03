@@ -1,0 +1,35 @@
+//! Native build role and minimal controller startup. No desktop domain states.
+use super::protocol::ApplicationMode;
+
+#[tauri::command]
+pub fn get_application_mode() -> ApplicationMode {
+    native_application_mode()
+}
+
+pub fn native_application_mode() -> ApplicationMode {
+    #[cfg(target_os = "android")]
+    { ApplicationMode::Controller }
+    #[cfg(not(target_os = "android"))]
+    { ApplicationMode::Desktop }
+}
+
+#[cfg(mobile)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_os::init())
+        .invoke_handler(tauri::generate_handler![get_application_mode])
+        .run(tauri::generate_context!())
+        .expect("error while running controller application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_role_is_build_defined() {
+        #[cfg(target_os = "android")]
+        assert_eq!(native_application_mode(), ApplicationMode::Controller);
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(native_application_mode(), ApplicationMode::Desktop);
+    }
+}

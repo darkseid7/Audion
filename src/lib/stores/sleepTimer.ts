@@ -1,5 +1,7 @@
 import { derived, get, writable } from 'svelte/store';
-import { pause, isPlaying } from './player';
+import { isPlaying } from './playback-state';
+let pause: () => Promise<void> = async () => {};
+
 import { addToast } from './toast';
 import type { Track } from '$lib/api/tauri';
 
@@ -77,7 +79,7 @@ function saveState(state: SleepTimerState): void {
     }
 }
 
-const initialState = loadState();
+const initialState = getDefaultState();
 const endsAt = writable<number | null>(initialState.endsAt);
 const lastDurationMinutes = writable<number>(initialState.lastDurationMinutes);
 const triggerMode = writable<TriggerMode>(initialState.triggerMode);
@@ -291,14 +293,25 @@ export function handleSleepTimerCheck(
     return false;
 }
 
-// Replay the stored state if the timer was still active on page load
-if (initialState.endsAt && initialState.endsAt > Date.now()) {
-    startTicker();
-} else if (initialState.endsAt && initialState.endsAt <= Date.now()) {
-    endsAt.set(null);
-    triggerMode.set('time');
-    armedAlbumId.set(null);
-    persist();
+/** Desktop-owned hydration and timer lifetime. */
+export function initializeSleepTimer(pausePlayback: () => Promise<void>): () => void {
+    pause = pausePlayback;
+    const initialState = loadState();
+    endsAt.set(initialState.endsAt);
+    lastDurationMinutes.set(initialState.lastDurationMinutes);
+    triggerMode.set(initialState.triggerMode);
+    armedAlbumId.set(initialState.armedAlbumId);
+    // Replay the stored state if the timer was still active on page load
+    if (initialState.endsAt && initialState.endsAt > Date.now()) {
+        startTicker();
+    }
+    else if (initialState.endsAt && initialState.endsAt <= Date.now()) {
+        endsAt.set(null);
+        triggerMode.set('time');
+        armedAlbumId.set(null);
+        persist();
+    }
+    return () => { stopTicker(); pause = async () => { }; };
 }
 
 // Export the writable stores (read-only subscriptions) for use in

@@ -80,7 +80,7 @@ const {
   };
 });
 
-vi.mock("$lib/stores/player", () => ({
+vi.mock("$lib/stores/playback-state", () => ({ playbackStateWriter: {
   currentTrack,
   isPlaying,
   currentTime,
@@ -91,7 +91,7 @@ vi.mock("$lib/stores/player", () => ({
   repeat,
   queue,
   queueIndex,
-}));
+} }));
 vi.mock("$lib/stores/websocket", () => ({ activeRemoteDevice }));
 vi.mock("$lib/stores/library", () => ({
   getTrackByIdSync: vi.fn(() => null),
@@ -100,7 +100,7 @@ vi.mock("$lib/stores/library", () => ({
 }));
 vi.mock("$lib/stores/activity", () => ({ recordTrackPlay }));
 
-import {
+import { initializeSqueeze,
   activeSqueezePlayer,
   activateSqueezeTarget,
   disconnectSqueezePlayer,
@@ -111,6 +111,7 @@ import {
   startGlobalSqueezeDiscovery,
   stopGlobalSqueezeDiscovery,
 } from "./squeeze";
+initializeSqueeze();
 
 const info = (mac: string, id: number) => ({
   mac,
@@ -399,3 +400,5 @@ describe("Squeeze connection lifecycle", () => {
     expect(get(activeBackend)).not.toBe("squeeze");
   });
 });
+
+// Activation is explicit; importing the state does not start polling.

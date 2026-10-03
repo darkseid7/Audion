@@ -9,6 +9,8 @@
     currentTrack,
     isPlaying,
     transferPlayback,
+    selectThisDevice,
+    toggleRemoteControl as toggleControl,
     sendRemoteCommand,
     activeBackend,
   } from "$lib/stores/player";
@@ -88,14 +90,6 @@
    * this really disconnects it (stop + close the connection); if a cloud
    * remote is being controlled, that session is cleared.
    */
-  function selectThisDevice() {
-    if ($activeBackend === "squeeze" && $activeSqueezePlayer) {
-      disconnectSqueezePlayer($activeSqueezePlayer);
-    } else if ($activeBackend === "remote") {
-      activeBackend.set("none");
-      activeRemoteDevice.set(null);
-    }
-  }
 
   // Deduplication and sorting (active device first)
   $: devices = $wsStore.devices
@@ -124,44 +118,7 @@
     sendRemoteCommand(deviceId, command);
   }
 
-  function toggleControl(device: RemoteDevice) {
-    if (
-      $activeBackend === "remote" &&
-      $activeRemoteDevice === device.deviceId
-    ) {
-      activeBackend.set("none");
-      activeRemoteDevice.set(null);
-    } else {
-      activeBackend.set("remote");
-      activeRemoteDevice.set(device.deviceId);
 
-      if (device.playerState && device.playerState.track) {
-        const remoteTrack = device.playerState.track;
-        const remotePlaying = device.playerState.isPlaying;
-        const remoteTrackId = Number(remoteTrack.id);
-
-        let localTrack: any = getTrackByIdSync(remoteTrackId);
-        if (!localTrack) {
-          const $library = get(libraryTracks);
-          localTrack = $library.find(
-            (t) =>
-              t.title === remoteTrack.title && t.artist === remoteTrack.artist,
-          );
-        }
-
-        currentTrack.set({
-          ...remoteTrack,
-          ...(localTrack || {}),
-          id: remoteTrackId,
-          track_cover: localTrack
-            ? getTrackCoverSrc(localTrack)
-            : remoteTrack.coverUrl,
-        } as any);
-
-        isPlaying.set(remotePlaying);
-      }
-    }
-  }
 </script>
 
 <div

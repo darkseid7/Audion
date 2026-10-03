@@ -72,7 +72,7 @@ function saveSettings(state: AppSettings): void {
 
 // Create settings store
 function createSettingsStore() {
-  const { subscribe, set, update } = writable<AppSettings>(loadSettings());
+  const { subscribe, set, update } = writable<AppSettings>({ ...defaultSettings });
 
   return {
     subscribe,

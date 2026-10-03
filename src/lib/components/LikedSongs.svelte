@@ -1,7 +1,7 @@
 <script lang="ts">
     import { getLikedTracks, type Track } from "$lib/api/tauri";
     import { likedTrackIds } from "$lib/stores/liked";
-    import { playTracks, shuffle } from "$lib/stores/player";
+    import { playTracks, setShuffle } from "$lib/stores/player";
     import TrackList from "./TrackList.svelte";
 
     let tracks: Track[] = [];
@@ -26,16 +26,16 @@
         }
     }
 
-    function handlePlayAll() {
+    async function handlePlayAll() {
         if (tracks.length > 0) {
-            shuffle.set(false);
+            await setShuffle(false);
             playTracks(tracks, 0);
         }
     }
 
-    function handleShufflePlay() {
+    async function handleShufflePlay() {
         if (tracks.length > 0) {
-            shuffle.set(true);
+            await setShuffle(true);
             const randomIndex = Math.floor(Math.random() * tracks.length);
             playTracks(tracks, randomIndex);
         }

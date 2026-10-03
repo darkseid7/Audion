@@ -40,17 +40,20 @@ export const availableSources = writable<string[]>([]);
  * null = "auto" .use the first available source in registry priority order.
  */
 export const selectedSource = writable<string | null>(
-  localStorage.getItem("lyrics_selected_source") ?? null,
+  null,
 );
 
 // Persist selectedSource automatically
-selectedSource.subscribe((value) => {
-  if (value === null) {
-    localStorage.removeItem("lyrics_selected_source");
-  } else {
-    localStorage.setItem("lyrics_selected_source", value);
-  }
-});
+export function initializeLyricsPreferences(): () => void {
+  selectedSource.set(localStorage.getItem("lyrics_selected_source"));
+  return selectedSource.subscribe((value) => {
+    if (value === null) {
+      localStorage.removeItem("lyrics_selected_source");
+    } else {
+      localStorage.setItem("lyrics_selected_source", value);
+    }
+  });
+}
 
 /** Index of the currently active lyric line based on playback time. */
 export const activeLine = derived(

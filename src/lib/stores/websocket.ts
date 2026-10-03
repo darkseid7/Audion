@@ -197,23 +197,28 @@ function createWebsocketStore() {
     }
 
     // Auto connect/disconnect based on auth state and settings
-    authState.subscribe($auth => {
-        if ($auth.is_logged_in && get(appSettings).remoteControlEnabled) {
-            connect();
-        } else {
-            disconnect();
-        }
-    });
+    function initialize() {
+        const stopAuth = authState.subscribe($auth => {
+            if ($auth.is_logged_in && get(appSettings).remoteControlEnabled) {
+                connect();
+            } else {
+                disconnect();
+            }
+        });
 
-    appSettings.subscribe($settings => {
-        if ($settings.remoteControlEnabled && get(authState).is_logged_in) {
-            connect();
-        } else if (!$settings.remoteControlEnabled) {
-            disconnect();
-        }
-    });
+        const stopSettings = appSettings.subscribe($settings => {
+            if ($settings.remoteControlEnabled && get(authState).is_logged_in) {
+                connect();
+            } else if (!$settings.remoteControlEnabled) {
+                disconnect();
+            }
+        });
+
+        return () => { stopAuth(); stopSettings(); disconnect(); };
+    }
 
     return {
+        initialize,
         subscribe,
         send,
         connect,

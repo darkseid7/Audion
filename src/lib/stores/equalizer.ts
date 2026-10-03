@@ -95,7 +95,7 @@ function saveState(state: EqualizerState): void {
 
 // Create the equalizer store
 function createEqualizerStore() {
-    const { subscribe, set, update } = writable<EqualizerState>(loadState());
+    const { subscribe, set, update } = writable<EqualizerState>({ ...defaultState, bands: createDefaultBands() });
 
     // Internal callbacks for when filters need updating
     let gainChangeCallbacks: Set<(bandIndex: number, gain: number) => void> = new Set();
@@ -103,6 +103,7 @@ function createEqualizerStore() {
 
     return {
         subscribe,
+        initialize() { set(loadState()); },
 
         // Register callbacks for audio system integration - returns unsubscribe function
         onGainChange(callback: (bandIndex: number, gain: number) => void): () => void {

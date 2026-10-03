@@ -231,7 +231,7 @@ fn init_panic_hook() {
     }));
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
     // ------------------------------------------------------------------
     // Resolve the log directory before Tauri starts so we can log early
@@ -522,6 +522,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 tauri::generate_handler![
+                    controller::bootstrap::get_application_mode,
                     // Library commands
                     commands::scan_music,
                     commands::add_folder,
@@ -727,175 +728,7 @@ pub fn run() {
                     commands::library::get_watcher_status,
                 ]
             }
-            #[cfg(mobile)]
-            {
-                tauri::generate_handler![
-                    // Library commands
-                    commands::scan_music,
-                    commands::add_folder,
-                    commands::set_single_music_folder,
-                    commands::rescan_music,
-                    commands::hard_rescan_music,
-                    commands::get_default_music_dirs,
-                    commands::get_library,
-                    commands::get_track_by_id,
-                    commands::get_tracks_paginated,
-                    commands::get_albums_paginated,
-                    commands::search_library,
-                    commands::get_tracks_by_album,
-                    commands::get_tracks_by_artist,
-                    commands::get_album,
-                    commands::get_albums_by_artist,
-                    commands::add_external_track,
-                    commands::import_audio_file,
-                    commands::begin_folder_import,
-                    commands::delete_track,
-                    commands::delete_album,
-                    commands::reset_database,
-                    commands::sync_cover_paths_from_files,
-                    // Cover Management commands
-                    commands::covers::migrate_covers_to_files,
-                    commands::covers::get_track_cover_path,
-                    commands::covers::get_batch_cover_paths,
-                    commands::covers::get_album_art_path,
-                    commands::covers::get_cover_as_asset_url,
-                    commands::covers::preload_covers,
-                    commands::covers::cleanup_orphaned_cover_files,
-                    commands::covers::clear_base64_covers,
-                    commands::covers::merge_duplicate_covers,
-                    // Playlist commands
-                    commands::create_playlist,
-                    commands::get_playlists,
-                    commands::get_playlist_tracks,
-                    commands::add_track_to_playlist,
-                    commands::remove_track_from_playlist,
-                    commands::delete_playlist,
-                    commands::rename_playlist,
-                    commands::update_playlist_cover,
-                    commands::reorder_playlist_tracks,
-                    // Activity commands (liked tracks + play history)
-                    commands::like_track,
-                    commands::unlike_track,
-                    commands::is_track_liked,
-                    commands::get_liked_track_ids,
-                    commands::get_liked_tracks,
-                    commands::like_album,
-                    commands::unlike_album,
-                    commands::get_liked_album_ids,
-                    commands::add_album_to_listen_later,
-                    commands::remove_album_from_listen_later,
-                    commands::is_album_in_listen_later,
-                    commands::get_listen_later_album_ids,
-                    commands::record_play,
-                    commands::get_top_tracks,
-                    commands::get_top_albums,
-                    commands::get_recently_played,
-                    commands::get_recently_played_albums,
-                    commands::get_played_this_week,
-                    commands::get_top_artists,
-                    commands::get_stats_summary,
-                    // Lyrics commands
-                    commands::save_user_lyrics_file,
-                    commands::save_source_lyrics_file,
-                    commands::load_user_lyrics_file,
-                    commands::load_source_lyrics_file,
-                    commands::delete_user_lyrics_file,
-                    commands::delete_source_lyrics_file,
-                    commands::musixmatch_request,
-                    commands::get_lyrics,
-                    commands::get_current_lyric,
-                    commands::get_embedded_lyrics,
-                    commands::get_cached_sources,
-                    commands::read_lyrics_file,
-                    commands::parse_apple_lyrics_json_cmd,
-                    commands::parse_genius_lyrics_json_cmd,
-                    // Metadata commands
-                    commands::download_and_save_audio,
-                    commands::update_track_after_download,
-                    commands::update_local_src,
-                    commands::update_track_cover_url,
-                    // Plugin commands
-                    commands::list_plugins,
-                    commands::install_plugin,
-                    commands::uninstall_plugin,
-                    commands::enable_plugin,
-                    commands::disable_plugin,
-                    commands::get_plugin_permissions,
-                    commands::grant_permissions,
-                    commands::check_cross_plugin_permission,
-                    commands::get_cross_plugin_permissions,
-                    commands::revoke_permissions,
-                    commands::get_plugin_dir,
-                    commands::check_plugin_updates,
-                    commands::update_plugin,
-                    commands::save_notification_image,
-                    commands::plugin_save_data,
-                    commands::plugin_get_data,
-                    commands::plugin_list_keys,
-                    commands::plugin_clear_data,
-                    // Network commands
-                    commands::proxy_fetch,
-                    // ListenBrainz commands
-                    commands::set_listenbrainz_token,
-                    commands::get_listenbrainz_token,
-                    commands::get_listenbrainz_token_set,
-                    commands::delete_listenbrainz_token,
-                    commands::verify_listenbrainz_token,
-                    commands::submit_listenbrainz_listen,
-                    commands::fetch_listenbrainz_recommendations,
-                    // MusicBrainz commands
-                    commands::get_artist_musicbrainz_info,
-                    commands::get_top_genres_from_mb,
-                    commands::enrich_track_metadata_mb,
-                    commands::get_release_mb_info,
-                    commands::get_release_detail_mb,
-                    commands::refresh_release_detail_mb,
-                    commands::get_release_cover_art,
-                    commands::get_similar_artists_mb,
-                    commands::get_artist_discography_mb,
-                    commands::search_artists_mb,
-                    commands::search_releases_mb,
-                    commands::get_release_group_tracks_mb,
-                    commands::enrich_album_year,
-                    commands::enrich_all_album_years,
-                    // =========================================================================
-                    // SYNC COMMANDS
-                    // =========================================================================
-                    commands::sync_get_auth_state,
-                    commands::sync_handle_auth_callback,
-                    commands::sync_logout,
-                    commands::sync_trigger,
-                    commands::sync_get_status,
-                    commands::sync_get_server_url,
-                    commands::sync_link_kofi,
-                    commands::sync_enqueue_change,
-                    commands::sync_delete_account,
-                    commands::sync_get_access_token,
-                    commands::sync_get_device_id,
-                    // Backup commands
-                    commands::backup::list_backups,
-                    commands::backup::export_backup,
-                    commands::backup::import_backup,
-                    commands::backup::delete_backup,
-                    // =========================================================================
-                    // NATIVE AUDIO COMMANDS
-                    // =========================================================================
-                    audio::audio_play,
-                    audio::audio_pause,
-                    audio::audio_resume,
-                    audio::audio_stop,
-                    audio::audio_preload,
-                    audio::audio_set_repeat_one,
-                    audio::audio_poll_event,
-                    audio::audio_set_volume,
-                    audio::audio_seek,
-                    audio::audio_get_state,
-                    audio::audio_set_eq,
-                    audio::native_audio_available,
-                    commands::proxy_fetch_bytes,
-                    commands::save_image_to_gallery,
-                ]
-            }
+
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -925,4 +758,10 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(mobile)]
+#[tauri::mobile_entry_point]
+pub fn run() {
+    controller::bootstrap::run();
 }

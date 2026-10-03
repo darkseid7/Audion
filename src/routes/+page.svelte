@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { desktopEffectsEnabled } from "$lib/application/bootstrap";
   import { onMount, tick } from "svelte";
   import "../app.css";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -13,15 +14,8 @@
   import KeyboardShortcutsHelp from "$lib/components/KeyboardShortcutsHelp.svelte";
   import StatsWrapped from "$lib/components/StatsWrapped.svelte";
 
-  import { loadLibrary, loadPlaylists } from "$lib/stores/library";
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import { isTauri } from "$lib/api/tauri";
-  import { squeezeStartServer } from "$lib/api/tauri";
-  import { startGlobalSqueezeDiscovery } from "$lib/stores/squeeze";
-  import {
-    initializeFromPersistedState,
-    setupAutoSave,
-  } from "$lib/stores/persist";
   import { theme } from "$lib/stores/theme";
   import { isMiniPlayer } from "$lib/stores/ui";
   import { pluginStore } from "$lib/stores/plugin-store";
@@ -75,54 +69,11 @@
     goToHome();
   }
 
-  onMount(async () => {
-    // Initialize persisted state (volume, lyrics visibility, etc.)
-    initializeFromPersistedState();
-    setupAutoSave();
-
-    // Check if we're in Tauri environment
-    if (!isTauri()) {
-      notInTauri = true;
-      isLoading = false;
-      return;
-    }
-
-    try {
-      const dataLoadStart = performance.now();
-      await Promise.all([loadLibrary(), loadPlaylists()]);
-    } catch (error) {
-      console.error("Failed to load library:", error);
-    } finally {
-      isLoading = false;
-
-      // Auto-start the Squeeze server so Audion is always available as a
-      // playback target — Spotify-Connect style. The server running does
-      // NOT select or play anything: the device list is refreshed by the
-      // discovery poll, and a device only becomes the active target when
-      // the user selects it (or connects from the streamer). No session
-      // is restored on boot, so reopening Audion is always a fresh start.
-      squeezeStartServer()
-        .then(() => startGlobalSqueezeDiscovery())
-        .catch((e) => console.warn("[SQUEEZE] Auto-start failed:", e));
-
-      // Lazy load plugins- reduce startup time
-      requestIdleCallback(() => {
-        const pluginLoadStart = performance.now();
-        console.log("  [PLUGINS] Starting lazy load...");
-
-        pluginStore
-          .init()
-          .then(() => {
-            console.log(
-              `  [PLUGINS] Loaded in background: ${(performance.now() - pluginLoadStart).toFixed(2)}ms`,
-            );
-          })
-          .catch((error) => {
-            console.error("[PLUGINS] Failed to load:", error);
-          });
-      });
-    }
+  onMount(() => {
+    notInTauri = !isTauri();
+    isLoading = false;
   });
+
 </script>
 
 <svelte:window on:contextmenu={handleContextMenu} />
@@ -155,6 +106,8 @@
       <div class="loading-spinner"></div>
       <p>Loading your music library...</p>
     </div>
+  {:else if !$desktopEffectsEnabled}
+    <div class="loading-screen"><p>Desktop controller connection is not available yet.</p></div>
   {:else}
     {#if $isMiniPlayer}
       <MiniPlayer />
