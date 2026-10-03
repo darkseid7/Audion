@@ -36,7 +36,18 @@ impl fmt::Debug for PairingInvitation {
 }
 impl PairingInvitation {
     /// Sensitive, short-lived QR/copy payload. Never log or persist this string.
+    /// `expiresAt` is `{ unixSeconds, nanoseconds }`: integer seconds since the
+    /// Unix epoch (0..=2^53-1) plus canonical nanoseconds (0..=999_999_999).
+    /// Native consumers must reconstruct both parts without rounding, reject
+    /// out-of-range fields, and use checked time arithmetic. The WebView treats
+    /// the complete invitation as an opaque string, not a floating-point date.
     pub fn encode(&self) -> Result<Zeroizing<String>, ControlError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Expiration {
+            unix_seconds: u64,
+            nanoseconds: u32,
+        }
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Payload<'a> {
@@ -46,7 +57,14 @@ impl PairingInvitation {
             ca: String,
             endpoint: String,
             secret: String,
-            expires_at: u64,
+            expires_at: Expiration,
+        }
+        let expiry = self
+            .expires_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| invalid_request())?;
+        if expiry.as_secs() > 9_007_199_254_740_991 {
+            return Err(invalid_request());
         }
         let mut payload = Payload {
             version: 1,
@@ -55,11 +73,10 @@ impl PairingInvitation {
             ca: URL_SAFE_NO_PAD.encode(&self.ca_der),
             endpoint: self.endpoint.to_string(),
             secret: URL_SAFE_NO_PAD.encode(self.secret.as_ref()),
-            expires_at: self
-                .expires_at
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_err(|_| invalid_request())?
-                .as_secs(),
+            expires_at: Expiration {
+                unix_seconds: expiry.as_secs(),
+                nanoseconds: expiry.subsec_nanos(),
+            },
         };
         let encoded = serde_json::to_string(&payload)
             .map(Zeroizing::new)
@@ -821,5 +838,101 @@ mod tests {
         );
         assert!(invitation.qr_svg().unwrap().starts_with("<?xml"));
         assert_eq!(service.paired_devices().unwrap().len(), 0);
+    }
+
+    // Test-only reconstruction from emitted data, not a transport decoder.
+    fn reconstruct_encoded_invitation(encoded: &str) -> PairingInvitation {
+        let payload: serde_json::Value = serde_json::from_str(encoded).unwrap();
+        let seconds = payload["expiresAt"]["unixSeconds"]
+            .as_u64()
+            .expect("expiry must encode integer Unix seconds");
+        let nanos = payload["expiresAt"]["nanoseconds"]
+            .as_u64()
+            .expect("expiry must encode integer nanoseconds");
+        assert!(seconds <= 9_007_199_254_740_991);
+        assert!(nanos < 1_000_000_000);
+        PairingInvitation {
+            id: Uuid::parse_str(payload["invitationId"].as_str().unwrap()).unwrap(),
+            host_id: payload["hostId"].as_str().unwrap().into(),
+            ca_der: URL_SAFE_NO_PAD
+                .decode(payload["ca"].as_str().unwrap())
+                .unwrap(),
+            endpoint: payload["endpoint"].as_str().unwrap().parse().unwrap(),
+            secret: Zeroizing::new(
+                URL_SAFE_NO_PAD
+                    .decode(payload["secret"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("invitation secret must contain 32 bytes")),
+            ),
+            expires_at: SystemTime::UNIX_EPOCH
+                .checked_add(Duration::new(seconds, nanos as u32))
+                .unwrap(),
+        }
+    }
+
+    #[test]
+    fn encoded_fractional_invitation_round_trip_preserves_deadline_and_one_use() {
+        let (_, identity, service) = fixture();
+        let seconds = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 1;
+        let now = SystemTime::UNIX_EPOCH + Duration::new(seconds, 123_456_789);
+        let invitation =
+            create_invitation(&identity, "192.168.1.20:45123".parse().unwrap(), now).unwrap();
+        assert_eq!(invitation.expires_at, now + Duration::from_secs(300));
+        service.register_invitation(&invitation).unwrap();
+        let encoded = invitation.encode().unwrap();
+        let decoded = reconstruct_encoded_invitation(&encoded);
+        assert_eq!(decoded.expires_at, now + Duration::from_secs(300));
+        let pending = service.request_pairing(decoded, "Phone".into()).unwrap();
+        assert_eq!(pending.expires_at, now + Duration::from_secs(300));
+        let grants = Grants {
+            control: true,
+            administration: false,
+        };
+        let credential = service.approve_pairing(pending.id, grants).unwrap();
+        assert_eq!(
+            service
+                .authenticate(credential.device_id(), credential.secret())
+                .unwrap(),
+            grants
+        );
+        assert!(service
+            .request_pairing(reconstruct_encoded_invitation(&encoded), "Phone".into())
+            .is_err());
+    }
+
+    #[test]
+    fn encoded_fractional_invitation_cannot_extend_expired_host_deadline() {
+        let (_, identity, service) = fixture();
+        let seconds = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 301;
+        let now = SystemTime::UNIX_EPOCH + Duration::new(seconds, 987_654_321);
+        let invitation =
+            create_invitation(&identity, "192.168.1.20:45123".parse().unwrap(), now).unwrap();
+        let encoded = invitation.encode().unwrap();
+        let decoded = reconstruct_encoded_invitation(&encoded);
+        assert_eq!(decoded.expires_at, now + Duration::from_secs(300));
+        assert!(service.register_invitation(&decoded).is_err());
+        // Simulate a previously registered record surviving until its deadline,
+        // without sleeps or a new production clock API. Every field comes from
+        // the emitted payload, including the exact fractional expiration.
+        service.state.lock().unwrap().invitations.insert(
+            decoded.id,
+            InvitationRecord {
+                secret_hash: hash(decoded.secret.as_ref()),
+                endpoint: decoded.endpoint,
+                expires_at: decoded.expires_at,
+                consumed: false,
+            },
+        );
+        assert!(service.request_pairing(decoded, "Phone".into()).is_err());
+        assert!(service.pending_pairings().unwrap().is_empty());
     }
 }
