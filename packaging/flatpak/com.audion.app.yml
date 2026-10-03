@@ -17,6 +17,7 @@ finish-args:
   - --filesystem=xdg-music:rw
   - --filesystem=xdg-download:rw
   - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.secrets
 
 build-options:
   build-args:
