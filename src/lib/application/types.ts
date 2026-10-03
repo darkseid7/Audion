@@ -46,6 +46,7 @@ export interface ArtworkReference { resourceId: string; revision: number }
 export interface ArtworkHandle { src: string; dispose(): void }
 export interface QualitySummary { format: string | null; bitrate: number | null; badges: string[] }
 export interface DisplayTrack {
+  liked?: boolean;
   id: number;
   title: string | null;
   artist: string | null;
@@ -67,13 +68,20 @@ export interface DisplayAlbum {
   sortSummary: AlbumSortSummary;
   artwork?: ArtworkReference;
 }
+export interface DisplayPlaylist { id: number; name: string; trackCount: number; artwork?: ArtworkReference }
+export interface AlbumDetail { album: DisplayAlbum; originalYear: number | null; trackCount: number; liked: boolean }
 export interface DisplayArtist { name: string; trackCount: number; albumCount: number; artwork?: ArtworkReference }
 export interface QueueEntry { entryId: string; track: DisplayTrack }
 export interface Page<T> { items: T[]; nextCursor: string | null; revision: number }
 export interface Pagination { limit?: number; cursor?: string }
 export type ApplicationQuery =
   | { type: "snapshot" } | { type: "outputs" }
-  | ({ type: "albums"; sort?: AlbumSort } & Pagination)
+  | { type: "album_detail"; albumId: number }
+  | ({ type: "playlists" } & Pagination)
+  | ({ type: "playlist_tracks"; playlistId: number } & Pagination)
+  | ({ type: "artist_tracks"; artistName: string } & Pagination)
+  | ({ type: "liked_tracks" } & Pagination)
+  | ({ type: "albums"; sort?: AlbumSort; likedOnly?: boolean; text?: string } & Pagination)
   | ({ type: "album_tracks"; albumId: number } & Pagination)
   | ({ type: "tracks" } & Pagination)
   | ({ type: "artists" } & Pagination)
@@ -132,6 +140,9 @@ export type ApplicationUpdate =
   | { type: "events"; hostEpoch: string; events: HostEvent[] };
 export type SearchMatch = { type: "track"; track: DisplayTrack } | { type: "album"; album: DisplayAlbum } | { type: "artist"; artist: DisplayArtist };
 export type QueryResult =
+  | { type: "album_detail"; detail: AlbumDetail; revision: number }
+  | { type: "playlists"; page: Page<DisplayPlaylist> }
+  | { type: "playlist_tracks" | "artist_tracks" | "liked_tracks"; page: Page<DisplayTrack> }
   | { type: "snapshot"; snapshot: HostSnapshot }
   | { type: "albums"; page: Page<DisplayAlbum> }
   | { type: "album_tracks"; page: Page<DisplayTrack> }
@@ -148,6 +159,7 @@ export interface ApplicationPort {
   resolveArtwork(reference: ArtworkReference, signal?: AbortSignal): Promise<ArtworkHandle>;
 }
 
-export type HostUpdate = { type: "projection"; snapshot: HostSnapshot };
+export interface HostPresentation { queue: QueueEntry[]; pinnedAlbumIds: number[] }
+export type HostUpdate = { type: "projection"; snapshot: HostSnapshot; presentation?: HostPresentation };
 export interface EventCursor { hostEpoch: string; revision: number }
 export interface EventBatch { hostEpoch: string; revision: number; events: HostEvent[] }

@@ -1,5 +1,7 @@
 import { get } from "svelte/store";
-import { tracks as libraryTracks, albums as libraryAlbums, artists as libraryArtists, playlists as libraryPlaylists } from "$lib/stores/library";
+import { pinnedItems } from "$lib/stores/pinned";
+import type { DesktopLibraryAccess } from "./bridge";
+import type { HostPresentation } from "../types";
 import * as player from "./player-runtime";
 import * as api from "$lib/api/tauri";
 import { activeSqueezePlayer, discoveredSqueezePlayers, commitSqueezeTarget, clearSqueezeTarget, bindSqueezeSelection, bindSqueezeObservations } from "$lib/stores/squeeze";
@@ -14,7 +16,7 @@ const displayTrack = (track: api.Track): DisplayTrack => ({ id: track.id, title:
 const capabilities = { playback: true, seek: true, volume: true, shuffle: true, repeat: true, equalizer: false };
 const unwrap = async (result: Promise<ExecutionResult>): Promise<void> => { const value = await result; if (value.status === "failed" || value.status === "superseded") throw new PlaybackFailure(value.error, value.status, value.partialEffects); };
 /** Desktop authority. Network transports never receive host Track objects or legacy calls. */
-export function createDesktopAdapter() {
+export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
   let hostEpoch: string = crypto.randomUUID();
   let hostId = "desktop";
   let sequence = 0;
@@ -23,21 +25,34 @@ export function createDesktopAdapter() {
   const listeners = new Set<(update: ApplicationUpdate) => void>();
   let pendingEntries: HostState["queue"] | undefined;
   let disposed = false;
+  let library: DesktopLibraryAccess | undefined;
+  let libraryGeneration = 0;
+  const currentLibrary = () => {
+    if (library?.active?.() === false) { library = undefined; libraryGeneration++; clearTimeout(libraryTimer); }
+    return library ?? localLibrary;
+  };
+  const checkLibrary = (access: DesktopLibraryAccess, generation: number) => {
+    if (disposed || currentLibrary() !== access || generation !== libraryGeneration) throw new PlaybackFailure({ code: "resync_required", message: "Library authority changed", retryable: false });
+  };
+  let libraryTimer: ReturnType<typeof setTimeout> | undefined;
+  const presentations = new WeakMap<HostSnapshot, HostPresentation>();
   const media = typeof window !== "undefined" ? window.matchMedia?.("(prefers-reduced-motion: reduce)") : undefined;
   const outputs = (): AvailableOutput[] => [{ output: { kind: "pc" }, name: "This PC", available: true, capabilities }, ...get(discoveredSqueezePlayers).map(device => ({ output: { kind: "squeeze" as const, playerId: device.mac }, name: device.name, available: device.state !== "Disconnected", capabilities }))];
   const snapshot = (): HostSnapshot => {
     const track = get(player.currentTrack);
     const context = get(player.playbackContext);
-    return {
+    const result: HostSnapshot = {
       hostId, hostEpoch, revision: value.revision, revisions: value.revisions,
       output: get(player.activeBackend) === "remote" ? { kind: "desktop_only", reason: "Legacy cloud control is desktop-only" } : value.selectedOutput,
       outputs: outputs(), settings: media ? { reducedMotion: media.matches } : {}, jobs: [],
-      capabilities: { queries: ["snapshot", "outputs"], intents: output().kind === "desktop_only" ? [] : ["play_album", "play_playlist", "play_artist", "play_liked", "play_track", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume", "set_shuffle", "set_repeat", "queue_insert", "queue_append", "queue_remove", "queue_reorder", "queue_clear_upcoming", "queue_play"] },
+      capabilities: { queries: (library ?? localLibrary) ? ["snapshot", "outputs", "albums", "album_detail", "album_tracks", "tracks", "artists", "artist_albums", "artist_tracks", "playlists", "playlist_tracks", "liked_tracks", "search", "queue"] : ["snapshot", "outputs"], intents: output().kind === "desktop_only" ? [] : ["play_album", "play_playlist", "play_artist", "play_liked", "play_track", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume", "set_shuffle", "set_repeat", "queue_insert", "queue_append", "queue_remove", "queue_reorder", "queue_clear_upcoming", "queue_play"] },
       queue: { count: value.queue.length, currentEntryId: value.queue[get(player.queueIndex)]?.entryId ?? null },
       playback: { status: get(player.isPlaying) ? "playing" : track ? "paused" : "stopped", track: track ? displayTrack(track) : null,
         context: context?.type === "album" && context.albumId !== undefined ? { type: "album", albumId: context.albumId, playMode: context.playMode ?? "all" } : context?.type === "playlist" && context.playlistId !== undefined ? { type: "playlist", playlistId: context.playlistId } : context?.type === "artist" && context.artistName ? { type: "artist", artistName: context.artistName } : context?.type === "liked" ? { type: "liked" } : context?.type === "track" && context.trackId !== undefined ? { type: "track", trackId: context.trackId } : context?.type === "queue" ? { type: "queue" } : null,
         position: get(player.currentTime), duration: get(player.duration), volume: get(player.volume), shuffle: get(player.shuffle), repeat: get(player.repeat) },
     };
+    presentations.set(result, { queue: value.queue.map(e => ({ entryId: e.entryId, track: displayTrack(e.track) })), pinnedAlbumIds: [...get(pinnedItems).albums] });
+    return result;
   };
   const state: HostStateAccess = {
     read: () => value,
@@ -56,7 +71,16 @@ export function createDesktopAdapter() {
     },
   };
   const resolveTrack = async (id: number) => await api.getTrackById(id) ?? fail("not_found", `Track ${id} is unavailable`);
+  const refreshLibrary = async () => {
+    const access = currentLibrary(); if (!access || disposed) return;
+    const generation = libraryGeneration;
+    const revision = await access.revision();
+    checkLibrary(access, generation);
+    if (!Number.isSafeInteger(revision) || revision < value.revisions.libraryRevision) throw new PlaybackFailure({ code: "resync_required", message: "Invalid native library revision", retryable: false });
+    if (revision !== value.revisions.libraryRevision) state.commit({ revisions: { libraryRevision: revision } });
+  };
   const runtime: DesktopPlaybackRuntime = {
+    refreshLibrary,
     async validateOutput(target) {
       if (target.kind === "squeeze" && !(await api.squeezeGetPlayers()).some(device => device.mac === target.playerId)) fail("output_unavailable", "Squeeze player is unavailable");
       if (get(player.activeBackend) === "remote") fail("unsupported", "Leave legacy cloud control before selecting a LAN output");
@@ -132,6 +156,7 @@ export function createDesktopAdapter() {
   };
   const coordinator = createPlaybackCoordinator(runtime, state, {
     read: snapshot,
+    presentation: snapshot => { const projection = presentations.get(snapshot); if (!projection) throw new Error("Missing atomic host presentation"); return projection; },
     subscribe(listener) {
       const forward = (update: ApplicationUpdate) => { if (update.type === "snapshot") listener(update.snapshot); };
       listeners.add(forward); return () => { listeners.delete(forward); };
@@ -205,7 +230,7 @@ export function createDesktopAdapter() {
   // Initial store subscription values are already represented by snapshot().
   let observing = false;
   let observationQueued = false;
-  let libraryChanged = false;
+
   let settingsChanged = false;
   let outputsChanged = false;
   let previousOutputs = JSON.stringify(outputs());
@@ -217,10 +242,10 @@ export function createDesktopAdapter() {
       void coordinator.executeLocal(async () => {
         observationQueued = false;
         const revisions = { ...value.revisions };
-        if (libraryChanged) revisions.libraryRevision++;
+
         if (settingsChanged) revisions.settingsRevision++;
         if (outputsChanged) revisions.outputRevision++;
-        libraryChanged = settingsChanged = outputsChanged = false;
+        settingsChanged = outputsChanged = false;
         state.commit({ revisions });
         return applied;
       });
@@ -231,7 +256,7 @@ export function createDesktopAdapter() {
     const current = JSON.stringify(outputs());
     if (observing && current !== previousOutputs) { previousOutputs = current; outputsChanged = true; observe(); }
   }));
-  for (const store of [libraryTracks, libraryAlbums, libraryArtists, libraryPlaylists]) projectionSubscriptions.push(store.subscribe(() => { if (observing) { libraryChanged = true; observe(); } }));
+  projectionSubscriptions.push(pinnedItems.subscribe(() => { if (observing) observe(); }));
   const observeSettings = () => { settingsChanged = true; observe(); };
   media?.addEventListener("change", observeSettings);
   projectionSubscriptions.push(() => media?.removeEventListener("change", observeSettings));
@@ -243,28 +268,71 @@ export function createDesktopAdapter() {
     execute: (intent, context) => get(player.activeBackend) === "remote"
       ? Promise.resolve({ status: "failed", error: { code: "unsupported", message: "Legacy cloud output is desktop-only", retryable: false }, revision: value.revision, partialEffects: [] })
       : coordinator.execute(intent, context),
-    async query(query) {
+    async query(query, signal) {
+      signal?.throwIfAborted();
       if (disposed) throw new Error("Desktop adapter disposed");
       if (query.type === "snapshot") return { type: "snapshot", snapshot: snapshot() };
       if (query.type === "outputs") return { type: "outputs", outputs: outputs(), revision: value.revisions.outputRevision };
-      if (query.type === "queue") return { type: "queue", page: { items: value.queue.map(item => ({ entryId: item.entryId, track: displayTrack(item.track) })), revision: value.revisions.queueRevision, nextCursor: null } };
+      const access = currentLibrary();
+      if (access && (library || query.type !== "queue")) {
+        const generation = libraryGeneration;const result = await access.query(query, signal);checkLibrary(access, generation);
+        if (result.type !== "queue" && result.type !== "snapshot" && result.type !== "outputs") {
+          const revision = "page" in result ? result.page.revision : result.revision;
+          await unwrap(coordinator.executeLocal(async () => {
+            checkLibrary(access, generation);
+            if (!Number.isSafeInteger(revision) || revision < value.revisions.libraryRevision) throw new PlaybackFailure({ code: "revision_conflict", message: "Library page is stale", retryable: false });
+            if (revision !== value.revisions.libraryRevision) state.commit({ revisions: { libraryRevision: revision } });return applied;
+          }));
+          checkLibrary(access, generation);
+        }
+        return result;
+      }
+      if (query.type === "queue") {
+        const limit = query.limit ?? 200;let offset = 0;
+        const invalid = (code: "invalid_request" | "revision_conflict"): never => { throw new PlaybackFailure({ code, message: "Queue page is unavailable", retryable: false }); };
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) return invalid("invalid_request");
+        if (query.cursor) {
+          let parts: unknown;try { parts = JSON.parse(atob(query.cursor)); } catch { return invalid("invalid_request"); }
+          if (!Array.isArray(parts) || parts.length !== 4 || !Number.isSafeInteger(parts[3]) || parts[3] < 0) return invalid("invalid_request");
+          if (parts[0] !== hostEpoch || parts[1] !== value.revisions.queueRevision || parts[2] !== limit) return invalid("revision_conflict");offset = parts[3];
+        }
+        if (offset > value.queue.length) return invalid("invalid_request");
+        return { type: "queue", page: { items: value.queue.slice(offset, offset + limit).map(item => ({ entryId: item.entryId, track: displayTrack(item.track) })), revision: value.revisions.queueRevision, nextCursor: offset + limit < value.queue.length ? btoa(JSON.stringify([hostEpoch, value.revisions.queueRevision, limit, offset + limit])) : null } };
+      }
       return fail("unsupported", "Library query adapter is not installed yet");
     },
     subscribe(listener) { listeners.add(listener); listener({ type: "snapshot", snapshot: snapshot() }); return () => { listeners.delete(listener); }; },
-    async resolveArtwork() { return fail("unsupported", "Artwork resolver is not installed yet"); },
+    async resolveArtwork(reference, signal) {
+      const access = currentLibrary();if (!access) return fail("unsupported", "Artwork resolver is not installed yet");
+      const generation = libraryGeneration;const result = await access.artwork(reference, signal);
+      try { checkLibrary(access, generation); } catch (error) { result.dispose();throw error; }return result;
+    },
   };
   return {
     port, state, coordinator,
-    async attachAuthority(authority: { hostId: string; hostEpoch: string }) {
+    async attachAuthority(authority: { hostId: string; hostEpoch: string; library?: DesktopLibraryAccess }) {
       if (disposed) throw new Error("Desktop adapter disposed");
       // Invalidate queued old-epoch commands synchronously, then drain the same
       // lane before advertising readiness. An in-flight effect is never replayed.
       hostId = authority.hostId; hostEpoch = authority.hostEpoch; sequence = 0;
+      clearTimeout(libraryTimer); libraryGeneration++; library = authority.library;
+      const generation = libraryGeneration;
+      if (library) { const access = library;const revision = await access.revision();checkLibrary(access, generation); if (!Number.isSafeInteger(revision) || revision < value.revisions.libraryRevision) throw new Error("Invalid native library revision"); value = { ...value, revisions: { ...value.revisions, libraryRevision: revision } }; }
       pendingEntries = value.queue.map(item => entry(item.track));
       state.commit({ hostEpoch, ownershipGeneration: value.ownershipGeneration + 1, transitionGeneration: value.transitionGeneration + 1 });
       await unwrap(coordinator.executeLocal(async () => applied));
+      const access = library;
+      const observeLibrary = async () => {
+        if (disposed || !access || access.active?.() === false || library !== access) return;
+        try {
+          const revision = await access.revision();
+          if (!disposed && library === access && revision !== value.revisions.libraryRevision) await coordinator.executeLocal(async () => { await refreshLibrary(); return applied; });
+        } catch { /* Busy/unavailable is not an invented revision or successful refresh. */ }
+        if (!disposed && access.active?.() !== false && library === access) libraryTimer = setTimeout(observeLibrary, 250);
+      };
+      if (access) libraryTimer = setTimeout(observeLibrary, 250);
     },
     pauseForTimer() { const signal = captureSignal("timer"); return coordinator.enqueueSignal(signal); },
-    async dispose() { if (disposed) return; disposed = true; projectionSubscriptions.forEach(stop => stop()); outputSubscriptions.forEach(stop => stop()); unregister(); bindSqueezeSelection(async () => { throw new Error("Desktop adapter disposed"); }); bindSqueezeObservations(() => async () => {}); player.bindPlaybackSignals(() => async () => {}); player.bindDesktopCommands(async () => { throw new Error("Desktop adapter disposed"); }); player.bindDesktopTransfers(async () => { throw new Error("Desktop adapter disposed"); }); setPlayerPreconditions(undefined); await coordinator.dispose(); listeners.clear(); },
+    async dispose() { if (disposed) return; disposed = true; libraryGeneration++; clearTimeout(libraryTimer); library = undefined; projectionSubscriptions.forEach(stop => stop()); outputSubscriptions.forEach(stop => stop()); unregister(); bindSqueezeSelection(async () => { throw new Error("Desktop adapter disposed"); }); bindSqueezeObservations(() => async () => {}); player.bindPlaybackSignals(() => async () => {}); player.bindDesktopCommands(async () => { throw new Error("Desktop adapter disposed"); }); player.bindDesktopTransfers(async () => { throw new Error("Desktop adapter disposed"); }); setPlayerPreconditions(undefined); await coordinator.dispose(); listeners.clear(); },
   };
 }

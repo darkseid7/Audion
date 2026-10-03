@@ -1,24 +1,59 @@
 import { startStatePublisher, type PublisherStop } from "./state-publisher";
 import type { PlaybackCoordinator } from "./playback-coordinator";
-import type { HostUpdate, ApplicationPort, CommandEnvelope, ExecutionResult } from "../types";
+import type { HostUpdate, ApplicationPort, CommandEnvelope, ExecutionResult, ApplicationQuery, QueryResult, ArtworkReference, ArtworkHandle } from "../types";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 export interface CoordinatorLease { leaseId: string; hostEpoch: string }
 export interface HostDispatch { ticket: string; envelope: CommandEnvelope }
 export type Registration = { phase: "prepare" } | { phase: "ready" | "release"; lease: CoordinatorLease } | { phase: "publish"; lease: CoordinatorLease; update: HostUpdate };
+export interface DesktopLibraryAccess {
+  active?(): boolean;
+  revision(): Promise<number>;
+  query(query: ApplicationQuery, signal?: AbortSignal): Promise<QueryResult>;
+  artwork(reference: ArtworkReference, signal?: AbortSignal): Promise<ArtworkHandle>;
+}
 export interface HostTransport {
+  library?(lease: CoordinatorLease): DesktopLibraryAccess;
   listen(listener: (dispatch: HostDispatch) => void): Promise<() => void>;
   register(request: Registration): Promise<{ hostId: string; lease: CoordinatorLease; revision?: number }>;
   authorize(lease: CoordinatorLease, ticket: string): Promise<CommandEnvelope>;
   complete(lease: CoordinatorLease, ticket: string, result: ExecutionResult): Promise<void>;
 }
+type LibraryResponse = { type: "library_revision"; revision: number } | { type: "library_query"; result: QueryResult } | { type: "artwork"; mime: string; base64: string };
+function artworkHandle(r: LibraryResponse): ArtworkHandle {
+  if (r.type !== "artwork" || !["image/png", "image/jpeg", "image/webp"].includes(r.mime) || r.base64.length > Math.ceil(5 * 1024 * 1024 / 3) * 4) throw new Error("Invalid artwork reply");
+  const bytes = Uint8Array.from(atob(r.base64), c => c.charCodeAt(0)); if (bytes.length > 5 * 1024 * 1024) throw new Error("Oversize artwork");
+  const src = URL.createObjectURL(new Blob([bytes], { type: r.mime })); let disposed = false;
+  return { src, dispose() { if (!disposed) { disposed = true; URL.revokeObjectURL(src); } } };
+}
+export type DesktopLibraryRegistration =
+  | { phase: "desktop_library_query"; pinnedAlbumIds: number[]; query?: undefined }
+  | { phase: "desktop_library_query"; pinnedAlbumIds: number[]; query: ApplicationQuery }
+  | { phase: "desktop_artwork"; reference: ArtworkReference };
+/** Lazy local-main IPC; never enables hosting or requests a protected credential. */
+export function createDesktopLibraryAccess(pins: () => number[]): DesktopLibraryAccess {
+  const request = (request: DesktopLibraryRegistration) => invoke<LibraryResponse>("control_host_register", { request });
+  return {
+    async revision() { const r = await request({ phase: "desktop_library_query", pinnedAlbumIds: pins() });if (r.type !== "library_revision") throw new Error("Invalid library revision reply");return r.revision; },
+    async query(query, signal) { signal?.throwIfAborted();const r = await request({ phase: "desktop_library_query", query, pinnedAlbumIds: pins() });signal?.throwIfAborted();if (r.type !== "library_query") throw new Error("Invalid library reply");return r.result; },
+    async artwork(reference, signal) { signal?.throwIfAborted();const r = await request({ phase: "desktop_artwork", reference });signal?.throwIfAborted();return artworkHandle(r); },
+  };
+}
 const nativeTransport: HostTransport = {
+  library: lease => ({
+    async revision() { const r = await invoke<LibraryResponse>("control_host_register", { request: { phase: "library_revision", lease } }); if (r.type !== "library_revision") throw new Error("Invalid library reply"); return r.revision; },
+    async query(query, signal) { signal?.throwIfAborted(); const r = await invoke<LibraryResponse>("control_host_register", { request: { phase: "library_query", lease, query } }); signal?.throwIfAborted(); if (r.type !== "library_query") throw new Error("Invalid library reply"); return r.result; },
+    async artwork(reference, signal) {
+      signal?.throwIfAborted(); const r = await invoke<LibraryResponse>("control_host_register", { request: { phase: "artwork", lease, reference } }); signal?.throwIfAborted();
+      return artworkHandle(r);
+    },
+  }),
   listen: listener => getCurrentWebviewWindow().listen<HostDispatch>("controller://dispatch", event => listener(event.payload)),
   register: request => invoke("control_host_register", { request }),
   authorize: (lease, ticket) => invoke("control_host_complete", { request: { phase: "authorize", lease, ticket } }),
   complete: (lease, ticket, result) => invoke("control_host_complete", { request: { phase: "complete", lease, ticket, result } }),
 };
-export async function connectHostBridge(port: ApplicationPort, attach: (authority: { hostId: string; hostEpoch: string }) => Promise<void>, coordinator: PlaybackCoordinator, transport: HostTransport = nativeTransport): Promise<{ dispose(): Promise<void> }> {
+export async function connectHostBridge(port: ApplicationPort, attach: (authority: { hostId: string; hostEpoch: string; library?: DesktopLibraryAccess }) => Promise<void>, coordinator: PlaybackCoordinator, transport: HostTransport = nativeTransport): Promise<{ dispose(): Promise<void> }> {
   let lease: CoordinatorLease | undefined;
   let publisher: PublisherStop | undefined;
   let ready = false;
@@ -63,10 +98,10 @@ export async function connectHostBridge(port: ApplicationPort, attach: (authorit
   try {
     const registration = await transport.register({ phase: "prepare" });
     lease = registration.lease;
-    await attach({ hostId: registration.hostId, hostEpoch: lease.hostEpoch });
+    await attach({ hostId: registration.hostId, hostEpoch: lease.hostEpoch, ...(transport.library ? { library: { ...transport.library(lease), active: () => !disposed } } : {}) });
     const capturedLease = lease;
     publisher = startStatePublisher(coordinator, async snapshot => {
-      const result = await transport.register({ phase: "publish", lease: capturedLease, update: { type: "projection", snapshot } });
+      const result = await transport.register({ phase: "publish", lease: capturedLease, update: { type: "projection", snapshot, ...(coordinator.capturePresentation?.(snapshot) ? { presentation: coordinator.capturePresentation(snapshot) } : {}) } });
       if (!Number.isSafeInteger(result.revision) || result.revision! < 0) throw new Error("Invalid publication acknowledgement");
       return result.revision!;
     }, () => {

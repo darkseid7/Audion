@@ -17,3 +17,8 @@ pub mod secrets;
 
 #[cfg(desktop)]
 pub mod events;
+
+#[cfg(desktop)]
+pub mod queries;
+#[cfg(desktop)]
+pub mod resources;

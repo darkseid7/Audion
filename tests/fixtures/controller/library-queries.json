@@ -1,0 +1,60 @@
+{
+  "valid": [
+    {
+      "type": "album_detail",
+      "albumId": 1
+    },
+    {
+      "type": "playlists",
+      "limit": 200
+    },
+    {
+      "type": "playlist_tracks",
+      "playlistId": 2
+    },
+    {
+      "type": "artist_tracks",
+      "artistName": "Björk"
+    },
+    {
+      "type": "liked_tracks"
+    },
+    {
+      "type": "albums",
+      "sort": "year-desc",
+      "likedOnly": true,
+      "text": "Album"
+    }
+  ],
+  "invalid": [
+    {
+      "type": "tracks",
+      "path": "private"
+    },
+    {
+      "type": "playlist_tracks",
+      "playlistId": 0
+    },
+    {
+      "type": "artist_tracks",
+      "artistName": ""
+    },
+    {
+      "type": "tracks",
+      "cursor": null
+    },
+    {
+      "type": "albums",
+      "likedOnly": "yes"
+    },
+    {
+      "type": "tracks",
+      "limit": 201
+    },
+    {
+      "type": "album_detail",
+      "albumId": 1,
+      "limit": 3
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import type { Track } from "$lib/api/tauri";
 import type { PlaybackContext } from "$lib/stores/playback-state";
-import type { HostSnapshot, ApplicationIntent, CommandPreconditions, ControlError, DomainRevisions, ExecutionResult, OutputRef, SnapshotOutputRef } from "../types";
+import type { HostSnapshot, HostPresentation, ApplicationIntent, CommandPreconditions, ControlError, DomainRevisions, ExecutionResult, OutputRef, SnapshotOutputRef } from "../types";
 
 export type PlaybackIntent = ApplicationIntent;
 export interface HostQueueEntry { entryId: string; track: Track }
@@ -25,6 +25,7 @@ export interface PlaybackSignal {
   transitionGeneration: number;
 }
 export interface DesktopPlaybackRuntime {
+  refreshLibrary?(): Promise<void>;
   validateOutput(output: OutputRef): Promise<RuntimeResult>;
   resolvePlayback(intent: PlaybackIntent): Promise<ResolvedPlayback>;
   stopOwnedOutput(output: OutputRef): Promise<RuntimeResult>;
@@ -32,8 +33,9 @@ export interface DesktopPlaybackRuntime {
   apply(intent: PlaybackIntent, resolved?: ResolvedPlayback): Promise<RuntimeResult>;
   applySignal(signal: PlaybackSignal): Promise<RuntimeResult>;
 }
-export interface HostProjectionAccess { read(): HostSnapshot; subscribe(listener: (snapshot: HostSnapshot) => void): () => void }
+export interface HostProjectionAccess { presentation?(snapshot: HostSnapshot): HostPresentation; read(): HostSnapshot; subscribe(listener: (snapshot: HostSnapshot) => void): () => void }
 export interface PlaybackCoordinator {
+  capturePresentation?(snapshot: HostSnapshot): HostPresentation | undefined;
   captureSnapshot(): HostSnapshot;
   subscribeSnapshot(listener: (snapshot: HostSnapshot) => void): () => void;
   execute(intent: PlaybackIntent, context: CommandPreconditions): Promise<ExecutionResult>;
@@ -68,6 +70,7 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
   const attempt = async (operation: () => Promise<RuntimeResult>): Promise<RuntimeResult> => { try { return await operation(); } catch (error) { return runtimeFailure(error); } };
   const advanceGeneration = (manual: boolean) => { const s = state.read(); state.commit({ transitionGeneration: s.transitionGeneration + 1, ...(manual ? { ownershipGeneration: s.ownershipGeneration + 1 } : {}) }); };
   return {
+    capturePresentation(snapshot) { return projection?.presentation?.(snapshot); },
     captureSnapshot() {
       if (disposed || !projection) throw new Error("Host projection unavailable");
       return projection.read();
@@ -80,6 +83,11 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
       if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
       return enqueue(async () => {
         if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
+        if (runtime.refreshLibrary && resolvesTracks(intent)) {
+          const refreshed = await attempt(async () => { await runtime.refreshLibrary!(); return { status: "applied" }; });
+          if (refreshed.status !== "applied") return result(refreshed);
+          if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
+        }
         const before = state.read();
         if (context.hostEpoch !== before.hostEpoch) return failed("resync_required", "Host epoch changed", "superseded");
         for (const key of ["queueRevision", "outputRevision", "libraryRevision"] as const) {
@@ -103,7 +111,14 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
         if ("entryId" in intent) {
           if (!before.queue.some(entry => entry.entryId === intent.entryId) || intent.type === "queue_reorder" && intent.beforeEntryId !== null && !before.queue.some(entry => entry.entryId === intent.beforeEntryId)) return failed("not_found", "Queue entry no longer exists");
         }
-        const applied = await attempt(async () => runtime.apply(intent, resolvesTracks(intent) ? await runtime.resolvePlayback(intent) : undefined));
+        const applied = await attempt(async () => {
+          const resolved = resolvesTracks(intent) ? await runtime.resolvePlayback(intent) : undefined;
+          if (resolved) {
+            await runtime.refreshLibrary?.();
+            if (state.read().revisions.libraryRevision !== before.revisions.libraryRevision) throw new PlaybackFailure({ code: "revision_conflict", message: "Library changed while resolving playback", retryable: false }, "superseded");
+          }
+          return runtime.apply(intent, resolved);
+        });
         if (applied.status !== "applied" && applied.partialEffects.length && replacement(intent)) advanceGeneration(true);
         if (applied.status === "applied") {
           if (replacement(intent)) advanceGeneration(true);

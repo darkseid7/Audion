@@ -336,11 +336,87 @@ it("observes PC progress, output discovery and library invalidation through the 
   const { tracks } = await import("$lib/stores/library");
   tracks.set([]);
   await new Promise(resolve => setTimeout(resolve, 0));
-  expect(seen.at(-1)?.revisions.libraryRevision).toBe(before + 1);
+  expect(seen.at(-1)?.revisions.libraryRevision).toBe(before);
   expect(await adapter.port.query({ type: "outputs" })).toMatchObject({ revision: outputRevision + 1 });
   const projection = adapter.coordinator.captureSnapshot();
   expect(projection.capabilities.queries).toEqual(["snapshot", "outputs"]);
   unsubscribe(); await adapter.dispose();
   const count = seen.length; state.currentTime.set(43);
   await new Promise(resolve => setTimeout(resolve, 0)); expect(seen).toHaveLength(count);
+});
+
+it("adopts the native library clock and rejects writes during entity resolution before playback", async () => {
+  commitSqueezeTarget("A");
+  const adapter = createDesktopAdapter();
+  let revision = 7;
+  const library = { revision: vi.fn(async () => revision), query: vi.fn(), artwork: vi.fn() };
+  await adapter.attachAuthority({ hostId: "host", hostEpoch: "epoch", library });
+  api.tracks.mockImplementationOnce(async () => { revision = 8; return [{ id: 7, duration: 100, cover_url: "fixture" }]; });
+  const result = await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: "epoch", libraryRevision: 7 });
+  expect(result).toMatchObject({ status: "superseded", error: { code: "revision_conflict" } });
+  expect(api.play).not.toHaveBeenCalled();
+  expect(adapter.state.read().revisions.libraryRevision).toBe(8);
+  await adapter.dispose();
+});
+
+it("detached hosting never prevents ordinary desktop playback", async () => {
+  commitSqueezeTarget("A");
+  const adapter = createDesktopAdapter(); let active = true;
+  const revision = vi.fn(async () => { if (!active) throw new Error("Released lease"); return 1; });
+  await adapter.attachAuthority({ hostId: "host", hostEpoch: "epoch", library: { active: () => active, revision, query: vi.fn(), artwork: vi.fn() } });
+  active = false;
+  const result = await adapter.port.execute({ type: "pause" }, { hostEpoch: "epoch" });
+  expect(result.status).toBe("applied");
+  expect((await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: "epoch" })).status).toBe("applied");
+  expect(revision).toHaveBeenCalledTimes(1);
+  await adapter.dispose();
+});
+
+
+it("keeps local native library and artwork available before hosting and after detach", async () => {
+  const local = { revision: vi.fn().mockResolvedValue(4), query: vi.fn().mockResolvedValue({ type: "tracks", page: { items: [], revision: 4, nextCursor: null } }), artwork: vi.fn().mockResolvedValue({ src: "blob:local", dispose: vi.fn() }) };
+  const adapter = createDesktopAdapter(local);
+  expect(await adapter.port.query({ type: "tracks" })).toMatchObject({ type: "tracks", page: { revision: 4 } });
+  expect(adapter.state.read().revisions.libraryRevision).toBe(4);
+  expect(await adapter.port.resolveArtwork({ resourceId: "local", revision: 4 })).toMatchObject({ src: "blob:local" });
+  commitSqueezeTarget("A");
+  expect(await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: adapter.state.read().hostEpoch })).toMatchObject({ status: "applied" });
+  let active = true;
+  await adapter.attachAuthority({ hostId: "native", hostEpoch: "lan", library: { ...local, active: () => active } });
+  active = false;
+  expect(await adapter.port.query({ type: "tracks" })).toMatchObject({ type: "tracks" });
+  expect(await adapter.port.resolveArtwork({ resourceId: "local", revision: 4 })).toMatchObject({ src: "blob:local" });
+  expect(await adapter.port.execute({ type: "pause" }, { hostEpoch: adapter.state.read().hostEpoch })).toMatchObject({ status: "applied" });
+  expect(await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: adapter.state.read().hostEpoch })).toMatchObject({ status: "applied" });
+  expect(local.revision).toHaveBeenCalled();
+  await adapter.dispose();
+});
+
+it("rejects late local library and artwork results after LAN attach", async () => {
+  let finish!: (result: unknown) => void;
+  let finishArt!: (result: unknown) => void;
+  const local = { revision: async () => 2, query: () => new Promise<any>(resolve => finish = resolve), artwork: () => new Promise<any>(resolve => finishArt = resolve) };
+  const adapter = createDesktopAdapter(local);
+  const pending = adapter.port.query({ type: "tracks" });
+  const pendingArt = adapter.port.resolveArtwork({ resourceId: "old", revision: 2 });
+  await adapter.attachAuthority({ hostId: "native", hostEpoch: "new", library: { revision: async () => 7, query: local.query, artwork: local.artwork } });
+  finish({ type: "tracks", page: { items: [], revision: 2, nextCursor: null } });
+  const dispose = vi.fn();finishArt({ src: "blob:old", dispose });
+  await expect(pending).rejects.toMatchObject({ controlError: { code: "resync_required" } });
+  await expect(pendingArt).rejects.toMatchObject({ controlError: { code: "resync_required" } });
+  expect(dispose).toHaveBeenCalledOnce();expect(adapter.state.read().revisions.libraryRevision).toBe(7);
+  await adapter.dispose();
+});
+
+it("pages local queue occurrences and rejects a cursor after queue mutation", async () => {
+  state.queue.set(Array.from({ length: 205 }, (_, id) => ({ id: id + 1, title: "Track", path: `synthetic-${id}`, artist: null, album: null, track_number: null, duration: null, album_id: null, format: null, bitrate: null })));
+  const adapter = createDesktopAdapter();
+  const first = await adapter.port.query({ type: "queue", limit: 200 });
+  expect(first).toMatchObject({ type: "queue", page: { items: expect.any(Array) } });
+  if (first.type !== "queue") throw new Error("Wrong queue result");expect(first.page.items).toHaveLength(200);
+  const second = await adapter.port.query({ type: "queue", limit: 200, cursor: first.page.nextCursor! });
+  if (second.type !== "queue") throw new Error("Wrong queue result");expect(second.page.items).toHaveLength(5);
+  state.queue.set([]);adapter.state.commit({});
+  await expect(adapter.port.query({ type: "queue", limit: 200, cursor: first.page.nextCursor! })).rejects.toMatchObject({ controlError: { code: "revision_conflict" } });
+  await adapter.dispose();
 });

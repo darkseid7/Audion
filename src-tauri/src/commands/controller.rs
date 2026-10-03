@@ -59,6 +59,8 @@ mod desktop {
     #[derive(Default)]
     pub struct NativeHostState {
         dependencies: OnceLock<Arc<HostDependencies>>,
+        library: OnceLock<Arc<crate::controller::queries::LibraryQueries>>,
+        library_initialization: Mutex<()>,
         initialization: Mutex<()>,
         stopping: AtomicBool,
         listener: tokio::sync::Mutex<Option<HostHandle>>,
@@ -69,6 +71,70 @@ mod desktop {
             if let Some(deps) = self.dependencies.get() {
                 deps.commands.stop();
             }
+        }
+        fn library_with(
+            &self,
+            initialize: impl FnOnce() -> Result<
+                Arc<crate::controller::queries::LibraryQueries>,
+                ControlError,
+            >,
+        ) -> Result<Arc<crate::controller::queries::LibraryQueries>, ControlError> {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            if let Some(library) = self.library.get() {
+                return Ok(library.clone());
+            }
+            let _guard = self
+                .library_initialization
+                .try_lock()
+                .map_err(|_| rejected(ControlErrorCode::Busy))?;
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            if self.library.get().is_none() {
+                let _ = self.library.set(initialize()?);
+            }
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            Ok(self.library.get().unwrap().clone())
+        }
+        fn library(
+            &self,
+            app: &tauri::AppHandle,
+        ) -> Result<Arc<crate::controller::queries::LibraryQueries>, ControlError> {
+            self.library_with(|| {
+                let db = app
+                    .try_state::<crate::db::Database>()
+                    .ok_or_else(|| rejected(ControlErrorCode::HostNotReady))?
+                    .inner()
+                    .clone();
+                let root = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|_| rejected(ControlErrorCode::HostNotReady))?
+                    .join("covers");
+                Ok(Arc::new(
+                    crate::controller::queries::LibraryQueries::with_root(db, root),
+                ))
+            })
+        }
+        fn registration_dependencies(
+            &self,
+            request: &Registration,
+            initialize: impl FnOnce() -> Result<Arc<HostDependencies>, ControlError>,
+        ) -> Result<Option<Arc<HostDependencies>>, ControlError> {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            if matches!(
+                request,
+                Registration::DesktopLibraryQuery { .. } | Registration::DesktopArtwork { .. }
+            ) {
+                return Ok(None);
+            }
+            initialize().map(Some)
         }
         fn dependencies(&self) -> Result<Arc<HostDependencies>, ControlError> {
             self.dependencies_with(|| {
@@ -116,6 +182,26 @@ mod desktop {
     #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
     pub enum Registration {
         Prepare {},
+        // serde Option accepts both omission and null as revision-only; all other shapes remain closed.
+        DesktopLibraryQuery {
+            query: Option<crate::controller::protocol::ApplicationQuery>,
+            #[serde(rename = "pinnedAlbumIds")]
+            pinned_album_ids: Vec<u64>,
+        },
+        DesktopArtwork {
+            reference: crate::controller::protocol::ArtworkReference,
+        },
+        LibraryRevision {
+            lease: CoordinatorLease,
+        },
+        LibraryQuery {
+            lease: CoordinatorLease,
+            query: crate::controller::protocol::ApplicationQuery,
+        },
+        Artwork {
+            lease: CoordinatorLease,
+            reference: crate::controller::protocol::ArtworkReference,
+        },
         Ready {
             lease: CoordinatorLease,
         },
@@ -128,25 +214,148 @@ mod desktop {
         },
     }
     #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct Registered {
-        host_id: String,
-        lease: CoordinatorLease,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        revision: Option<u64>,
+    #[serde(
+        tag = "type",
+        rename_all = "snake_case",
+        rename_all_fields = "camelCase"
+    )]
+    pub enum Registered {
+        Registered {
+            host_id: String,
+            lease: CoordinatorLease,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            revision: Option<u64>,
+        },
+        LibraryRevision {
+            revision: u64,
+        },
+        LibraryQuery {
+            result: crate::controller::protocol::QueryResult,
+        },
+        Artwork {
+            mime: String,
+            base64: String,
+        },
+    }
+    async fn desktop_registration(
+        library: &crate::controller::queries::LibraryQueries,
+        request: Registration,
+    ) -> Result<Registered, ControlError> {
+        use crate::controller::queries::{DesktopLibraryAuthority, LibraryQueries};
+        let authority = DesktopLibraryAuthority::new();
+        match request {
+            Registration::DesktopLibraryQuery {
+                query,
+                pinned_album_ids,
+            } => {
+                let context = library
+                    .desktop_context(&authority, pinned_album_ids)
+                    .await?;
+                let Some(query) = query else {
+                    return Ok(Registered::LibraryRevision {
+                        revision: context.revision,
+                    });
+                };
+                let result = library.query_library(query, context.clone()).await?;
+                let current = library.desktop_current(&authority).await?;
+                LibraryQueries::check_context(&context, &current)?;
+                Ok(Registered::LibraryQuery { result })
+            }
+            Registration::DesktopArtwork { reference } => {
+                let context = library.desktop_current(&authority).await?;
+                let media = library
+                    .resources
+                    .read_resource(reference, context.clone())
+                    .await?;
+                let current = library.desktop_current(&authority).await?;
+                LibraryQueries::check_context(&context, &current)?;
+                use base64::Engine;
+                Ok(Registered::Artwork {
+                    mime: media.mime.into(),
+                    base64: base64::engine::general_purpose::STANDARD.encode(media.bytes),
+                })
+            }
+            _ => Err(rejected(ControlErrorCode::InvalidRequest)),
+        }
     }
     #[tauri::command]
-    pub fn control_host_register(
+    pub async fn control_host_register(
         app: tauri::AppHandle,
         window: tauri::WebviewWindow,
         request: Registration,
     ) -> Result<Registered, ControlError> {
         authorize(&window, &app)?;
         let state = app.state::<NativeHostState>();
-        let deps = state.dependencies()?;
+        let deps = match state.registration_dependencies(&request, || state.dependencies())? {
+            Some(deps) => deps,
+            None => {
+                let result = desktop_registration(state.library(&app)?.as_ref(), request).await?;
+                if state.stopping.load(Ordering::Acquire) {
+                    return Err(rejected(ControlErrorCode::HostNotReady));
+                }
+                return Ok(result);
+            }
+        };
         let mut revision = None;
         let lease = match request {
+            Registration::DesktopLibraryQuery { .. } | Registration::DesktopArtwork { .. } => {
+                return Err(rejected(ControlErrorCode::InvalidRequest))
+            }
+            Registration::LibraryRevision { lease } => {
+                let context = deps
+                    .commands
+                    .library_context_async(Some((window.label(), &lease)))
+                    .await?;
+                return Ok(Registered::LibraryRevision {
+                    revision: context.revision,
+                });
+            }
+            Registration::LibraryQuery { lease, query } => {
+                let context = deps
+                    .commands
+                    .library_context_async(Some((window.label(), &lease)))
+                    .await?;
+                let result = deps.commands.query_library(query).await?;
+                let current = deps
+                    .commands
+                    .library_context_async(Some((window.label(), &lease)))
+                    .await?;
+                if context.host_epoch != current.host_epoch {
+                    return Err(rejected(ControlErrorCode::ResyncRequired));
+                }
+                return Ok(Registered::LibraryQuery { result });
+            }
+            Registration::Artwork { lease, reference } => {
+                let context = deps
+                    .commands
+                    .library_context_async(Some((window.label(), &lease)))
+                    .await?;
+                let media = deps
+                    .commands
+                    .library
+                    .get()
+                    .ok_or_else(|| rejected(ControlErrorCode::Unsupported))?
+                    .resources
+                    .read_resource(reference, context.clone())
+                    .await?;
+                let current = deps
+                    .commands
+                    .library_context_async(Some((window.label(), &lease)))
+                    .await?;
+                if context.host_epoch != current.host_epoch || context.revision != current.revision
+                {
+                    return Err(rejected(ControlErrorCode::RevisionConflict));
+                }
+                use base64::Engine;
+                return Ok(Registered::Artwork {
+                    mime: media.mime.into(),
+                    base64: base64::engine::general_purpose::STANDARD.encode(media.bytes),
+                });
+            }
             Registration::Prepare {} => {
+                if deps.commands.library.get().is_none() {
+                    deps.commands.install_library(state.library(&app)?)?;
+                }
                 let target = window.clone();
                 deps.commands
                     .register_coordinator(AuthoritativeWindow::new(
@@ -170,6 +379,7 @@ mod desktop {
             }
             Registration::Ready { lease } => {
                 deps.commands.ready(window.label(), &lease)?;
+                deps.commands.start_library_observer(lease.clone());
                 lease
             }
             Registration::Release { lease } => {
@@ -177,7 +387,7 @@ mod desktop {
                 lease
             }
         };
-        Ok(Registered {
+        Ok(Registered::Registered {
             host_id: deps.identity.id().into(),
             lease,
             revision,
@@ -383,6 +593,81 @@ mod desktop {
     mod tests {
         use super::*;
         use crate::controller::secrets::tests::MemoryStore;
+        #[tokio::test]
+        async fn local_library_bypasses_failed_or_locked_protected_host_factory() {
+            let state = NativeHostState::default();
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            crate::db::schema::init_schema(&conn).unwrap();
+            conn.execute("INSERT INTO tracks(id,path,track_cover) VALUES(1,'synthetic-private-audio',?1)",["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="]).unwrap();
+            let db = crate::db::Database {
+                conn: Arc::new(Mutex::new(conn)),
+            };
+            let library = state
+                .library_with(|| {
+                    Ok(Arc::new(crate::controller::queries::LibraryQueries::new(
+                        db,
+                    )))
+                })
+                .unwrap();
+            assert!(state
+                .dependencies_with(|| Err(rejected(ControlErrorCode::HostNotReady)))
+                .is_err());
+            let _held = state.initialization.lock().unwrap();
+            for payload in [
+                serde_json::json!({"phase":"desktop_library_query","pinnedAlbumIds":[]}),
+                serde_json::json!({"phase":"desktop_library_query","query":{"type":"albums"},"pinnedAlbumIds":[]}),
+            ] {
+                let request: Registration = serde_json::from_value(payload).unwrap();
+                assert!(state
+                    .registration_dependencies(&request, || panic!(
+                        "local request touched protected factory"
+                    ))
+                    .unwrap()
+                    .is_none());
+                let result = desktop_registration(&library, request).await.unwrap();
+                assert!(matches!(
+                    result,
+                    Registered::LibraryRevision { .. } | Registered::LibraryQuery { .. }
+                ));
+            }
+            let tracks=desktop_registration(&library,serde_json::from_value(serde_json::json!({"phase":"desktop_library_query","query":{"type":"tracks"},"pinnedAlbumIds":[]})).unwrap()).await.unwrap();
+            let Registered::LibraryQuery {
+                result: crate::controller::protocol::QueryResult::Tracks { page },
+            } = tracks
+            else {
+                panic!()
+            };
+            let request = Registration::DesktopArtwork {
+                reference: page.items[0].artwork.clone().unwrap(),
+            };
+            assert!(state
+                .registration_dependencies(&request, || panic!("artwork touched protected factory"))
+                .unwrap()
+                .is_none());
+            assert!(
+                matches!(desktop_registration(&library,request).await.unwrap(),Registered::Artwork{mime,..} if mime=="image/png")
+            );
+            assert!(Arc::ptr_eq(
+                &library,
+                &state
+                    .library_with(|| panic!("library initialized twice"))
+                    .unwrap()
+            ));
+            state.stop();
+            assert!(state
+                .library_with(|| panic!("stopped library restarted"))
+                .is_err());
+        }
+        #[test]
+        fn desktop_library_registration_is_closed_and_null_query_means_revision_only() {
+            assert!(matches!(serde_json::from_value::<Registration>(serde_json::json!({"phase":"desktop_library_query","query":null,"pinnedAlbumIds":[]})).unwrap(),Registration::DesktopLibraryQuery{query:None,..}));
+            for value in [
+                serde_json::json!({"phase":"desktop_library_query","query":{"type":"invoke","command":"scan"},"pinnedAlbumIds":[]}),
+                serde_json::json!({"phase":"desktop_artwork","reference":{"resourceId":"x","revision":0},"path":"E:/audio"}),
+            ] {
+                assert!(serde_json::from_value::<Registration>(value).is_err());
+            }
+        }
         #[test]
         fn exit_does_not_wait_for_host_initialization_lock() {
             let state = Arc::new(NativeHostState::default());

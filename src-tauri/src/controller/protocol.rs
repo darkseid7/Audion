@@ -510,6 +510,12 @@ pub struct QualitySummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayTrack {
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub liked: Option<bool>,
     #[serde(deserialize_with = "entity_id")]
     pub id: u64,
     #[serde(deserialize_with = "required_nullable")]
@@ -569,6 +575,31 @@ pub struct DisplayAlbum {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisplayPlaylist {
+    #[serde(deserialize_with = "entity_id")]
+    pub id: u64,
+    pub name: String,
+    #[serde(deserialize_with = "safe_revision")]
+    pub track_count: u64,
+    #[serde(
+        default,
+        deserialize_with = "optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artwork: Option<ArtworkReference>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlbumDetail {
+    pub album: DisplayAlbum,
+    #[serde(deserialize_with = "nullable_signed_integer")]
+    pub original_year: Option<i64>,
+    #[serde(deserialize_with = "safe_revision")]
+    pub track_count: u64,
+    pub liked: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayArtist {
     #[serde(deserialize_with = "identifier")]
     pub name: String,
@@ -622,9 +653,86 @@ pub enum AlbumSort {
     deny_unknown_fields
 )]
 pub enum ApplicationQuery {
+    AlbumDetail {
+        #[serde(deserialize_with = "entity_id")]
+        album_id: u64,
+    },
+    Playlists {
+        #[serde(
+            default,
+            deserialize_with = "optional_limit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        limit: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "optional_identifier",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cursor: Option<String>,
+    },
+    PlaylistTracks {
+        #[serde(deserialize_with = "entity_id")]
+        playlist_id: u64,
+        #[serde(
+            default,
+            deserialize_with = "optional_limit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        limit: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "optional_identifier",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cursor: Option<String>,
+    },
+    ArtistTracks {
+        #[serde(deserialize_with = "identifier")]
+        artist_name: String,
+        #[serde(
+            default,
+            deserialize_with = "optional_limit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        limit: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "optional_identifier",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cursor: Option<String>,
+    },
+    LikedTracks {
+        #[serde(
+            default,
+            deserialize_with = "optional_limit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        limit: Option<u64>,
+        #[serde(
+            default,
+            deserialize_with = "optional_identifier",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cursor: Option<String>,
+    },
+
     Snapshot {},
     Outputs {},
     Albums {
+        #[serde(
+            default,
+            deserialize_with = "optional_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        liked_only: Option<bool>,
+        #[serde(
+            default,
+            deserialize_with = "optional_identifier",
+            skip_serializing_if = "Option::is_none"
+        )]
+        text: Option<String>,
         #[serde(
             default,
             deserialize_with = "optional_value",
@@ -739,6 +847,11 @@ pub enum ApplicationQuery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryType {
+    AlbumDetail,
+    Playlists,
+    PlaylistTracks,
+    ArtistTracks,
+    LikedTracks,
     Snapshot,
     Albums,
     AlbumTracks,
@@ -1046,6 +1159,23 @@ pub enum SearchMatch {
     deny_unknown_fields
 )]
 pub enum QueryResult {
+    AlbumDetail {
+        detail: AlbumDetail,
+        #[serde(deserialize_with = "safe_revision")]
+        revision: u64,
+    },
+    Playlists {
+        page: Page<DisplayPlaylist>,
+    },
+    PlaylistTracks {
+        page: Page<DisplayTrack>,
+    },
+    ArtistTracks {
+        page: Page<DisplayTrack>,
+    },
+    LikedTracks {
+        page: Page<DisplayTrack>,
+    },
     Snapshot {
         snapshot: HostSnapshot,
     },
@@ -1468,7 +1598,15 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostUpdate {
-    Projection { snapshot: HostSnapshot },
+    Projection {
+        snapshot: HostSnapshot,
+        #[serde(
+            default,
+            deserialize_with = "optional_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        presentation: Option<HostPresentation>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1484,4 +1622,11 @@ pub struct EventBatch {
     pub host_epoch: String,
     pub revision: u64,
     pub events: Vec<HostEvent>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostPresentation {
+    pub queue: Vec<QueueEntry>,
+    pub pinned_album_ids: Vec<u64>,
 }

@@ -315,6 +315,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     // Repair legacy grouping where albums were matched by name only.
     reconcile_albums_by_name_and_artist(conn)?;
 
+    initialize_controller_revision(conn)?;
+
     Ok(())
 }
 
@@ -493,4 +495,36 @@ fn column_exists(conn: &Connection, table_name: &str, column_name: &str) -> Resu
         }
     }
     Ok(false)
+}
+
+/// Transactional mutation stamp: rollback rolls this back too, including raw SQL writes.
+fn initialize_controller_revision(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS controller_library_revision (id INTEGER PRIMARY KEY CHECK(id=1), stamp INTEGER NOT NULL); INSERT OR IGNORE INTO controller_library_revision VALUES(1,0);")?;
+    for table in [
+        "tracks",
+        "albums",
+        "playlists",
+        "playlist_tracks",
+        "liked_tracks",
+        "liked_albums",
+    ] {
+        let columns = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>>>()?;
+        let changed = columns
+            .iter()
+            .map(|c| format!("OLD.\"{c}\" IS NOT NEW.\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        for event in ["INSERT", "UPDATE", "DELETE"] {
+            let when = if event == "UPDATE" {
+                format!(" WHEN {changed}")
+            } else {
+                String::new()
+            };
+            conn.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS controller_revision_{table}_{event} AFTER {event} ON {table}{when} BEGIN UPDATE controller_library_revision SET stamp=stamp+1 WHERE id=1; END;"))?;
+        }
+    }
+    Ok(())
 }

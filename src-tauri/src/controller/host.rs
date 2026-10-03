@@ -51,6 +51,7 @@ struct Delivery {
 }
 #[derive(Default)]
 struct Admission {
+    queries: HashMap<Uuid, usize>,
     attempts: HashMap<IpAddr, (Instant, u8)>,
     deliveries: HashMap<Uuid, Delivery>,
 }
@@ -113,6 +114,38 @@ impl HostDependencies {
             .ok_or_else(|| error(ControlErrorCode::Unauthorized))?;
         delivery.credential = Some(self.pairing.approve_pairing(id, grants)?);
         Ok(())
+    }
+}
+struct QuerySlot {
+    deps: Arc<HostDependencies>,
+    device: Uuid,
+}
+impl QuerySlot {
+    fn acquire(deps: Arc<HostDependencies>, device: Uuid) -> Result<Self, ControlError> {
+        {
+            let mut admission = deps
+                .admission
+                .lock()
+                .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+            let count = admission.queries.entry(device).or_default();
+            if *count >= 4 {
+                return Err(error(ControlErrorCode::Busy));
+            }
+            *count += 1;
+        }
+        Ok(Self { deps, device })
+    }
+}
+impl Drop for QuerySlot {
+    fn drop(&mut self) {
+        if let Ok(mut admission) = self.deps.admission.lock() {
+            if let Some(count) = admission.queries.get_mut(&self.device) {
+                *count -= 1;
+                if *count == 0 {
+                    admission.queries.remove(&self.device);
+                }
+            }
+        }
     }
 }
 fn failure(failure: ControlError) -> Response {
@@ -345,17 +378,25 @@ async fn route_inner(
         }
         "/control/v1/queries" => {
             let query: ApplicationQuery = decode(&body)?;
-            let snapshot = deps
-                .commands
-                .authenticated_snapshot(device.as_ref().unwrap())?;
-            let result = match query {
-                ApplicationQuery::Snapshot {} => QueryResult::Snapshot { snapshot },
-                ApplicationQuery::Outputs {} => QueryResult::Outputs {
-                    outputs: snapshot.outputs,
-                    revision: snapshot.revisions.output_revision,
-                },
-                _ => return Err(error(ControlErrorCode::Unsupported)),
-            };
+            let device = device.unwrap();
+            let slot = QuerySlot::acquire(deps.clone(), device.id)?;
+            // This bounded admitted task retains device quota if its HTTP caller drops.
+            let result = tokio::spawn(async move {
+                let _slot = slot;
+                let snapshot = deps.commands.authenticated_snapshot(&device)?;
+                let result = match query {
+                    ApplicationQuery::Snapshot {} => QueryResult::Snapshot { snapshot },
+                    ApplicationQuery::Outputs {} => QueryResult::Outputs {
+                        outputs: snapshot.outputs,
+                        revision: snapshot.revisions.output_revision,
+                    },
+                    other => deps.commands.query_library(other).await?,
+                };
+                deps.commands.authenticated_snapshot(&device)?;
+                Ok::<_, ControlError>(result)
+            })
+            .await
+            .map_err(|_| error(ControlErrorCode::HostNotReady))??;
             Ok(axum::Json(result).into_response())
         }
         "/control/v1/events" => {
@@ -369,7 +410,25 @@ async fn route_inner(
         }
         // Library resources/admin remain explicit later-task seams.
         "/control/v1/admin" => Err(error(ControlErrorCode::PermissionRequired)),
-        "/control/v1/resources" => Err(error(ControlErrorCode::Unsupported)),
+        "/control/v1/resources" => {
+            let reference: super::protocol::ArtworkReference = decode(&body)?;
+            let device = device.unwrap();
+            let slot = QuerySlot::acquire(deps.clone(), device.id)?;
+            let media = tokio::spawn(async move {
+                let _slot = slot;
+                deps.commands.read_resource(&device, reference).await
+            })
+            .await
+            .map_err(|_| error(ControlErrorCode::HostNotReady))??;
+            Ok((
+                [
+                    ("content-type", media.mime),
+                    ("x-content-type-options", "nosniff"),
+                ],
+                media.bytes,
+            )
+                .into_response())
+        }
         _ => Err(error(ControlErrorCode::NotFound)),
     }
 }
@@ -545,6 +604,35 @@ mod tests {
             HostDependencies::new(load_or_create_identity(store.as_ref()).unwrap(), store).unwrap(),
         )
     }
+
+    #[tokio::test]
+    async fn query_device_quota_is_four_and_retained_by_detached_admitted_work() {
+        let deps = fixture();
+        let device = Uuid::new_v4();
+        let a = QuerySlot::acquire(deps.clone(), device).unwrap();
+        let b = QuerySlot::acquire(deps.clone(), device).unwrap();
+        let c = QuerySlot::acquire(deps.clone(), device).unwrap();
+        let d = QuerySlot::acquire(deps.clone(), device).unwrap();
+        assert!(matches!(
+            QuerySlot::acquire(deps.clone(), device),
+            Err(ControlError {
+                code: ControlErrorCode::Busy,
+                ..
+            })
+        ));
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _slot = a;
+            let _ = rx.await;
+        });
+        drop(task);
+        assert!(QuerySlot::acquire(deps.clone(), device).is_err());
+        tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        let next = QuerySlot::acquire(deps.clone(), device).unwrap();
+        drop((b, c, d, next));
+        assert!(deps.admission.lock().unwrap().queries.is_empty());
+    }
     #[tokio::test]
     async fn real_tls_host_client_and_port_collision() {
         let deps = fixture();
@@ -667,7 +755,7 @@ mod tests {
         for (path, expected, body) in [
             ("queries", StatusCode::BAD_REQUEST, "{}".into()),
             ("events", StatusCode::BAD_REQUEST, "{}".into()),
-            ("resources", StatusCode::NOT_IMPLEMENTED, "{}".into()),
+            ("resources", StatusCode::BAD_REQUEST, "{}".into()),
             ("admin", StatusCode::FORBIDDEN, "{}".into()),
             (
                 "commands",
@@ -740,6 +828,7 @@ mod tests {
                 "main",
                 &lease,
                 HostUpdate::Projection {
+                    presentation: None,
                     snapshot: snapshot.clone(),
                 },
             )
@@ -747,7 +836,14 @@ mod tests {
         deps.commands.ready("main", &lease).unwrap();
         snapshot.playback.position = 5.0;
         deps.commands
-            .publish("main", &lease, HostUpdate::Projection { snapshot })
+            .publish(
+                "main",
+                &lease,
+                HostUpdate::Projection {
+                    snapshot,
+                    presentation: None,
+                },
+            )
             .unwrap();
         for (path, body) in [
             ("queries", serde_json::json!({"type":"snapshot"})),

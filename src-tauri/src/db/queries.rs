@@ -797,20 +797,49 @@ pub fn get_batch_cover_paths(conn: &Connection, track_ids: &[i64]) -> Result<Has
 
 /// Update track cover path
 pub fn update_track_cover_path(conn: &Connection, track_id: i64, path: Option<&str>) -> Result<()> {
-    conn.execute(
-        "UPDATE tracks SET track_cover_path = ?1 WHERE id = ?2",
-        params![path, track_id],
-    )?;
-    Ok(())
+    update_managed_cover_path(conn, "tracks", "track_cover_path", track_id, path)
 }
 
-/// Update album art path
+/// Update album art path, including a successful rewrite at the stable managed filename.
 pub fn update_album_art_path(conn: &Connection, album_id: i64, path: Option<&str>) -> Result<()> {
-    conn.execute(
-        "UPDATE albums SET art_path = ?1 WHERE id = ?2",
-        params![path, album_id],
-    )?;
-    Ok(())
+    update_managed_cover_path(conn, "albums", "art_path", album_id, path)
+}
+
+fn update_managed_cover_path(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    id: i64,
+    path: Option<&str>,
+) -> Result<()> {
+    // This savepoint nests in scan/migration transactions; outer rollback undoes the stamp.
+    conn.execute_batch("SAVEPOINT controller_cover_rewrite")?;
+    let result = (|| {
+        let rewrite = path.is_some()
+            && conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?1 AND {column}=?2)"),
+                params![id, path],
+                |r| r.get::<_, bool>(0),
+            )?;
+        conn.execute(
+            &format!("UPDATE {table} SET {column}=?1 WHERE id=?2"),
+            params![path, id],
+        )?;
+        if rewrite {
+            conn.execute(
+                "UPDATE controller_library_revision SET stamp=stamp+1 WHERE id=1",
+                [],
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = conn.execute_batch(
+            "ROLLBACK TO controller_cover_rewrite; RELEASE controller_cover_rewrite",
+        );
+        return Err(error);
+    }
+    conn.execute_batch("RELEASE controller_cover_rewrite")
 }
 
 /// Get album art path
@@ -2216,4 +2245,13 @@ pub fn enqueue_track_sync_change(conn: &Connection, track: &Track, operation: &s
     );
 
     Ok(())
+}
+
+/// Internal committed DB stamp, not the public controller library revision.
+pub fn controller_library_stamp(conn: &Connection) -> Result<u64> {
+    conn.query_row(
+        "SELECT stamp FROM controller_library_revision WHERE id=1",
+        [],
+        |row| row.get(0),
+    )
 }

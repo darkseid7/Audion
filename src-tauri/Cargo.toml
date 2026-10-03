@@ -54,6 +54,8 @@ mp4ameta = "0.11"
 # SQLite database
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+
 # Base64 encoding for album art
 base64 = "0.22"
 

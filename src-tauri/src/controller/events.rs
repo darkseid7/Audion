@@ -66,8 +66,11 @@ impl CommandService {
         if bytes.len() > 1024 * 1024 {
             return Err(error(ControlErrorCode::TooLarge));
         }
-        let HostUpdate::Projection { mut snapshot } =
-            serde_json::from_slice(&bytes).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
+        let HostUpdate::Projection {
+            mut snapshot,
+            presentation,
+        } = serde_json::from_slice(&bytes).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
+        self.refresh_library()?;
         let mut state = self
             .state
             .lock()
@@ -80,13 +83,57 @@ impl CommandService {
         if snapshot.outputs.len() > 200 || !snapshot.jobs.is_empty() {
             return Err(error(ControlErrorCode::TooLarge));
         }
-        // Library/artwork and jobs are not installed yet. Do not advertise them.
-        if snapshot
-            .capabilities
-            .queries
-            .iter()
-            .any(|q| !matches!(q, QueryType::Snapshot | QueryType::Outputs))
-        {
+        // Reject regressing presentation before mutating the shared pin owner.
+        if state.events.snapshot.as_ref().is_some_and(|old| {
+            snapshot.revisions.queue_revision < old.revisions.queue_revision
+                || snapshot.revisions.output_revision < old.revisions.output_revision
+                || snapshot.revisions.settings_revision < old.revisions.settings_revision
+        }) {
+            return Err(error(ControlErrorCode::RevisionConflict));
+        }
+        if let Some(presentation) = presentation {
+            let ids = presentation
+                .queue
+                .iter()
+                .map(|q| &q.entry_id)
+                .collect::<std::collections::HashSet<_>>();
+            if presentation.queue.len() != snapshot.queue.count as usize
+                || ids.len() != presentation.queue.len()
+                || snapshot
+                    .queue
+                    .current_entry_id
+                    .as_ref()
+                    .is_some_and(|id| !ids.contains(id))
+                || presentation.pinned_album_ids.len() > 10000
+                || presentation
+                    .pinned_album_ids
+                    .iter()
+                    .any(|id| *id == 0 || *id > 9_007_199_254_740_991)
+            {
+                return Err(error(ControlErrorCode::InvalidRequest));
+            }
+            if state.events.snapshot.as_ref().is_some_and(|old| {
+                old.revisions.queue_revision == snapshot.revisions.queue_revision
+                    && state.presentation.queue != presentation.queue
+            }) {
+                return Err(error(ControlErrorCode::RevisionConflict));
+            }
+            if let Some(library) = self.library.get() {
+                let shared = library
+                    .publish_pins(lease.host_epoch, presentation.pinned_album_ids.clone())?;
+                adopt_library(&mut state, shared.revision)?;
+            }
+            state.presentation = presentation;
+        } else if self.library.get().is_some() && snapshot.queue.count != 0 {
+            return Err(error(ControlErrorCode::InvalidRequest));
+        }
+        if self.library.get().is_some() {
+            snapshot.revisions.library_revision = state.library_revision;
+        }
+        // Only installed native query projections may be advertised.
+        if snapshot.capabilities.queries.iter().any(|q| {
+            self.library.get().is_none() && !matches!(q, QueryType::Snapshot | QueryType::Outputs)
+        }) {
             return Err(error(ControlErrorCode::Unsupported));
         }
         let events = &mut state.events;
@@ -340,7 +387,8 @@ pub(crate) mod tests {
                     "main",
                     lease,
                     HostUpdate::Projection {
-                        snapshot: projection(&lease.host_epoch.to_string())
+                        snapshot: projection(&lease.host_epoch.to_string()),
+                        presentation: None
                     }
                 )
                 .unwrap(),
@@ -359,8 +407,180 @@ pub(crate) mod tests {
         let mut snapshot = projection(&lease.host_epoch.to_string());
         snapshot.playback.position = position;
         service
-            .publish("main", lease, HostUpdate::Projection { snapshot })
+            .publish(
+                "main",
+                lease,
+                HostUpdate::Projection {
+                    snapshot,
+                    presentation: None,
+                },
+            )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn observer_wakes_idle_poll_and_survives_busy_db_then_stops_on_release() {
+        let (s, d, l) = fixture();
+        initial(&s, &l);
+        let s = Arc::new(s);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::init_schema(&conn).unwrap();
+        let db = crate::db::Database {
+            conn: Arc::new(std::sync::Mutex::new(conn)),
+        };
+        s.install_library(Arc::new(crate::controller::queries::LibraryQueries::new(
+            db.clone(),
+        )))
+        .unwrap();
+        s.refresh_library().unwrap();
+        let cursor = cursor(&s);
+        s.start_library_observer(l.clone());
+        s.start_library_observer(l.clone());
+        {
+            let _held = db.conn.lock().unwrap();
+            assert_eq!(
+                s.refresh_library().unwrap_err().code,
+                ControlErrorCode::Busy
+            );
+        }
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO tracks(path) VALUES('synthetic')", [])
+            .unwrap();
+        let batch = tokio::time::timeout(Duration::from_secs(2), s.poll_events(&d, cursor))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(batch.events[0], HostEvent::Library { .. }));
+        s.release("main", &l).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(s.library_observer_finished());
+        let held_db = db.conn.lock().unwrap();
+        let held_state = s.state.lock().unwrap();
+        s.stop();
+        assert_eq!(
+            s.ensure_running().unwrap_err().code,
+            ControlErrorCode::HostNotReady
+        );
+        drop(held_state);
+        drop(held_db);
+    }
+
+    #[test]
+    fn resource_reauthorizes_after_waiting_on_bounded_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (s,d,l)=fixture();initial(&s,&l);let s=Arc::new(s);
+            let conn=rusqlite::Connection::open_in_memory().unwrap();crate::db::schema::init_schema(&conn).unwrap();conn.execute("INSERT INTO tracks(id,path,track_cover) VALUES(1,'synthetic',?1)",["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="]).unwrap();let db=crate::db::Database{conn:Arc::new(std::sync::Mutex::new(conn))};
+            let library=Arc::new(crate::controller::queries::LibraryQueries::new(db.clone()));s.install_library(library.clone()).unwrap();let context=s.library_context(None).unwrap();let reference=library.resources.register(&db.conn.lock().unwrap(),crate::controller::resources::Entity::Track(1),&context).unwrap().unwrap();
+            let (entered_tx,entered_rx)=tokio::sync::oneshot::channel();let (release_tx,release_rx)=std::sync::mpsc::channel();
+            let blocker=tokio::task::spawn_blocking(move||{let _=entered_tx.send(());release_rx.recv().unwrap();});entered_rx.await.unwrap();
+            let device_id=d.id;let reader=s.clone();let pending=tokio::spawn(async move{reader.read_resource(&d,reference).await});tokio::task::yield_now().await;
+            s.revoke(device_id).unwrap();release_tx.send(()).unwrap();blocker.await.unwrap();assert_eq!(pending.await.unwrap().unwrap_err().code,ControlErrorCode::Unauthorized);
+        });
+    }
+    #[tokio::test]
+    async fn revoked_device_cannot_resolve_even_a_registered_resource() {
+        let (s, d, l) = fixture();
+        initial(&s, &l);
+        s.revoke(d.id).unwrap();
+        let error = s
+            .read_resource(
+                &d,
+                ArtworkReference {
+                    resource_id: "opaque".into(),
+                    revision: 0,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::Unauthorized);
+    }
+    #[tokio::test]
+    async fn committed_database_changes_wake_replay_without_store_notifications() {
+        let (s, d, l) = fixture();
+        initial(&s, &l);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::init_schema(&conn).unwrap();
+        let db = crate::db::Database {
+            conn: Arc::new(std::sync::Mutex::new(conn)),
+        };
+        s.install_library(Arc::new(crate::controller::queries::LibraryQueries::new(
+            db.clone(),
+        )))
+        .unwrap();
+        s.refresh_library().unwrap();
+        let cursor = cursor(&s);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO tracks(path,title) VALUES('private','new')", [])
+            .unwrap();
+        s.refresh_library().unwrap();
+        let snapshot = s.capture_snapshot().unwrap();
+        assert_eq!(snapshot.revisions.library_revision, 1);
+        let batch = s.poll_events(&d, cursor).await.unwrap();
+        assert!(matches!(
+            batch.events[0],
+            HostEvent::Library {
+                library_revision: 1,
+                ..
+            }
+        ));
+        let mut stale = projection(&l.host_epoch.to_string());
+        stale.revisions.library_revision = 0;
+        s.publish(
+            "main",
+            &l,
+            HostUpdate::Projection {
+                snapshot: stale,
+                presentation: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.capture_snapshot().unwrap().revisions.library_revision, 1);
+        crate::db::queries::update_track_cover_path(
+            &db.conn.lock().unwrap(),
+            1,
+            Some("managed/1.png"),
+        )
+        .unwrap();
+        s.refresh_library().unwrap();
+        let before = s.capture_snapshot().unwrap().revisions.library_revision;
+        crate::db::queries::update_track_cover_path(
+            &db.conn.lock().unwrap(),
+            1,
+            Some("managed/1.png"),
+        )
+        .unwrap();
+        s.refresh_library().unwrap();
+        assert_eq!(
+            s.capture_snapshot().unwrap().revisions.library_revision,
+            before + 1
+        );
+    }
+    #[test]
+    fn publication_rejects_queue_count_and_duplicate_occurrence_mismatches() {
+        let (s, _, l) = fixture();
+        initial(&s, &l);
+        let mut snap = projection(&l.host_epoch.to_string());
+        snap.queue.count = 1;
+        assert!(s
+            .publish(
+                "main",
+                &l,
+                HostUpdate::Projection {
+                    snapshot: snap,
+                    presentation: Some(HostPresentation::default())
+                }
+            )
+            .is_err());
     }
     #[tokio::test]
     async fn snapshot_replay_has_no_gap() {
@@ -456,6 +676,7 @@ pub(crate) mod tests {
                 "main",
                 &old,
                 HostUpdate::Projection {
+                    presentation: None,
                     snapshot: projection(&old.host_epoch.to_string())
                 }
             )
@@ -490,6 +711,7 @@ pub(crate) mod tests {
         let (s, _, l) = fixture();
         initial(&s, &l);
         let update = || HostUpdate::Projection {
+            presentation: None,
             snapshot: projection(&l.host_epoch.to_string()),
         };
         assert_eq!(
@@ -499,17 +721,38 @@ pub(crate) mod tests {
         let mut wrong = projection("wrong");
         wrong.host_id = "other".into();
         assert!(s
-            .publish("main", &l, HostUpdate::Projection { snapshot: wrong })
+            .publish(
+                "main",
+                &l,
+                HostUpdate::Projection {
+                    presentation: None,
+                    snapshot: wrong
+                }
+            )
             .is_err());
         let mut invalid = projection(&l.host_epoch.to_string());
         invalid.playback.volume = 2.0;
         assert!(s
-            .publish("main", &l, HostUpdate::Projection { snapshot: invalid })
+            .publish(
+                "main",
+                &l,
+                HostUpdate::Projection {
+                    presentation: None,
+                    snapshot: invalid
+                }
+            )
             .is_err());
         let mut newer = projection(&l.host_epoch.to_string());
         newer.revisions.queue_revision = 2;
-        s.publish("main", &l, HostUpdate::Projection { snapshot: newer })
-            .unwrap();
+        s.publish(
+            "main",
+            &l,
+            HostUpdate::Projection {
+                presentation: None,
+                snapshot: newer,
+            },
+        )
+        .unwrap();
         assert_eq!(
             s.publish("main", &l, update()).unwrap_err().code,
             ControlErrorCode::RevisionConflict
@@ -556,9 +799,40 @@ pub(crate) mod tests {
                 "main",
                 &lease,
                 HostUpdate::Projection {
-                    snapshot: projection(&lease.host_epoch.to_string())
+                    snapshot: projection(&lease.host_epoch.to_string()),
+                    presentation: None
                 }
             )
             .is_err());
     }
+}
+
+/// Caller owns the existing lease/event mutex; no DB access here.
+pub(super) fn adopt_library(
+    state: &mut super::commands::State,
+    revision: u64,
+) -> Result<(), ControlError> {
+    if revision < state.library_revision || revision > 9_007_199_254_740_991 {
+        return Err(error(ControlErrorCode::ResyncRequired));
+    }
+    if revision == state.library_revision {
+        return Ok(());
+    }
+    state.library_revision = revision;
+    if let Some(snapshot) = &mut state.events.snapshot {
+        if snapshot.revision >= 9_007_199_254_740_991 {
+            return Err(error(ControlErrorCode::ResyncRequired));
+        }
+        snapshot.revision += 1;
+        snapshot.revisions.library_revision = state.library_revision;
+        state.events.history.push_back(HostEvent::Library {
+            revision: snapshot.revision,
+            library_revision: state.library_revision,
+        });
+        if state.events.history.len() > 256 {
+            state.events.history.pop_front();
+        }
+    }
+    state.events.wake();
+    Ok(())
 }

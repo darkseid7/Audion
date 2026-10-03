@@ -1,6 +1,6 @@
 import { get } from "svelte/store";
 import { createDesktopAdapter } from "./adapter";
-import { connectHostBridge } from "./bridge";
+import { connectHostBridge, createDesktopLibraryAccess } from "./bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { setMigrationStatus, type ApplicationHandle } from "../bootstrap";
 import { initAudioBackend, cleanupPlayer } from "./player-runtime";
@@ -10,7 +10,7 @@ import { initializeSleepTimer } from "$lib/stores/sleepTimer";
 import { initializeSqueeze, startGlobalSqueezeDiscovery } from "$lib/stores/squeeze";
 import { wsStore } from "$lib/stores/websocket";
 import { initializeFromPersistedState, setupAutoSave } from "$lib/stores/persist";
-import { initializePinned } from "$lib/stores/pinned";
+import { initializePinned, pinnedItems } from "$lib/stores/pinned";
 import { initializeCustomArtwork } from "$lib/stores/customArtwork";
 import { initializePlaylistCovers } from "$lib/stores/playlistCovers";
 import { initializeLyricsPreferences, destroyLyricsSync } from "$lib/stores/lyrics";
@@ -50,7 +50,7 @@ async function start(): Promise<void> {
     equalizer.initialize();
     stops.push(initializePinned(), initializeCustomArtwork(), initializePlaylistCovers(), initializeLyricsPreferences());
     initializeFromPersistedState();
-    adapter = createDesktopAdapter();
+    adapter = createDesktopAdapter(createDesktopLibraryAccess(() => [...get(pinnedItems).albums]));
     stops.push(setupAutoSave(), initializeSleepTimer(() => adapter!.pauseForTimer()), initializeSqueeze(), wsStore.initialize());
     await initAudioBackend();
     initDiscordPresence();

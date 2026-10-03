@@ -76,6 +76,9 @@ pub(super) struct Coordinator {
 #[derive(Default)]
 pub(super) struct State {
     pub(super) events: super::events::EventState,
+    pub(super) library_stamp: Option<u64>,
+    pub(super) library_revision: u64,
+    pub(super) presentation: super::protocol::HostPresentation,
     coordinator: Option<Coordinator>,
     ledger: HashMap<(Uuid, String), Entry>,
 }
@@ -85,6 +88,8 @@ impl State {
     }
 }
 pub struct CommandService {
+    pub(crate) library: std::sync::OnceLock<Arc<super::queries::LibraryQueries>>,
+    library_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stopping: AtomicBool,
     pub(super) stopped: watch::Sender<bool>,
     pub(super) polls: Mutex<HashSet<Uuid>>,
@@ -106,6 +111,9 @@ pub(crate) fn error(code: ControlErrorCode) -> ControlError {
 fn invalidate(state: &mut State, now: Instant) {
     state.coordinator = None;
     state.events.invalidate();
+    state.library_stamp = None;
+    state.library_revision = 0;
+    state.presentation = Default::default();
     for entry in state.ledger.values_mut() {
         if entry.completed.is_none() {
             entry
@@ -148,6 +156,21 @@ impl CommandService {
         ticket: ExecutionTicket,
     ) -> Result<CommandEnvelope, ControlError> {
         self.ensure_running()?;
+        let needs_library = {
+            let state = self
+                .state
+                .try_lock()
+                .map_err(|_| error(ControlErrorCode::Busy))?;
+            state
+                .ledger
+                .values()
+                .find(|e| e.ticket == ticket)
+                .and_then(|e| e.pending.as_ref())
+                .is_some_and(|(_, envelope)| envelope.preconditions.library_revision.is_some())
+        };
+        if needs_library {
+            self.refresh_library()?;
+        }
         let mut state = self
             .state
             .lock()
@@ -156,6 +179,7 @@ impl CommandService {
         if !current(&mut state, window, lease)?.ready {
             return Err(error(ControlErrorCode::HostNotReady));
         }
+        let library_revision = state.library_revision;
         let entry = state
             .ledger
             .values_mut()
@@ -173,6 +197,13 @@ impl CommandService {
                     Err(error(ControlErrorCode::PermissionRequired))
                 } else if envelope.preconditions.host_epoch != lease.host_epoch.to_string() {
                     Err(error(ControlErrorCode::ResyncRequired))
+                } else if self.library.get().is_some()
+                    && envelope
+                        .preconditions
+                        .library_revision
+                        .is_some_and(|r| r != library_revision)
+                {
+                    Err(error(ControlErrorCode::RevisionConflict))
                 } else {
                     Ok(())
                 }
@@ -189,6 +220,8 @@ impl CommandService {
     }
     pub fn new(pairing: Arc<PairingService>, host_id: String) -> Self {
         Self {
+            library: std::sync::OnceLock::new(),
+            library_observer: Mutex::new(None),
             pairing,
             host_id,
             stopping: AtomicBool::new(false),
@@ -213,6 +246,9 @@ impl CommandService {
             lease_id: Uuid::new_v4(),
             host_epoch: Uuid::new_v4(),
         };
+        if let Some(library) = self.library.get() {
+            library.set_host_owner(Some(lease.host_epoch))?;
+        }
         state.coordinator = Some(Coordinator {
             window,
             lease: lease.clone(),
@@ -243,6 +279,9 @@ impl CommandService {
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
         self.ensure_running()?;
         current(&mut state, window, lease)?;
+        if let Some(library) = self.library.get() {
+            library.set_host_owner(None)?;
+        }
         invalidate(&mut state, (self.clock)());
         Ok(())
     }
@@ -256,6 +295,9 @@ impl CommandService {
                 .as_ref()
                 .is_some_and(|c| c.window.label == window)
             {
+                if let Some(library) = self.library.get() {
+                    let _ = library.set_host_owner(None);
+                }
                 invalidate(&mut state, (self.clock)());
             }
         }
@@ -531,6 +573,51 @@ mod tests {
     fn envelope(lease: &CoordinatorLease, id: &str) -> CommandEnvelope {
         serde_json::from_value(serde_json::json!({"protocolVersion":1,"requestId":id,"preconditions":{"hostEpoch":lease.host_epoch.to_string(),"outputRevision":0},"intent":{"type":"pause"}})).unwrap()
     }
+
+    #[tokio::test]
+    async fn committed_write_after_admission_rejects_stale_claim_before_effects() {
+        let (service, device, count, dispatches) = fixture();
+        let lease = prepare(&service, count, dispatches.clone());
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::init_schema(&conn).unwrap();
+        let db = crate::db::Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        service
+            .install_library(Arc::new(super::super::queries::LibraryQueries::new(
+                db.clone(),
+            )))
+            .unwrap();
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                    presentation: None,
+                },
+            )
+            .unwrap();
+        service.ready("main", &lease).unwrap();
+        let command:CommandEnvelope=serde_json::from_value(serde_json::json!({"protocolVersion":1,"requestId":"stale-db","preconditions":{"hostEpoch":lease.host_epoch.to_string(),"libraryRevision":0,"outputRevision":0},"intent":{"type":"play_track","trackId":1}})).unwrap();
+        let claim = async {
+            tokio::task::yield_now().await;
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("INSERT INTO tracks(path) VALUES('synthetic')", [])
+                .unwrap();
+            let ticket = dispatches.lock().unwrap()[0].ticket;
+            assert_eq!(
+                service.claim("main", &lease, ticket).unwrap_err().code,
+                ControlErrorCode::RevisionConflict
+            );
+        };
+        let (result, ()) = tokio::join!(service.submit(&device, command), claim);
+        assert_eq!(result.unwrap_err().code, ControlErrorCode::RevisionConflict);
+    }
     #[test]
     fn exit_does_not_wait_for_command_or_vault_state_lock() {
         let (service, _, _, _) = fixture();
@@ -565,6 +652,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -609,6 +697,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -641,6 +730,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -732,6 +822,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -760,6 +851,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -802,6 +894,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -851,6 +944,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -892,6 +986,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -926,6 +1021,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -980,6 +1076,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -1016,6 +1113,7 @@ mod tests {
                 "main",
                 &lease,
                 super::super::protocol::HostUpdate::Projection {
+                    presentation: None,
                     snapshot: super::super::events::tests::projection(
                         &lease.host_epoch.to_string(),
                     ),
@@ -1032,5 +1130,202 @@ mod tests {
                 .code,
             ControlErrorCode::Unauthorized
         );
+    }
+}
+
+impl CommandService {
+    pub fn install_library(
+        &self,
+        library: Arc<super::queries::LibraryQueries>,
+    ) -> Result<(), ControlError> {
+        self.ensure_running()?;
+        let state = self
+            .state
+            .try_lock()
+            .map_err(|_| error(ControlErrorCode::Busy))?;
+        library.set_host_owner(state.coordinator.as_ref().map(|c| c.lease.host_epoch))?;
+        self.library
+            .set(library)
+            .map_err(|_| error(ControlErrorCode::InvalidRequest))
+    }
+    /// Nonwaiting connection probe, then a separate nonwaiting state lock. Never overlap.
+    pub fn refresh_library(&self) -> Result<u64, ControlError> {
+        self.ensure_running()?;
+        let epoch = {
+            let state = self
+                .state
+                .try_lock()
+                .map_err(|_| error(ControlErrorCode::Busy))?;
+            state
+                .coordinator
+                .as_ref()
+                .map(|c| c.lease.host_epoch)
+                .ok_or_else(|| error(ControlErrorCode::HostNotReady))?
+        };
+        let Some(library) = self.library.get() else {
+            return Ok(0);
+        };
+        let stamp = library.stamp()?;
+        self.observe_library_stamp(epoch, stamp)
+    }
+    fn observe_library_stamp(&self, epoch: Uuid, stamp: u64) -> Result<u64, ControlError> {
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| error(ControlErrorCode::Busy))?;
+        self.ensure_running()?;
+        if state
+            .coordinator
+            .as_ref()
+            .is_none_or(|c| c.lease.host_epoch != epoch)
+        {
+            return Err(error(ControlErrorCode::ResyncRequired));
+        }
+        let shared = self
+            .library
+            .get()
+            .ok_or_else(|| error(ControlErrorCode::HostNotReady))?
+            .observe_stamp(stamp)?;
+        state.library_stamp = Some(shared.stamp);
+        super::events::adopt_library(&mut state, shared.revision)?;
+        Ok(state.library_revision)
+    }
+    pub fn library_context(
+        &self,
+        window: Option<(&str, &CoordinatorLease)>,
+    ) -> Result<super::queries::QueryContext, ControlError> {
+        self.refresh_library()?;
+        self.context_current(window)
+    }
+    fn context_current(
+        &self,
+        window: Option<(&str, &CoordinatorLease)>,
+    ) -> Result<super::queries::QueryContext, ControlError> {
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| error(ControlErrorCode::Busy))?;
+        self.ensure_running()?;
+        if let Some((window, lease)) = window {
+            current(&mut state, window, lease)?;
+        } else if !state.coordinator_ready() {
+            return Err(error(ControlErrorCode::HostNotReady));
+        }
+        let coordinator = state
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| error(ControlErrorCode::HostNotReady))?;
+        Ok(super::queries::QueryContext {
+            host_epoch: coordinator.lease.host_epoch.to_string(),
+            revision: state.library_revision,
+            stamp: state.library_stamp.unwrap_or(0),
+            queue_revision: state
+                .events
+                .snapshot
+                .as_ref()
+                .map_or(0, |s| s.revisions.queue_revision),
+            queue: state.presentation.queue.clone(),
+            pinned_albums: state.presentation.pinned_album_ids.clone(),
+        })
+    }
+    pub async fn library_context_async(
+        &self,
+        window: Option<(&str, &CoordinatorLease)>,
+    ) -> Result<super::queries::QueryContext, ControlError> {
+        let captured = self.context_current(window)?;
+        if let Some(library) = self.library.get() {
+            let stamp = library.stamp_async().await?;
+            let epoch = Uuid::parse_str(&captured.host_epoch)
+                .map_err(|_| error(ControlErrorCode::ResyncRequired))?;
+            self.observe_library_stamp(epoch, stamp)?;
+        }
+        let current = self.context_current(window)?;
+        if current.host_epoch != captured.host_epoch {
+            return Err(error(ControlErrorCode::ResyncRequired));
+        }
+        Ok(current)
+    }
+    pub async fn query_library(
+        &self,
+        query: super::protocol::ApplicationQuery,
+    ) -> Result<super::protocol::QueryResult, ControlError> {
+        let context = self.library_context_async(None).await?;
+        let library = self
+            .library
+            .get()
+            .ok_or_else(|| error(ControlErrorCode::Unsupported))?;
+        let result = library.query_library(query, context.clone()).await?;
+        let current = self.library_context_async(None).await?;
+        if current.host_epoch != context.host_epoch
+            || current.revision != context.revision
+            || current.stamp != context.stamp
+            || current.queue_revision != context.queue_revision
+        {
+            return Err(error(ControlErrorCode::RevisionConflict));
+        }
+        Ok(result)
+    }
+    pub async fn read_resource(
+        &self,
+        device: &AuthenticatedDevice,
+        reference: super::protocol::ArtworkReference,
+    ) -> Result<super::resources::MediaBytes, ControlError> {
+        self.authenticated_snapshot(device)?;
+        let context = self.library_context_async(None).await?;
+        let result = self
+            .library
+            .get()
+            .ok_or_else(|| error(ControlErrorCode::Unsupported))?
+            .resources
+            .read_resource(reference, context.clone())
+            .await?;
+        self.authenticated_snapshot(device)?;
+        let current = self.library_context_async(None).await?;
+        if current.host_epoch != context.host_epoch
+            || current.revision != context.revision
+            || current.stamp != context.stamp
+        {
+            return Err(error(ControlErrorCode::RevisionConflict));
+        }
+        Ok(result)
+    }
+    pub fn start_library_observer(self: &Arc<Self>, lease: CoordinatorLease) {
+        let service = self.clone();
+        let mut stopped = service.stopped.subscribe();
+        let mut observer = match self.library_observer.try_lock() {
+            Ok(observer) => observer,
+            Err(_) => return,
+        };
+        if let Some(old) = observer.take() {
+            old.abort();
+        }
+        *observer = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {biased; _=stopped.changed()=>break,_=tokio::time::sleep(Duration::from_millis(250))=>{}}
+                let active = match service.state.try_lock() {
+                    Ok(s) => s.coordinator.as_ref().map(|c| c.lease.clone()),
+                    Err(_) => continue,
+                };
+                if active.as_ref() != Some(&lease) {
+                    break;
+                }
+                // One awaited probe through the shared four-slot pool; aborted observers retain worker permits until completion.
+                let _ = service.library_context_async(None).await;
+                if service.ensure_running().is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+}
+
+#[cfg(test)]
+impl CommandService {
+    pub(crate) fn library_observer_finished(&self) -> bool {
+        self.library_observer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
     }
 }
