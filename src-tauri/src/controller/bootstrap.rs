@@ -22,6 +22,9 @@ pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_os::init());
     #[cfg(target_os = "android")]
     let builder = builder
+        .manage(std::sync::Arc::new(
+            super::native_session::NativeSession::default(),
+        ))
         .plugin(super::mobile::native_plugin())
         .invoke_handler(tauri::generate_handler![
             get_application_mode,

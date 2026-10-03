@@ -2,6 +2,7 @@
   import { desktopEffectsEnabled } from "$lib/application/bootstrap";
   import { onMount, tick } from "svelte";
   import "../app.css";
+  import ControllerConnection from "$lib/components/ControllerConnection.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import MainView from "$lib/components/MainView.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
@@ -107,7 +108,7 @@
       <p>Loading your music library...</p>
     </div>
   {:else if !$desktopEffectsEnabled}
-    <div class="loading-screen"><p>Desktop controller connection is not available yet.</p></div>
+    <ControllerConnection />
   {:else}
     {#if $isMiniPlayer}
       <MiniPlayer />

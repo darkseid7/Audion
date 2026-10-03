@@ -807,42 +807,109 @@ pub use desktop::*;
     deny_unknown_fields
 )]
 pub enum ControllerRequest {
-    Command { envelope: CommandEnvelope },
-    CommandStatus { request_id: String },
+    Command {
+        envelope: CommandEnvelope,
+    },
+    CommandStatus {
+        request_id: String,
+    },
     Handshake {},
+    Query {
+        query: crate::controller::protocol::ApplicationQuery,
+    },
+    Poll {
+        cursor: crate::controller::protocol::EventCursor,
+    },
+    Media {
+        reference: crate::controller::protocol::ArtworkReference,
+    },
 }
-#[cfg(mobile)]
+#[cfg(target_os = "android")]
+fn controller_session(
+    app: &tauri::AppHandle,
+) -> std::sync::Arc<crate::controller::native_session::NativeSession> {
+    use tauri::Manager;
+    app.state::<std::sync::Arc<crate::controller::native_session::NativeSession>>()
+        .inner()
+        .clone()
+}
+#[cfg(target_os = "android")]
+fn controller_store(
+    app: &tauri::AppHandle,
+) -> std::sync::Arc<dyn crate::controller::native_session::ControllerStore> {
+    std::sync::Arc::new(crate::controller::mobile::AndroidControllerStore(
+        app.clone(),
+    ))
+}
+#[cfg(target_os = "android")]
 #[tauri::command]
-pub fn controller_request(
+pub(crate) async fn controller_request(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    fence: crate::controller::native_session::Fence,
     request: ControllerRequest,
+) -> Result<crate::controller::native_session::ControllerReply, ControlError> {
+    authorize(&window, &app)?;
+    controller_session(&app).request(&fence, request).await
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn controller_connection(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    request: crate::controller::native_session::ConnectionRequest,
+) -> Result<crate::controller::native_session::ConnectionReply, ControlError> {
+    use crate::controller::native_session::{ConnectionReply, ConnectionRequest};
+    authorize(&window, &app)?;
+    let session = controller_session(&app);
+    match request {
+        ConnectionRequest::BeginScope {} => Ok(ConnectionReply::Scope {
+            scope_id: session.begin_scope()?,
+        }),
+        ConnectionRequest::Connect { host_id, fence } => Ok(ConnectionReply::Connected {
+            snapshot: session
+                .connect(controller_store(&app), host_id, fence)
+                .await?,
+        }),
+    }
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) fn controller_suspend(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    fence: crate::controller::native_session::Fence,
+) -> Result<(), ControlError> {
+    authorize(&window, &app)?;
+    controller_session(&app).suspend(&fence)
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn controller_forget(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+    fence: crate::controller::native_session::Fence,
+) -> Result<(), ControlError> {
+    authorize(&window, &app)?;
+    controller_session(&app)
+        .forget(controller_store(&app), host_id, fence)
+        .await
+}
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn controller_pair(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    fence: crate::controller::native_session::Fence,
+    device_name: String,
 ) -> Result<serde_json::Value, ControlError> {
     authorize(&window, &app)?;
-    let _ = request;
-    Err(rejected(ControlErrorCode::Unsupported))
+    let host_id = controller_session(&app)
+        .pair(controller_store(&app), fence, device_name)
+        .await?;
+    Ok(serde_json::json!({"hostId":host_id}))
 }
-#[cfg(mobile)]
-macro_rules! unavailable_command {
-    ($name:ident) => {
-        #[tauri::command]
-        pub fn $name(
-            app: tauri::AppHandle,
-            window: tauri::WebviewWindow,
-        ) -> Result<(), ControlError> {
-            authorize(&window, &app)?;
-            Err(rejected(ControlErrorCode::Unsupported))
-        }
-    };
-}
-#[cfg(mobile)]
-unavailable_command!(controller_pair);
-#[cfg(mobile)]
-unavailable_command!(controller_connection);
-#[cfg(mobile)]
-unavailable_command!(controller_suspend);
-#[cfg(mobile)]
-unavailable_command!(controller_forget);
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 //! Bounded native invitation validation, shared by scan and paste.
 use super::{
-    client::{invalid_pairing, trusted_client, validate_host_endpoint},
+    client::{invalid_pairing, validate_host_endpoint, validate_trust},
     protocol::ControlError,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -85,7 +85,7 @@ pub fn validate_invitation(text: &str, now: SystemTime) -> Result<NativeInvitati
         .map_err(|_| invalid_pairing())?;
     // Build (without connecting) to validate certificate encoding and the exact
     // pinned trust policy before any pairing secret can be submitted.
-    trusted_client(&payload.host_id, endpoint, &ca_der)?;
+    validate_trust(&payload.host_id, endpoint, &ca_der)?;
     let decoded = Zeroizing::new(
         URL_SAFE_NO_PAD
             .decode(&payload.secret)
@@ -173,10 +173,11 @@ fn pairing_window_allowed(label: &str, url: &url::Url, dev_url: Option<&url::Url
 /// leave this module; scan and pasted text converge on the same bounded parser.
 #[cfg(target_os = "android")]
 #[tauri::command]
-pub async fn controller_scan_pair(
+pub(crate) async fn controller_scan_pair(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     invitation: Option<String>,
+    fence: super::native_session::Fence,
 ) -> Result<PairingStatus, ControlError> {
     use tauri::Manager;
     let url = window.url().map_err(|_| invalid_pairing())?;
@@ -191,19 +192,35 @@ pub async fn controller_scan_pair(
             retryable: false,
         });
     }
+    let session = app
+        .state::<std::sync::Arc<super::native_session::NativeSession>>()
+        .inner()
+        .clone();
+    session.reserve_pairing(&fence)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<NativePairingState>();
-        let _scan = state.scan.try_lock().map_err(|_| ControlError {
-            code: super::protocol::ControlErrorCode::Busy,
-            message: "A pairing attempt is already open.".into(),
-            retryable: true,
-        })?;
-        state.accept_input(None, SystemTime::now())?;
-        let input = match invitation {
-            Some(text) => Some(Zeroizing::new(text)),
-            None => app.state::<NativeBridge<tauri::Wry>>().scan_invitation()?,
+        // The session owns logical admission; this guard also prevents a cancelled
+        // native capture Activity still returning from overlapping a second scan.
+        let capture = app.state::<NativePairingState>();
+        let _capture = match capture.scan.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let _ = session.stage_pairing(&fence, None);
+                return Err(super::client::transport_error(
+                    super::protocol::ControlErrorCode::Busy,
+                ));
+            }
         };
-        state.accept_input(input.as_ref().map(|text| text.as_str()), SystemTime::now())
+        let input = match invitation {
+            Some(text) => Ok(Some(Zeroizing::new(text))),
+            None => app.state::<NativeBridge<tauri::Wry>>().scan_invitation(),
+        };
+        match input {
+            Ok(input) => session.stage_pairing(&fence, input),
+            Err(error) => {
+                let _ = session.stage_pairing(&fence, None);
+                Err(error)
+            }
+        }
     })
     .await
     .map_err(|_| invalid_pairing())?
@@ -495,5 +512,30 @@ mod tests {
             );
         }
         assert!(validate_invitation(&"x".repeat(2049), now).is_err());
+    }
+}
+
+/// Lazy native-only credential store: constructing it never opens the Keystore.
+#[cfg(target_os = "android")]
+pub(crate) struct AndroidControllerStore(pub tauri::AppHandle);
+#[cfg(target_os = "android")]
+impl super::native_session::ControllerStore for AndroidControllerStore {
+    fn load(&self, host: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ControlError> {
+        use tauri::Manager;
+        self.0
+            .state::<NativeBridge<tauri::Wry>>()
+            .load_credentials(host)
+    }
+    fn save(&self, host: &str, bytes: &[u8]) -> Result<(), ControlError> {
+        use tauri::Manager;
+        self.0
+            .state::<NativeBridge<tauri::Wry>>()
+            .save_credentials(host, bytes)
+    }
+    fn delete(&self, host: &str) -> Result<(), ControlError> {
+        use tauri::Manager;
+        self.0
+            .state::<NativeBridge<tauri::Wry>>()
+            .delete_credentials(host)
     }
 }

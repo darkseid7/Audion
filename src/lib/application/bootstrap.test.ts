@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 
-const { forbiddenDomainCalls } = vi.hoisted(() => ({ forbiddenDomainCalls: [] as string[] }));
+const { forbiddenDomainCalls, controllerCalls } = vi.hoisted(() => ({ forbiddenDomainCalls: [] as string[], controllerCalls: [] as {command:string;args:unknown}[] }));
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async (command: string) => { forbiddenDomainCalls.push(command); }),
+  invoke: vi.fn(async (command: string,args:unknown) => {
+    if(command==="controller_connection" && JSON.stringify(args)===JSON.stringify({request:{type:"begin_scope"}})){controllerCalls.push({command,args});return {type:"scope",scopeId:"native-renderer-scope"};}
+    if(command==="controller_suspend" && JSON.stringify(args)===JSON.stringify({fence:{scopeId:"native-renderer-scope",generation:1}})){controllerCalls.push({command,args});return;}
+    forbiddenDomainCalls.push(command);
+  }),
   convertFileSrc: (path: string) => path,
   isTauri: () => true,
 }));
@@ -19,7 +23,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.resetModules()
 
 describe("role bootstrap isolation", () => {
   it("controller_import_and_bootstrap_ignore_poisoned_legacy_storage", async () => {
-    forbiddenDomainCalls.length = 0;
+    forbiddenDomainCalls.length = 0;controllerCalls.length=0;
     const records = new Map([
       ["rlist_player_state", JSON.stringify({ queue: [{ id: 7, path: "C:/private/song.flac" }], currentTime: 88 })],
       ["audion_sleep_timer", JSON.stringify({ endsAt: Date.now() + 60000, lastDurationMinutes: 30 })],
@@ -67,6 +71,8 @@ describe("role bootstrap isolation", () => {
     expect(localStorage.getItem).not.toHaveBeenCalledWith("rlist_player_state");
     expect(localStorage.getItem).not.toHaveBeenCalledWith("audion_sleep_timer");
     await handle.dispose();
+    await Promise.resolve();await Promise.resolve();
+    expect(controllerCalls).toEqual([{command:"controller_connection",args:{request:{type:"begin_scope"}}},{command:"controller_suspend",args:{fence:{scopeId:"native-renderer-scope",generation:1}}}]);
     expect(forbiddenDomainCalls).toEqual([]);
   });
 

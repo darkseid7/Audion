@@ -1,6 +1,141 @@
-import { createUnavailablePort } from "../port";
+import { invoke } from "@tauri-apps/api/core";
+import { writable, readonly } from "svelte/store";
 import type { ApplicationHandle } from "../bootstrap";
-/** No desktop dependencies: the native transport arrives in Task 9. */
+import type { HostSnapshot, QueryResult, ExecutionResult, EventBatch } from "../types";
+import { controllerSession, type ControllerNativeBridge, type ControllerState, type NativeControllerFence } from "./session";
+import { createControllerAdapter } from "./adapter";
+import type { NativeImage } from "./media";
+function nativeBridge(): ControllerNativeBridge {
+    async function request<T>(fence: NativeControllerFence, request: object, type: string, key: string): Promise<T> {
+        const reply = await invoke<Record<string, unknown>>("controller_request", { fence, request });
+        if (reply.type !== type)
+            throw { code: "unsupported", message: "Incompatible native controller protocol.", retryable: false };
+        return reply[key] as T;
+    }
+    return {
+        async beginScope() {
+            const reply = await invoke<{
+                type: string;
+                scopeId: string;
+            }>("controller_connection", { request: { type: "begin_scope" } });
+            if (reply.type !== "scope" || !reply.scopeId)
+                throw new Error("Invalid native scope");
+            return reply.scopeId;
+        },
+        async connect(hostId, fence) {
+            const reply = await invoke<{
+                type: string;
+                snapshot: HostSnapshot;
+            }>("controller_connection", { request: { type: "connect", hostId, fence } });
+            if (reply.type !== "connected")
+                throw new Error("Invalid native session");
+            return reply.snapshot;
+        },
+        suspend: fence => invoke("controller_suspend", { fence }), forget: (hostId, fence) => invoke("controller_forget", { hostId, fence }),
+        scan: fence => invoke("controller_scan_pair", { fence, invitation: null }), pair: (fence, deviceName) => invoke("controller_pair", { fence, deviceName }),
+        query: (fence, query) => request<QueryResult>(fence, { type: "query", query }, "query", "result"),
+        command: (fence, envelope) => request<ExecutionResult>(fence, { type: "command", envelope }, "command", "result"),
+        commandStatus: (fence, requestId) => request<ExecutionResult | {
+            status: "pending";
+        }>(fence, { type: "command_status", requestId }, "command_status", "result"),
+        poll: (fence, cursor) => request<EventBatch>(fence, { type: "poll", cursor }, "poll", "batch"),
+        media: (fence, reference) => request<NativeImage>(fence, { type: "media", reference }, "media", "image"),
+    };
+}
+const empty: ControllerState = { currentHostId: null, snapshot: null, ready: false, status: "disconnected" };
+const state = writable<ControllerState>(empty);
+export const controllerState = readonly(state);
+const hosts = writable<string[]>([]);
+export const pairedHostIds = readonly(hosts);
+let active: ReturnType<typeof controllerSession> | undefined;
+let known: string[] = [];
+let selected: string | null = null;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function savePreferences() {
+    try {
+        localStorage.setItem("audion_controller_hosts", JSON.stringify({ known, selected }));
+    }
+    catch {
+    }
+    hosts.set([...known]);
+}
+export async function connectController(hostId: string): Promise<void> {
+    if (!uuid.test(hostId) || !active)
+        return;
+    selected = hostId;
+    savePreferences();
+    await active.connectController(hostId);
+}
+export function suspendController(): void {
+    active?.suspendController();
+}
+export async function forgetController(hostId: string): Promise<void> {
+    if (!active)
+        return;
+    await active.forgetController(hostId);
+    known = known.filter(h => h !== hostId);
+    if (selected === hostId)
+        selected = null;
+    savePreferences();
+}
+export async function pairController(): Promise<void> {
+    const session = active;
+    if (!session)
+        return;
+    const host = await session.pairController();
+    if (active !== session || !host)
+        return;
+    known = [host, ...known.filter(h => h !== host)].slice(0, 32);
+    selected = host;
+    savePreferences();
+}
+/** Only local UI preferences and a native scope: no music DB, engine or queue restoration. */
 export async function bootstrapController(): Promise<ApplicationHandle> {
-    return { port: createUnavailablePort(), async dispose() { } };
+    const native = nativeBridge(), session = controllerSession(native);
+    active = session;
+    const unsubscribe = session.state.subscribe(value => {
+        if (active === session)
+            state.set(value);
+    });
+    try {
+        await session.initialize();
+    }
+    catch (error) {
+        unsubscribe();
+        if (active === session)
+            active = undefined;
+        throw error;
+    }
+    known = [];
+    selected = null;
+    try {
+        const prefs = JSON.parse(localStorage.getItem("audion_controller_hosts") ?? "null");
+        known = Array.isArray(prefs?.known) ? prefs.known.filter((h: unknown) => typeof h === "string" && uuid.test(h)).slice(0, 32) : [];
+        selected = known.includes(prefs?.selected) ? prefs.selected : null;
+    }
+    catch {
+    }
+    hosts.set([...known]);
+    if (selected)
+        void session.connectController(selected);
+    const visibility = () => {
+        if (active !== session)
+            return;
+        if (document.visibilityState === "hidden")
+            session.suspendController();
+        else if (selected)
+            void session.connectController(selected);
+    };
+    if (typeof document !== "undefined")
+        document.addEventListener("visibilitychange", visibility);
+    return { port: createControllerAdapter(native), async dispose() {
+            unsubscribe();
+            if (typeof document !== "undefined")
+                document.removeEventListener("visibilitychange", visibility);
+            session.suspendController();
+            if (active === session) {
+                active = undefined;
+                state.set(empty);
+            }
+        } };
 }

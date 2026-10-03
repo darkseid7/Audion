@@ -25,3 +25,5 @@ pub mod resources;
 
 #[cfg(desktop)]
 mod query_input;
+
+pub(crate) mod native_session;
