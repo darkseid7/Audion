@@ -1,6 +1,7 @@
 vi.mock("./adapter", () => ({ createDesktopAdapter: () => ({
   port: { execute: async () => ({ status: "applied", revision: 1 }) },
-  pauseForTimer: async () => {}, dispose: async () => {},
+  attachAuthority: async () => {},
+  pauseForTimer: async () => {}, dispose: async () => { state.bridgeSteps.push("adapter-dispose"); },
 }) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +10,8 @@ const state = vi.hoisted(() => ({
   cleanups: 0,
   resourcesAlive: false,
   stopPlugins: async () => {},
+  hostEnabled: false,
+  bridgeSteps: [] as string[],
 }));
 vi.mock("./player-runtime", () => ({
   initAudioBackend: async () => { state.starts++; state.resourcesAlive = true; },
@@ -37,6 +40,12 @@ vi.mock("$lib/stores/library", () => ({ loadLibrary: async () => {}, loadPlaylis
 vi.mock("$lib/stores/plugin-store", () => ({ pluginStore: { init: async () => {}, dispose: () => state.stopPlugins() } }));
 vi.mock("$lib/api/tauri", () => ({ migrateCoversToFiles: vi.fn(), startWatcher: vi.fn(), squeezeStartServer: async () => {} }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: async (command: string, args: { request: { phase?: string } }) => {
+  if (command === "control_host_enable") return { enabled: state.hostEnabled };
+  state.bridgeSteps.push(args.request.phase!);
+  return { hostId: "host", lease: { hostEpoch: "epoch", leaseId: "lease" } };
+} }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ listen: async () => () => { state.bridgeSteps.push("unlisten"); } }) }));
 
 beforeEach(() => {
   vi.resetModules();
@@ -44,6 +53,8 @@ beforeEach(() => {
   state.cleanups = 0;
   state.resourcesAlive = false;
   state.stopPlugins = async () => {};
+  state.hostEnabled = false;
+  state.bridgeSteps = [];
   vi.stubGlobal("localStorage", { getItem: () => "true" });
   vi.stubGlobal("requestIdleCallback", () => 1);
   vi.stubGlobal("cancelIdleCallback", () => {});
@@ -51,6 +62,16 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("real desktop resource ownership", () => {
+  it("shares one reloaded host bridge and releases authority before the final adapter teardown", async () => {
+    state.hostEnabled = true;
+    const { bootstrapDesktop } = await import("./bootstrap");
+    const first = await bootstrapDesktop();
+    const second = await bootstrapDesktop();
+    await first.dispose();
+    expect(state.bridgeSteps).toEqual(["prepare", "ready"]);
+    await second.dispose();
+    expect(state.bridgeSteps).toEqual(["prepare", "ready", "release", "unlisten", "adapter-dispose"]);
+  });
   it("reserves the pending owner before the previous owner can tear down resources", async () => {
     const { bootstrapDesktop } = await import("./bootstrap");
     const first = await bootstrapDesktop();

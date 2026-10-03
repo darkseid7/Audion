@@ -14,7 +14,8 @@ const capabilities = { playback: true, seek: true, volume: true, shuffle: true, 
 const unwrap = async (result: Promise<ExecutionResult>): Promise<void> => { const value = await result; if (value.status === "failed" || value.status === "superseded") throw new PlaybackFailure(value.error, value.status, value.partialEffects); };
 /** Desktop authority. Network transports never receive host Track objects or legacy calls. */
 export function createDesktopAdapter() {
-  const hostEpoch = crypto.randomUUID();
+  let hostEpoch: string = crypto.randomUUID();
+  let hostId = "desktop";
   let sequence = 0;
   const entry = (track: api.Track) => ({ entryId: `${hostEpoch}:${++sequence}`, track });
   let value: HostState = { hostEpoch, revision: 0, revisions: { libraryRevision: 0, queueRevision: 0, outputRevision: 0, settingsRevision: 0 }, selectedOutput: output(), ownershipGeneration: 0, transitionGeneration: 0, queue: get(player.queue).map(entry) };
@@ -26,7 +27,7 @@ export function createDesktopAdapter() {
     const track = get(player.currentTrack);
     const context = get(player.playbackContext);
     return {
-      hostId: "desktop", hostEpoch, revision: value.revision, revisions: value.revisions,
+      hostId, hostEpoch, revision: value.revision, revisions: value.revisions,
       output: get(player.activeBackend) === "remote" ? { kind: "desktop_only", reason: "Legacy cloud control is desktop-only" } : value.selectedOutput,
       outputs: outputs(), settings: {}, jobs: [],
       capabilities: { queries: ["snapshot", "queue", "outputs"], intents: ["play_album", "play_playlist", "play_artist", "play_liked", "play_track", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume", "set_shuffle", "set_repeat", "queue_insert", "queue_append", "queue_remove", "queue_reorder", "queue_clear_upcoming", "queue_play"] },
@@ -209,6 +210,15 @@ export function createDesktopAdapter() {
   };
   return {
     port, state, coordinator,
+    async attachAuthority(authority: { hostId: string; hostEpoch: string }) {
+      if (disposed) throw new Error("Desktop adapter disposed");
+      // Invalidate queued old-epoch commands synchronously, then drain the same
+      // lane before advertising readiness. An in-flight effect is never replayed.
+      hostId = authority.hostId; hostEpoch = authority.hostEpoch; sequence = 0;
+      pendingEntries = value.queue.map(item => entry(item.track));
+      state.commit({ hostEpoch, ownershipGeneration: value.ownershipGeneration + 1, transitionGeneration: value.transitionGeneration + 1 });
+      await unwrap(coordinator.executeLocal(async () => applied));
+    },
     pauseForTimer() { const signal = captureSignal("timer"); return coordinator.enqueueSignal(signal); },
     async dispose() { if (disposed) return; disposed = true; outputSubscriptions.forEach(stop => stop()); unregister(); bindSqueezeSelection(async () => { throw new Error("Desktop adapter disposed"); }); bindSqueezeObservations(() => async () => {}); player.bindPlaybackSignals(() => async () => {}); player.bindDesktopCommands(async () => { throw new Error("Desktop adapter disposed"); }); player.bindDesktopTransfers(async () => { throw new Error("Desktop adapter disposed"); }); setPlayerPreconditions(undefined); await coordinator.dispose(); listeners.clear(); },
   };

@@ -11,6 +11,8 @@
     "main"
   ],
   "permissions": [
+    "desktop-domain",
+    "desktop-host",
     "core:default",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-size",

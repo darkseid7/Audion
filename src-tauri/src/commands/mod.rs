@@ -1,4 +1,5 @@
 // Tauri IPC commands
+pub mod controller;
 pub mod activity;
 pub mod backup;
 pub mod covers;

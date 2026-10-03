@@ -222,6 +222,57 @@ pub struct PairingService {
 }
 
 impl PairingService {
+    /// Host disable invalidates pending approval and every outstanding QR.
+    pub(crate) fn invalidate_invitations(&self) -> Result<(), ControlError> {
+        let mut state = self.state.lock().map_err(|_| vault_unavailable())?;
+        state.pending.clear();
+        state.invitations.clear();
+        Ok(())
+    }
+    /// Native-only wire admission; reuse the reviewed bounded canonical parser,
+    /// then compare every field with the host's registered invitation below.
+    pub fn request_wire(
+        &self,
+        encoded: &str,
+        device_name: String,
+    ) -> Result<PendingPairing, ControlError> {
+        let invite = super::mobile::validate_invitation(encoded, SystemTime::now())?;
+        // Windows SystemTime has 100ns precision. checked_add can round a
+        // canonical but unrepresentable wire fraction, so compare the supplied
+        // components before relying on SystemTime equality for registration.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Expiration {
+            unix_seconds: u64,
+            nanoseconds: u32,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ExpirationOnly {
+            expires_at: Expiration,
+        }
+        let wire: ExpirationOnly = serde_json::from_str(encoded).map_err(|_| invalid_request())?;
+        let represented = invite
+            .expires_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| invalid_request())?;
+        if represented.as_secs() != wire.expires_at.unix_seconds
+            || represented.subsec_nanos() != wire.expires_at.nanoseconds
+        {
+            return Err(invalid_request());
+        }
+        self.request_pairing(
+            PairingInvitation {
+                id: invite.invitation_id,
+                host_id: invite.host_id,
+                ca_der: invite.ca_der,
+                endpoint: invite.endpoint,
+                secret: invite.secret,
+                expires_at: invite.expires_at,
+            },
+            device_name,
+        )
+    }
     pub fn new(identity: &HostIdentity, store: Arc<dyn SecretStore>) -> Result<Self, ControlError> {
         let ca_hash = hash(identity.ca_der());
         // Replacing the CA changes the credential namespace, even if a host ID
@@ -485,6 +536,38 @@ mod tests {
         let invite =
             create_invitation(&identity, "192.168.1.20:45123".parse().unwrap(), now).unwrap();
         assert_eq!(invite.expires_at, now + Duration::from_secs(300));
+    }
+
+    #[test]
+    fn wire_admission_preserves_registered_precision_and_one_use() {
+        let (_, identity, service) = fixture();
+        let invitation = invite(&identity, &service);
+        let encoded = invitation.encode().unwrap();
+        let mut altered: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        altered["expiresAt"]["nanoseconds"] = serde_json::json!(
+            (invitation
+                .expires_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+                + 1)
+                % 1_000_000_000
+        );
+        assert!(service
+            .request_wire(&altered.to_string(), "Phone".into())
+            .is_err());
+        let pending = service.request_wire(&encoded, "Phone".into()).unwrap();
+        assert_eq!(pending.expires_at, invitation.expires_at);
+        assert!(service.request_wire(&encoded, "Phone".into()).is_err());
+        let unregistered = create_invitation(
+            &identity,
+            "192.168.1.20:45123".parse().unwrap(),
+            SystemTime::now(),
+        )
+        .unwrap();
+        assert!(service
+            .request_wire(&unregistered.encode().unwrap(), "Phone".into())
+            .is_err());
     }
 
     #[test]

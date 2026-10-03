@@ -3,5 +3,5 @@
   "description": "Controller window: no filesystem, media or native credential plugin access",
   "platforms": ["android", "iOS"],
   "windows": ["main"],
-  "permissions": ["core:default", "os:default"]
+  "permissions": ["core:default", "os:default", "mobile-controller"]
 }

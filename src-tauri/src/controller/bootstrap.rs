@@ -25,7 +25,12 @@ pub fn run() {
         .plugin(super::mobile::native_plugin())
         .invoke_handler(tauri::generate_handler![
             get_application_mode,
-            super::mobile::controller_scan_pair
+            super::mobile::controller_scan_pair,
+            crate::commands::controller::controller_pair,
+            crate::commands::controller::controller_request,
+            crate::commands::controller::controller_connection,
+            crate::commands::controller::controller_suspend,
+            crate::commands::controller::controller_forget
         ]);
     #[cfg(not(target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![get_application_mode]);

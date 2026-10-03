@@ -1,5 +1,7 @@
 import { get } from "svelte/store";
 import { createDesktopAdapter } from "./adapter";
+import { connectHostBridge } from "./bridge";
+import { invoke } from "@tauri-apps/api/core";
 import { setMigrationStatus, type ApplicationHandle } from "../bootstrap";
 import { initAudioBackend, cleanupPlayer } from "./player-runtime";
 import { appSettings } from "$lib/stores/settings";
@@ -22,6 +24,18 @@ import { pluginStore } from "$lib/stores/plugin-store";
 import { migrateCoversToFiles, startWatcher, squeezeStartServer } from "$lib/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 let adapter: ReturnType<typeof createDesktopAdapter> | undefined;
+let hostBridge: ReturnType<typeof connectHostBridge> | undefined;
+/** One bridge per shared adapter; settings opt-in never creates another lane. */
+export async function prepareHostBridge(): Promise<void> {
+    if (!adapter || stopped) throw new Error("Desktop is not ready");
+    hostBridge ??= connectHostBridge(adapter.port, adapter.attachAuthority).catch(error => { hostBridge = undefined; throw error; });
+    await hostBridge;
+}
+export async function releaseHostBridge(): Promise<void> {
+    const current = hostBridge;
+    hostBridge = undefined;
+    if (current) await (await current).dispose();
+}
 let owners = 0;
 let startup: Promise<void> | undefined;
 let stops: (() => void)[] = [];
@@ -81,6 +95,12 @@ async function start(): Promise<void> {
         if (!stopped)
             pluginStartup = pluginStore.init().catch(console.error);
     });
+    // A WebView reload leaves native listener state alive but invalidates its
+    // lease. Fresh app startup is Off and does not touch protected storage.
+    try {
+        const status = await invoke<{ enabled: boolean }>("control_host_enable", { request: { action: "status" } });
+        if (status?.enabled) await prepareHostBridge();
+    } catch (error) { console.warn("Controller hosting unavailable", error); }
 }
 async function stop(): Promise<void> {
     stopped = true;
@@ -91,6 +111,7 @@ async function stop(): Promise<void> {
         cancelIdleCallback(pluginLoad);
     await pluginStartup;
     pluginStartup = undefined;
+    try { await releaseHostBridge(); } catch (error) { console.warn("Controller bridge release unavailable", error); }
     await adapter?.dispose();
     adapter = undefined;
     stops.splice(0).reverse().forEach(dispose => dispose());

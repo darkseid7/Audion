@@ -307,6 +307,21 @@ pub fn run() {
     let exit_coordinator = std::sync::Arc::new(app_exit::AppExit::default());
 
     builder
+        .manage(commands::controller::NativeHostState::default())
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(state) = webview.try_state::<commands::controller::NativeHostState>() {
+                    state.invalidate_window(webview.label());
+                }
+            }
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = window.try_state::<commands::controller::NativeHostState>() {
+                    state.invalidate_window(window.label());
+                }
+            }
+        })
         .setup(|app| {
             // Get app data directory and create database
             let app_dir = app
@@ -523,6 +538,12 @@ pub fn run() {
             {
                 tauri::generate_handler![
                     controller::bootstrap::get_application_mode,
+                    commands::controller::control_host_enable,
+                    commands::controller::control_host_invitation,
+                    commands::controller::control_host_approve,
+                    commands::controller::control_host_revoke,
+                    commands::controller::control_host_register,
+                    commands::controller::control_host_complete,
                     // Library commands
                     commands::scan_music,
                     commands::add_folder,

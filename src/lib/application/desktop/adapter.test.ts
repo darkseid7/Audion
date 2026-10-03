@@ -12,6 +12,7 @@ import { playbackStateWriter as state } from "$lib/stores/playback-state";
 import { activeSqueezePlayer, commitSqueezeTarget } from "$lib/stores/squeeze";
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.stubGlobal("navigator", {});
   state.activeBackend.set("none"); activeSqueezePlayer.set(null);
   state.queue.set([]); state.queueIndex.set(0); state.currentTrack.set(null);
@@ -21,6 +22,22 @@ beforeEach(() => {
   api.players.mockReset().mockResolvedValue([{ mac: "A", name: "Living room" }]);
 });
 describe("desktop adapter execution", () => {
+  it("attaches native identity throughout snapshots, preconditions and regenerated queue entry IDs", async () => {
+    commitSqueezeTarget("A");
+    const adapter = createDesktopAdapter();
+    const oldEpoch = adapter.state.read().hostEpoch;
+    await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: oldEpoch });
+    const previousId = adapter.state.read().queue[0].entryId;
+    await adapter.attachAuthority({ hostId: "native-host", hostEpoch: "native-epoch" });
+    const snapshot = await adapter.port.query({ type: "snapshot" });
+    expect(snapshot).toMatchObject({ snapshot: { hostId: "native-host", hostEpoch: "native-epoch" } });
+    expect(adapter.state.read().hostEpoch).toBe("native-epoch");
+    expect(adapter.state.read().queue[0].entryId).not.toBe(previousId);
+    expect(adapter.state.read().queue[0].entryId).toMatch(/^native-epoch:/);
+    expect(await adapter.port.execute({ type: "pause" }, { hostEpoch: oldEpoch })).toMatchObject({ status: "superseded", error: { code: "resync_required" } });
+    expect(await adapter.port.execute({ type: "pause" }, { hostEpoch: "native-epoch" })).toMatchObject({ status: "applied" });
+    await adapter.dispose();
+  });
   it("resolves entity playback in the host and exposes distinct repeated queue entries", async () => {
     const adapter = createDesktopAdapter();
     const context = () => ({ hostEpoch: adapter.state.read().hostEpoch });

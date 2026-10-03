@@ -6,5 +6,10 @@ fn main() {
         println!("cargo:rustc-link-lib=c++_shared");
     }
 
-    tauri_build::build()
+    // Defining app permissions enables ACL checks for every application command.
+    // controller.toml explicitly preserves the desktop-main domain allowlist.
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().permissions_path_pattern("permissions/*.toml"),
+    ))
+    .expect("failed to build application permissions")
 }
