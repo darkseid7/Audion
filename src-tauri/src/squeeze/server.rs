@@ -426,7 +426,7 @@ async fn handle_prefetch(
         };
 
         // Save current track for display before advancing queue
-        player.display_track = player.queue.current().cloned();
+        player.retain_audible_occurrence();
 
         // Advance queue to next track
         let next = match player.queue.next() {
@@ -1044,4 +1044,33 @@ mod tests {
         shutdown.store(true, Ordering::Relaxed);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
     }
+    #[tokio::test]
+    async fn prefetch_reports_audible_occurrence_until_finish_for_repeated_shuffle() {
+        use crate::squeeze::queue::{QueueTrack, RepeatMode};
+        for shuffle in [false, true] {
+            let players = new_player_map();
+            let streaming = StreamingState::new();
+            let mac = MacAddress([2, 0, 0, 0, 0, 9]);
+            let mut player = SqueezePlayer::new_cometd(mac, "fixture".into(), "fixture".into());
+            player.queue.shuffle = shuffle;
+            player.queue.repeat = RepeatMode::All;
+            let track = QueueTrack { id: 7, title: "Repeated".into(), artist: String::new(), album: String::new(), path: "fixture.flac".into(), duration: 100.0, format: "flac".into() };
+            player.queue.set_tracks(vec![track.clone(), track.clone(), track], 2);
+            player.prefetched_generation = Some(player.generation);
+            players.lock().await.insert(mac, player);
+            handle_prefetch(&mac, &players, &streaming, None).await;
+            let prefetched;
+            {
+                let map = players.lock().await;
+                let player = map.get(&mac).unwrap();
+                prefetched = player.queue.current_track_index();
+                assert_ne!(prefetched, Some(2));
+                assert_eq!(player.info().current_queue_index, Some(2));
+                assert_eq!(player.info().current_track.unwrap().id, 7);
+            }
+            handle_track_finished(&mac, &players, &streaming, None).await;
+            assert_eq!(players.lock().await.get(&mac).unwrap().info().current_queue_index, prefetched);
+        }
+    }
+
 }

@@ -281,6 +281,10 @@ impl PlayQueue {
             .collect()
     }
 
+    pub fn track_at(&self, index: usize) -> Option<&QueueTrack> {
+        self.tracks.get(index)
+    }
+
     pub fn len(&self) -> usize {
         self.tracks.len()
     }

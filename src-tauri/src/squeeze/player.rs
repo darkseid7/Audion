@@ -77,6 +77,8 @@ pub struct SqueezePlayer {
     pub play_started_at: Option<Instant>,
     /// Track to show in UI during gapless transition (before old track finishes).
     pub display_track: Option<QueueTrack>,
+    /// Underlying occurrence paired with display_track while the next stream is buffered.
+    display_queue_index: Option<usize>,
 }
 
 /// Map known MAC addresses to friendly device names.
@@ -115,6 +117,7 @@ impl SqueezePlayer {
             is_cometd: false,
             play_started_at: None,
             display_track: None,
+            display_queue_index: None,
         }
     }
 
@@ -142,6 +145,7 @@ impl SqueezePlayer {
             is_cometd: true,
             play_started_at: None,
             display_track: None,
+            display_queue_index: None,
         }
     }
 
@@ -436,7 +440,70 @@ impl SqueezePlayer {
         }
     }
 
-    /// Get info for the frontend.
+    /// Capture the audible occurrence before the queue cursor advances for prefetch.
+    pub fn retain_audible_occurrence(&mut self) {
+        self.display_track = self.queue.current().cloned();
+        self.display_queue_index = self.queue.current_track_index();
+    }
+
+    pub fn insert_queue(&mut self, tracks: Vec<QueueTrack>, position: usize) {
+        let insert_at = position.min(self.queue.len());
+        if self.display_track.is_some() {
+            self.display_queue_index = self.display_queue_index.map(|index| {
+                if index >= insert_at { index + tracks.len() } else { index }
+            });
+        }
+        self.queue.insert_tracks(tracks, position);
+    }
+
+    /// Retained source indices describe occurrence identity, never inferred from duplicate IDs.
+    /// All validation happens under the caller's player lock before publishing either cursor.
+    pub fn replace_queue(
+        &mut self,
+        tracks: Vec<QueueTrack>,
+        current_track_id: i64,
+        current_index: Option<usize>,
+        source_indices: Option<Vec<Option<usize>>>,
+    ) -> Result<(), String> {
+        let busy = || "SQUEEZE_QUEUE_BUSY: buffered occurrence cannot be resolved or removed; retry after transition".to_string();
+        if let Some(sources) = &source_indices {
+            if sources.len() != tracks.len() { return Err("Queue source map length is invalid".into()); }
+            let mut seen = std::collections::HashSet::new();
+            for (track, source) in tracks.iter().zip(sources) {
+                if let Some(source) = source {
+                    if !seen.insert(*source) || self.queue.track_at(*source).map(|old| old.id) != Some(track.id) {
+                        return Err("Queue source occurrence is invalid".into());
+                    }
+                }
+            }
+        }
+        let (cursor_id, cursor_index, display_index) = if let Some(display) = &self.display_track {
+            let sources = source_indices.as_ref().ok_or_else(busy)?;
+            let audible = self.display_queue_index.ok_or_else(busy)?;
+            let buffered = self.queue.current_track_index().ok_or_else(busy)?;
+            let new_audible = sources.iter().position(|index| *index == Some(audible)).ok_or_else(busy)?;
+            let new_buffered = sources.iter().position(|index| *index == Some(buffered)).ok_or_else(busy)?;
+            if current_index != Some(new_audible) || display.id != current_track_id {
+                return Err("Current audible queue occurrence is invalid".into());
+            }
+            (tracks[new_buffered].id, Some(new_buffered), Some(new_audible))
+        } else {
+            if let (Some(sources), Some(index), Some(previous)) = (&source_indices, current_index, self.queue.current_track_index()) {
+                if sources.get(index) != Some(&Some(previous)) {
+                    return Err("Current queue source occurrence is invalid".into());
+                }
+            }
+            (current_track_id, current_index, None)
+        };
+        // Work on a clone so even queue validation cannot leave half of the pair changed.
+        let mut replacement = self.queue.clone();
+        replacement.replace_queue_keep_current_at(tracks, cursor_id, cursor_index)?;
+        self.queue = replacement;
+        if self.display_track.is_some() { self.display_queue_index = display_index; }
+        Ok(())
+    }
+
+    /// Get info for the frontend, keeping displayed metadata and occurrence paired.
     pub fn info(&self) -> PlayerInfo {
         PlayerInfo {
             mac: self.mac.to_string(),
@@ -450,7 +517,7 @@ impl SqueezePlayer {
             shuffle: self.queue.shuffle,
             queue_length: self.queue.len(),
             queue_position: self.queue.current_position(),
-            current_queue_index: self.queue.current_track_index(),
+            current_queue_index: if self.display_track.is_some() { self.display_queue_index } else { self.queue.current_track_index() },
         }
     }
 }
@@ -468,4 +535,81 @@ pub type PlayerMap = Arc<Mutex<HashMap<MacAddress, SqueezePlayer>>>;
 
 pub fn new_player_map() -> PlayerMap {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+mod audible_occurrence_tests {
+    use super::*;
+    fn track(id: i64) -> QueueTrack {
+        QueueTrack { id, title: id.to_string(), artist: String::new(), album: String::new(), path: String::new(), duration: 100.0, format: "flac".into() }
+    }
+    fn player(shuffle: bool) -> SqueezePlayer {
+        let mut p = SqueezePlayer::new_cometd(MacAddress([1, 2, 3, 4, 5, 6]), "fixture".into(), "fixture".into());
+        p.queue.shuffle = shuffle;
+        p.queue.set_tracks(vec![track(7), track(7), track(7)], 2);
+        p
+    }
+    fn confirm(p: &mut SqueezePlayer) {
+        p.handle_stat(&StatMessage { event: StatEvent::TrackStarted, buffer_size: 0, buffer_fullness: 0, bytes_received: 0, signal_strength: 0, jiffies: 0, output_buffer_size: 0, output_buffer_fullness: 0, elapsed_seconds: 0, elapsed_milliseconds: 0, timestamp: 0 });
+    }
+    #[test]
+    fn audible_occurrence_is_retained_until_actual_start_including_shuffle() {
+        for shuffled in [false, true] {
+            let mut p = player(shuffled);
+            p.queue.repeat = RepeatMode::All;
+            assert_eq!(p.info().current_queue_index, Some(2));
+            p.retain_audible_occurrence();
+            p.queue.next();
+            let prefetched = p.queue.current_track_index();
+            assert_ne!(prefetched, Some(2));
+            assert_eq!(p.info().current_queue_index, Some(2));
+            assert_eq!(p.info().current_track.unwrap().id, 7);
+            assert_eq!(p.info().queue_position, p.queue.current_position());
+            confirm(&mut p);
+            assert_eq!(p.info().current_queue_index, prefetched);
+        }
+    }
+    #[test]
+    fn replacement_maps_both_retained_occurrences_for_duplicate_shuffle() {
+        for shuffled in [false, true] {
+            let mut p = player(shuffled);
+            p.queue.repeat = RepeatMode::All;
+            p.retain_audible_occurrence(); p.queue.next();
+            let prefetched = p.queue.current_track_index().unwrap();
+            let sources = vec![Some(2), Some(0), Some(1)];
+            let expected_prefetched = sources.iter().position(|i| *i == Some(prefetched));
+            p.replace_queue(vec![track(7), track(7), track(7)], 7, Some(0), Some(sources)).unwrap();
+            assert_eq!(p.info().current_queue_index, Some(0));
+            assert_eq!(p.queue.current_track_index(), expected_prefetched);
+            confirm(&mut p);
+            assert_eq!(p.info().current_queue_index, expected_prefetched);
+        }
+    }
+    #[test]
+    fn prefetch_replacement_rejects_ambiguous_or_removed_buffered_occurrence_before_mutation() {
+        let mut p = player(false); p.queue.repeat = RepeatMode::All;
+        p.retain_audible_occurrence(); p.queue.next(); // audible2, buffered0
+        let before = serde_json::to_value(p.info()).unwrap();
+        for sources in [None, Some(vec![Some(2)]), Some(vec![Some(2), None]), Some(vec![Some(2), Some(2)]), Some(vec![Some(2), Some(9)]), Some(vec![Some(2), Some(1)])] {
+            assert!(p.replace_queue(vec![track(7), track(7)], 7, Some(0), sources).is_err());
+            assert_eq!(serde_json::to_value(p.info()).unwrap(), before);
+            assert_eq!(p.queue.current_track_index(), Some(0));
+        }
+        assert!(p.replace_queue(vec![track(7), track(8)], 7, Some(0), Some(vec![Some(2), Some(0)])).is_err());
+        assert_eq!(serde_json::to_value(p.info()).unwrap(), before);
+        // Non-buffered repeated occurrence can be removed normally.
+        p.replace_queue(vec![track(7), track(7)], 7, Some(0), Some(vec![Some(2), Some(0)])).unwrap();
+        assert_eq!(p.info().current_queue_index, Some(0));
+        assert_eq!(p.queue.current_track_index(), Some(1));
+    }
+    #[test]
+    fn insertion_shifts_retained_audible_and_prefetched_indices_together() {
+        let mut p = player(false); p.queue.repeat = RepeatMode::All;
+        p.retain_audible_occurrence(); p.queue.next();
+        p.insert_queue(vec![track(9)], 0);
+        assert_eq!(p.info().current_queue_index, Some(3));
+        assert_eq!(p.queue.current_track_index(), Some(1));
+        confirm(&mut p);
+        assert_eq!(p.info().current_queue_index, Some(1));
+    }
 }

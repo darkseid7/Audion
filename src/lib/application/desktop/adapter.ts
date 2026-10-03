@@ -160,16 +160,18 @@ export function createDesktopAdapter() {
   const captureSignal = (kind: PlaybackSignal["kind"]): PlaybackSignal => ({ kind, output: value.selectedOutput, ownershipGeneration: value.ownershipGeneration, transitionGeneration: value.transitionGeneration });
   player.bindPlaybackSignals(() => { const origin = captureSignal("completion"); return kind => coordinator.enqueueSignal({ ...origin, kind }); });
   player.bindDesktopCommands(execute);
-  bindSqueezeObservations(() => {
+  player.bindDesktopTransfers(input => local(() => player.transferPlayback(input), true));
+  bindSqueezeObservations((kind = "sample") => {
     const origin = captureSignal("gapless");
     const revision = value.revision;
     return operation => unwrap(coordinator.executeLocal(async () => {
       const current = state.read();
-      if (revision !== current.revision || origin.ownershipGeneration !== current.ownershipGeneration || origin.transitionGeneration !== current.transitionGeneration) return applied;
+      if ((kind === "sample" && revision !== current.revision) || !sameOutput(origin.output, current.selectedOutput) || origin.ownershipGeneration !== current.ownershipGeneration || origin.transitionGeneration !== current.transitionGeneration) return applied;
       const previousTrack = get(player.currentTrack);
       const previousIndex = get(player.queueIndex);
-      await operation();
+      const afterConfirmation = await operation();
       if (previousTrack?.id !== get(player.currentTrack)?.id || previousIndex !== get(player.queueIndex)) state.commit({ transitionGeneration: current.transitionGeneration + 1 });
+      afterConfirmation?.();
       return applied;
     }));
   });
@@ -208,6 +210,6 @@ export function createDesktopAdapter() {
   return {
     port, state, coordinator,
     pauseForTimer() { const signal = captureSignal("timer"); return coordinator.enqueueSignal(signal); },
-    async dispose() { if (disposed) return; disposed = true; outputSubscriptions.forEach(stop => stop()); unregister(); bindSqueezeSelection(async () => { throw new Error("Desktop adapter disposed"); }); bindSqueezeObservations(() => async () => {}); player.bindPlaybackSignals(() => async () => {}); player.bindDesktopCommands(async () => { throw new Error("Desktop adapter disposed"); }); setPlayerPreconditions(undefined); await coordinator.dispose(); listeners.clear(); },
+    async dispose() { if (disposed) return; disposed = true; outputSubscriptions.forEach(stop => stop()); unregister(); bindSqueezeSelection(async () => { throw new Error("Desktop adapter disposed"); }); bindSqueezeObservations(() => async () => {}); player.bindPlaybackSignals(() => async () => {}); player.bindDesktopCommands(async () => { throw new Error("Desktop adapter disposed"); }); player.bindDesktopTransfers(async () => { throw new Error("Desktop adapter disposed"); }); setPlayerPreconditions(undefined); await coordinator.dispose(); listeners.clear(); },
   };
 }

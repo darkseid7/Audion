@@ -199,7 +199,7 @@ export function initializeSqueeze(): () => void {
     };
 }
 
-type ObservationSink = () => (apply: () => Promise<void>) => Promise<void>;
+type ObservationSink = (kind?: "sample" | "watchdog") => (apply: () => Promise<void | (() => void)>) => Promise<void>;
 let observationSink: ObservationSink | undefined;
 export function bindSqueezeObservations(sink: ObservationSink | undefined): void { observationSink = sink; }
 async function pollSqueezeState(owner: SqueezePollOwner) {
@@ -209,14 +209,23 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
     const info = await squeezeGetPlayerState(owner.mac);
     const apply = async () => {
       if (!ownsSqueezePoll(owner)) return;
-      await applySqueezeState(owner, info);
+      return await applySqueezeState(owner, info);
     };
-    if (publish) await publish(apply); else await apply();
+    if (publish) await publish(apply); else (await apply())?.();
   } catch {
     // Player may have disconnected; ownership checks prevent stale publication.
   }
 }
-async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInfo): Promise<void> {
+/** Direct acknowledgement reconciliation; called inside the already-admitted command lane. */
+export async function reconcileSqueezeAcknowledgement(mac: string): Promise<void> {
+  const owner = captureSqueezePollOwner(mac);
+  const info = await squeezeGetPlayerState(mac);
+  if (!ownsSqueezePoll(owner)) throw new Error("Squeeze ownership changed during acknowledgement");
+  // Manual navigation is not a natural completion. The next poll may arm a watchdog.
+  await applySqueezeState(owner, info, false);
+}
+
+async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInfo, recordNaturalTransition = true): Promise<void | (() => void)> {
     squeezePlayerState.set(info);
 
     const playing = info.state === "Playing";
@@ -266,7 +275,7 @@ async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInf
       if (!sameTrack || canUpgradeFromLocal) {
         // In squeeze mode, track transitions are driven by state polling, not native/html5 end events.
         // Record the previous track play when we detect a real track-id change.
-        if (!sameTrack && prevTrack) {
+        if (recordNaturalTransition && !sameTrack && prevTrack) {
           const durationPlayed = Math.floor(prevElapsed);
           if (durationPlayed > 5) {
             if (ownsSqueezePoll(owner)) {
@@ -314,6 +323,11 @@ async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInf
       info.repeat === "Off" ? "none" : info.repeat === "One" ? "one" : "all";
     if (get(repeat) !== rep) repeat.set(rep);
 
+    // Arm delayed work only after this observation has been confirmed in the lane.
+    return () => updateSqueezeWatchdog(owner, info, playing, elapsed);
+}
+
+function updateSqueezeWatchdog(owner: SqueezePollOwner, info: SqueezePlayerInfo, playing: boolean, elapsed: number): void {
     // Watchdog: if LMS says "Playing" but the position is at/past the track
     // duration, the player hasn't realised the track ended (common on the
     // Eversolo and similar hardware for the last track of an album). Force
@@ -329,7 +343,7 @@ async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInf
     ) {
       if (pendingSqueezeForcedEnd === null) {
         const watchdogOwner = owner;
-        const publishWatchdog = observationSink?.();
+        const publishWatchdog = observationSink?.("watchdog");
         pendingSqueezeForcedEnd = setTimeout(() => {
           pendingSqueezeForcedEnd = null;
           const finish = async () => {

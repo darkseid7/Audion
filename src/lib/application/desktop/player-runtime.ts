@@ -53,6 +53,7 @@ import {
   setSqueezeVolumeCooldown,
   invalidateSqueezePollOwnership,
   captureSqueezeTargetOwnership,
+  reconcileSqueezeAcknowledgement,
 } from "$lib/stores/squeeze";
 import { isInListenLater, toggleListenLater } from "$lib/stores/listen-later";
 import {
@@ -683,7 +684,7 @@ export async function initAudioBackend(): Promise<void> {
   runtimeSubscriptions.push(wsStore.onMessage((type, payload) => {
     switch (type) {
       case "transfer_playback":
-        transferPlayback(payload);
+        void (transferSink ? transferSink(payload) : Promise.reject(new Error("Desktop transfer ingress is not ready"))).catch(console.error);
         break;
       case "remote_command":
         void handleRemoteCommand(payload).catch(console.error);
@@ -1844,7 +1845,7 @@ function _advanceQueueIndex(dry = false): number | null {
 export async function nextTrack(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) await runOwnedSqueeze(mac, () => squeezeNext(mac));
+    if (mac) await navigateSqueeze(mac, () => squeezeNext(mac));
     return;
   }
 
@@ -1927,7 +1928,7 @@ async function playRandomFromLibrary(): Promise<void> {
 export async function previousTrack(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) await runOwnedSqueeze(mac, () => squeezePrevious(mac));
+    if (mac) await navigateSqueeze(mac, () => squeezePrevious(mac));
     return;
   }
 
@@ -1991,7 +1992,7 @@ export async function seek(position: number): Promise<void> {
     const mac = get(activeSqueezePlayer);
     if (mac) {
       const posSeconds = position * get(duration);
-      await runOwnedSqueeze(mac, () => squeezeSeek(mac, posSeconds));
+      await navigateSqueeze(mac, () => squeezeSeek(mac, posSeconds));
     }
     return;
   }
@@ -2182,7 +2183,8 @@ export async function applyTrackEnd(): Promise<void> {
     }
     // nextAlbumId=null means: no next track (queue end) or next track has no album
     if (handleSleepTimerCheck(track, nextAlbumId, false)) {
-      // Timer fired — stop here, don't advance or repeat-one
+      // Timer fired — await the pause before confirming this completion.
+      await pause();
       return;
     }
   }
@@ -2594,7 +2596,9 @@ export async function removeFromQueue(index: number): Promise<void> {
   }
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
+  const sourceIndices = plan.queue.map((_, index) => index);
 
+  sourceIndices.splice(index, 1);
   plan.queue = ((q) => {
     const newQueue = [...q];
     newQueue.splice(index, 1);
@@ -2643,6 +2647,7 @@ export async function removeFromQueue(index: number): Promise<void> {
         q.map((t) => t.id),
         current.id,
         plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined,
+        sourceIndices,
       ));
     }
   }
@@ -2654,6 +2659,7 @@ export async function removeFromQueue(index: number): Promise<void> {
 export async function reorderQueue(fromIndex: number, toIndex: number): Promise<void> {
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
+  const sourceIndices = plan.queue.map((_, index) => index);
   const isShuffle = get(shuffle);
 
   if (fromIndex === toIndex) return;
@@ -2668,6 +2674,8 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
     return;
   }
 
+  const [source] = sourceIndices.splice(fromIndex, 1);
+  sourceIndices.splice(toIndex, 0, source);
   plan.queue = ((q) => {
     const newQueue = [...q];
     const [removed] = newQueue.splice(fromIndex, 1);
@@ -2737,6 +2745,7 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
         q.map((t) => t.id),
         current.id,
         plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined,
+        sourceIndices,
       ));
     }
   }
@@ -2748,7 +2757,9 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
 export async function clearUpcoming(): Promise<void> {
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
+  const sourceIndices = plan.queue.map((_, index) => index);
   plan.queue = ((q) => q.slice(0, currentIdx + 1))(plan.queue);
+  sourceIndices.splice(currentIdx + 1);
   plan.userQueueCount = 0; // Clear user queue count
 
   // Update shuffle: remove indices that are now out of bounds
@@ -2762,7 +2773,7 @@ export async function clearUpcoming(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     const current = get(currentTrack);
-    if (mac && current) await runOwnedSqueeze(mac, () => squeezeUpdateQueue(mac, plan.queue.map(t => t.id), current.id, plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined));
+    if (mac && current) await runOwnedSqueeze(mac, () => squeezeUpdateQueue(mac, plan.queue.map(t => t.id), current.id, plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined, sourceIndices));
   }
   commitQueuePlan(plan);
 }
@@ -3010,6 +3021,9 @@ function commitQueuePlan(plan: ReturnType<typeof readQueuePlan>): void {
   _schedulePreload();
 }
 
+let transferSink: ((payload: unknown) => Promise<void>) | undefined;
+export function bindDesktopTransfers(sink: typeof transferSink): void { transferSink = sink; }
+
 let commandSink: ((intent: import("../types").ApplicationIntent) => Promise<void>) | undefined;
 export function bindDesktopCommands(sink: typeof commandSink): void { commandSink = sink; }
 function emitDesktopCommand(intent: import("../types").ApplicationIntent, fallback: () => Promise<void>): void {
@@ -3018,6 +3032,21 @@ function emitDesktopCommand(intent: import("../types").ApplicationIntent, fallba
 
 async function runOwnedSqueeze(mac: string, operation: () => Promise<void>): Promise<void> {
   const owns = captureSqueezeTargetOwnership(mac);
-  await operation();
+  try { await operation(); } catch (error) {
+    if (String(error).includes("SQUEEZE_QUEUE_BUSY:")) {
+      throw new PlaybackFailure({ code: "unsupported", message: String(error), retryable: true });
+    }
+    throw error;
+  }
   if (!owns()) throw new PlaybackFailure({ code: "revision_conflict", message: "Squeeze output ownership changed", retryable: false }, "superseded", ["Previous Squeeze target acknowledged the operation"]);
+}
+
+async function navigateSqueeze(mac: string, operation: () => Promise<void>): Promise<void> {
+  await runOwnedSqueeze(mac, operation);
+  try {
+    await runOwnedSqueeze(mac, () => reconcileSqueezeAcknowledgement(mac));
+  } catch (error) {
+    if (error instanceof PlaybackFailure) throw error;
+    throw new PlaybackFailure({ code: "execution_failed", message: String(error), retryable: true }, "failed", ["Squeeze navigation acknowledged"]);
+  }
 }

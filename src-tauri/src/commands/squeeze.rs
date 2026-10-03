@@ -542,7 +542,7 @@ pub async fn squeeze_insert_queue(
     } else {
         position as usize
     };
-    player.queue.insert_tracks(tracks, position);
+    player.insert_queue(tracks, position);
 
     Ok(())
 }
@@ -553,6 +553,7 @@ pub async fn squeeze_update_queue(
     track_ids: Vec<i64>,
     current_track_id: i64,
     current_index: Option<usize>,
+    source_indices: Option<Vec<Option<usize>>>,
     state: State<'_, SqueezeState>,
     db: State<'_, Database>,
 ) -> Result<(), String> {
@@ -578,7 +579,7 @@ pub async fn squeeze_update_queue(
     let server = state.0.lock().await;
     let mut map = server.players.lock().await;
     let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-    player.queue.replace_queue_keep_current_at(tracks, current_track_id, current_index)?;
+    player.replace_queue(tracks, current_track_id, current_index, source_indices)?;
 
     Ok(())
 }

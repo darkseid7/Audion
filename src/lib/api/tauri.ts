@@ -1559,11 +1559,13 @@ export async function squeezeUpdateQueue(
   trackIds: number[],
   currentTrackId: number,
   currentIndex?: number,
+  sourceIndices?: (number | null)[],
 ): Promise<void> {
   return await invoke("squeeze_update_queue", {
     mac,
     trackIds,
     currentTrackId,
     currentIndex,
+    sourceIndices,
   });
 }

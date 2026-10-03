@@ -4,7 +4,7 @@ import { get } from "svelte/store";
 const api = vi.hoisted(() => ({ play: vi.fn(), stop: vi.fn(), tracks: vi.fn(), players: vi.fn() }));
 vi.mock("$lib/api/tauri", async importOriginal => ({
   ...await importOriginal<object>(),
-  getLikedTrackIds: vi.fn().mockResolvedValue([7]), squeezeGetPlayerState: vi.fn(), squeezeUpdateQueue: vi.fn().mockResolvedValue(undefined), squeezePause: vi.fn().mockResolvedValue(undefined), squeezePlay: api.play, squeezeStop: api.stop, squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined), getTracksByAlbum: api.tracks,
+  squeezeNext: vi.fn().mockResolvedValue(undefined), squeezePrevious: vi.fn().mockResolvedValue(undefined), squeezeSeek: vi.fn().mockResolvedValue(undefined), getLikedTrackIds: vi.fn().mockResolvedValue([7]), squeezeGetPlayerState: vi.fn(), squeezeUpdateQueue: vi.fn().mockResolvedValue(undefined), squeezePause: vi.fn().mockResolvedValue(undefined), squeezePlay: api.play, squeezeStop: api.stop, squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined), getTracksByAlbum: api.tracks,
   squeezeGetPlayers: api.players, getTrackById: async (id: number) => ({ id, title: `Track ${id}`, duration: 100, cover_url: "fixture" }),
 }));
 import { createDesktopAdapter } from "./adapter";
@@ -102,7 +102,7 @@ it("preserves the playing occurrence when an earlier duplicate is removed", asyn
   const adapter = createDesktopAdapter();
   const [firstEntry, secondEntry] = adapter.state.read().queue;
   expect((await adapter.port.execute({ type: "queue_remove", entryId: firstEntry.entryId }, { hostEpoch: adapter.state.read().hostEpoch })).status).toBe("applied");
-  expect(squeezeUpdateQueue).toHaveBeenCalledWith("A", [7], 7, 0);
+  expect(squeezeUpdateQueue).toHaveBeenCalledWith("A", [7], 7, 0, [1]);
   expect(adapter.state.read().queue.map(item => item.entryId)).toEqual([secondEntry.entryId]);
   expect(get(state.queueIndex)).toBe(0);
   await adapter.dispose();
@@ -154,5 +154,92 @@ it("keeps legacy cloud ownership explicit in the internal host state", async () 
   state.activeBackend.set("remote");
   const adapter = createDesktopAdapter();
   expect(adapter.state.read().selectedOutput).toMatchObject({ kind: "desktop_only" });
+  await adapter.dispose();
+});
+
+it.each(["track_end", "album_end"] as const)("awaits %s completion pause before confirming, without advancing", async mode => {
+  const { armTrackEndTimer, armAlbumEndTimer, stopSleepTimer } = await import("$lib/stores/sleepTimer");
+  const { squeezePause } = await import("$lib/api/tauri");
+  const track = { id: 7, album_id: 1, duration: 100, cover_url: "fixture" } as any;
+  state.queue.set([track, { ...track, id: 8, album_id: 2 }]); state.currentTrack.set(track);
+  state.isPlaying.set(true); commitSqueezeTarget("A");
+  const adapter = createDesktopAdapter();
+  let acknowledge!: () => void;
+  vi.mocked(squeezePause).mockClear().mockReturnValueOnce(new Promise(resolve => { acknowledge = resolve; }));
+  mode === "track_end" ? armTrackEndTimer() : armAlbumEndTimer(1);
+  const owner = adapter.state.read();
+  let settled = false;
+  const pending = adapter.coordinator.enqueueSignal({ kind: "completion", output: owner.selectedOutput, ownershipGeneration: owner.ownershipGeneration, transitionGeneration: owner.transitionGeneration }).finally(() => { settled = true; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(squeezePause).toHaveBeenCalledExactlyOnceWith("A");
+    expect(settled).toBe(false); expect(get(state.isPlaying)).toBe(true);
+    expect(get(state.queueIndex)).toBe(0);
+    acknowledge(); await pending;
+    expect(get(state.isPlaying)).toBe(false); expect(api.play).not.toHaveBeenCalled();
+  } finally { acknowledge?.(); await pending; stopSleepTimer(false); await adapter.dispose(); }
+});
+
+it.each(["track_end", "album_end"] as const)("surfaces %s completion pause rejection without false confirmation", async mode => {
+  const { armTrackEndTimer, armAlbumEndTimer, stopSleepTimer } = await import("$lib/stores/sleepTimer");
+  const { squeezePause } = await import("$lib/api/tauri");
+  const track = { id: 7, album_id: 1, duration: 100, cover_url: "fixture" } as any;
+  state.queue.set([track]); state.currentTrack.set(track); state.isPlaying.set(true); commitSqueezeTarget("A");
+  const adapter = createDesktopAdapter();
+  vi.mocked(squeezePause).mockRejectedValueOnce(new Error("pause refused"));
+  mode === "track_end" ? armTrackEndTimer() : armAlbumEndTimer(1);
+  const owner = adapter.state.read();
+  try {
+    await expect(adapter.coordinator.enqueueSignal({ kind: "completion", output: owner.selectedOutput, ownershipGeneration: owner.ownershipGeneration, transitionGeneration: owner.transitionGeneration })).rejects.toThrow("pause refused");
+    expect(get(state.isPlaying)).toBe(true); expect(get(state.queueIndex)).toBe(0); expect(api.play).not.toHaveBeenCalled();
+  } finally { stopSleepTimer(false); await adapter.dispose(); }
+});
+
+it.each([false, true])("keeps a watchdog alive through its own sample commit, replaced=%s", async replaced => {
+  vi.useFakeTimers();
+  const { initializeSqueeze, resetSqueezePollingForTests } = await import("$lib/stores/squeeze");
+  const { squeezeGetPlayerState } = await import("$lib/api/tauri");
+  const track = { id: 7, duration: 100, cover_url: "fixture" } as any;
+  state.queue.set([track]); state.currentTrack.set(null); state.duration.set(100);
+  commitSqueezeTarget("A");
+  const adapter = createDesktopAdapter();
+  vi.mocked(squeezeGetPlayerState).mockResolvedValue({ mac: "A", name: "A", state: "Playing", capabilities: "", current_track: track, elapsed_ms: 100000, volume: 70, repeat: "Off", shuffle: false, queue_length: 1, queue_position: 0, current_queue_index: 0 });
+  const cleanup = initializeSqueeze();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get(state.currentTrack)?.id).toBe(7);
+    if (replaced) {
+      await adapter.port.execute({ type: "play_album", albumId: 1, playMode: "all" }, { hostEpoch: adapter.state.read().hostEpoch });
+      // Withhold subsequent samples: only the original watchdog may run.
+      vi.mocked(squeezeGetPlayerState).mockReturnValue(new Promise(() => {}));
+    }
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(api.stop).toHaveBeenCalledTimes(replaced ? 0 : 1);
+  } finally { cleanup(); resetSqueezePollingForTests(); await adapter.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["next", "previous", "seek"] as const)("reconciles acknowledged Squeeze %s before the next queue edit without polling", async type => {
+  const native = await import("$lib/api/tauri");
+  const track = { id: 7, duration: 100, cover_url: "fixture" } as any;
+  const next = { ...track, id: 8 };
+  state.queue.set([track, next]); state.queueIndex.set(0); state.currentTrack.set(track); state.currentTime.set(20); state.duration.set(100);
+  commitSqueezeTarget("A");
+  vi.mocked(native.squeezeGetPlayerState).mockResolvedValue({ mac: "A", name: "A", state: "Playing", capabilities: "", current_track: next, elapsed_ms: 30000, volume: 70, repeat: "Off", shuffle: false, queue_length: 2, queue_position: 1, current_queue_index: 1 });
+  const adapter = createDesktopAdapter();
+  const context = () => ({ hostEpoch: adapter.state.read().hostEpoch });
+  const result = await adapter.port.execute(type === "seek" ? { type, seconds: 30 } : { type }, context());
+  expect(result.status).toBe("applied");
+  const removed = await adapter.port.execute({ type: "queue_remove", entryId: adapter.state.read().queue[1].entryId }, context());
+  expect(removed).toMatchObject({ status: "failed", error: { code: "unsupported" } });
+  expect(get(state.currentTrack)?.id).toBe(8); expect(get(state.queueIndex)).toBe(1); expect(get(state.currentTime)).toBe(30);
+  await adapter.dispose();
+});
+
+it("discloses acknowledged navigation when its authoritative state read fails", async () => {
+  const { squeezeGetPlayerState } = await import("$lib/api/tauri");
+  commitSqueezeTarget("A"); const adapter = createDesktopAdapter();
+  vi.mocked(squeezeGetPlayerState).mockRejectedValueOnce(new Error("state unavailable"));
+  const result = await adapter.port.execute({ type: "next" }, { hostEpoch: adapter.state.read().hostEpoch });
+  expect(result).toMatchObject({ status: "failed", partialEffects: ["Squeeze navigation acknowledged"] });
   await adapter.dispose();
 });

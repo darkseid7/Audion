@@ -282,3 +282,30 @@ it.each([true, false])("rejects removing the active Squeeze occurrence before ef
   expect(squeezeUpdateQueue).not.toHaveBeenCalled();
   activeBackend.set("none"); activeSqueezePlayer.set(null);
 });
+
+it("sends exact source indices for repeated-entry reorder and removal", async () => {
+  const { reorderQueue, removeFromQueue, clearUpcoming, queueIndex } = await import("$lib/application/desktop/player-runtime");
+  const { squeezeUpdateQueue } = await import("$lib/api/tauri");
+  const repeated = { id: 7 } as any;
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  queue.set([repeated, repeated, repeated]); queueIndex.set(2); currentTrack.set(repeated);
+  await reorderQueue(2, 0);
+  expect(squeezeUpdateQueue).toHaveBeenLastCalledWith("A", [7, 7, 7], 7, 0, [2, 0, 1]);
+  await removeFromQueue(2);
+  expect(squeezeUpdateQueue).toHaveBeenLastCalledWith("A", [7, 7], 7, 0, [0, 1]);
+  await clearUpcoming();
+  expect(squeezeUpdateQueue).toHaveBeenLastCalledWith("A", [7], 7, 0, [0]);
+  activeBackend.set("none"); activeSqueezePlayer.set(null);
+});
+
+it("reports buffered-occurrence removal as retryable unsupported without committing the plan", async () => {
+  const { removeFromQueue, queueIndex } = await import("$lib/application/desktop/player-runtime");
+  const { squeezeUpdateQueue } = await import("$lib/api/tauri");
+  const original = [{ id: 7 } as any, { id: 7 } as any];
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  queue.set(original); queueIndex.set(0); currentTrack.set(original[0]);
+  vi.mocked(squeezeUpdateQueue).mockRejectedValueOnce("SQUEEZE_QUEUE_BUSY: buffered occurrence cannot be removed");
+  await expect(removeFromQueue(1)).rejects.toMatchObject({ controlError: { code: "unsupported", retryable: true }, partialEffects: [] });
+  expect(get(queue)).toBe(original);
+  activeBackend.set("none"); activeSqueezePlayer.set(null);
+});
