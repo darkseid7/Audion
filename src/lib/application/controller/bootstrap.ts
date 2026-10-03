@@ -82,11 +82,15 @@ export async function pairController(): Promise<void> {
     const session = active;
     if (!session)
         return;
-    const host = await session.pairController();
-    if (active !== session || !host)
+    const receipt = await session.pairController(host => {
+        if (active !== session)
+            return;
+        known = [host, ...known.filter(h => h !== host)].slice(0, 32);
+        savePreferences();
+    });
+    if (active !== session || !receipt?.isCurrent())
         return;
-    known = [host, ...known.filter(h => h !== host)].slice(0, 32);
-    selected = host;
+    selected = receipt.hostId;
     savePreferences();
 }
 /** Only local UI preferences and a native scope: no music DB, engine or queue restoration. */

@@ -26,6 +26,10 @@ export interface ControllerNativeBridge {
     poll(fence: NativeControllerFence, cursor: EventCursor): Promise<EventBatch>;
     media(fence: NativeControllerFence, reference: ArtworkReference): Promise<NativeImage>;
 }
+interface ControllerConnectionReceipt {
+    readonly hostId: string;
+    isCurrent(): boolean;
+}
 export interface ControllerState {
     currentHostId: string | null;
     snapshot: HostSnapshot | null;
@@ -164,7 +168,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             }
         }
     }
-    async function connectController(hostId: string, reset = true): Promise<void> {
+    async function connectController(hostId: string, reset = true): Promise<ControllerConnectionReceipt | undefined> {
         const g = invalidate();
         if (reset)
             attempts = 0;
@@ -174,6 +178,8 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             const snapshot = await native.connect(hostId, f);
             adopt(snapshot, hostId, g);
             void polling(g, f);
+            // The consumer must check ownership again at its eventual side effect.
+            return { hostId, isCurrent: () => g === generation };
         }
         catch (error) {
             disconnected(error, g);
@@ -191,7 +197,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         publish({ currentHostId: null, status: "disconnected" });
         await native.forget(hostId, await fence(g));
     }
-    async function pairController(): Promise<string | undefined> {
+    async function pairController(onPaired: (hostId: string) => void = () => {}): Promise<ControllerConnectionReceipt | undefined> {
         const g = invalidate();
         publish({ status: "pairing" });
         try {
@@ -204,8 +210,10 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             }
             const paired = await native.pair(f, "Android controller");
             current(g);
-            await connectController(paired.hostId);
-            return paired.hostId;
+            // Catalog membership is committed before connection, independently of selection.
+            onPaired(paired.hostId);
+            current(g);
+            return await connectController(paired.hostId);
         }
         catch (error) {
             disconnected(error, g);

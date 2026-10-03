@@ -180,3 +180,78 @@ it("keeps the shared streaming classifier passive and preserves local/provider p
   expect(sliderToAudioVolume(0.5)).toBe(0.25);
   expect(audioVolumeToSlider(0.25)).toBe(0.5);
 });
+
+// Exercise actual session ownership and preference persistence through the closed IPC facade.
+describe("post-pair selection ownership", () => {
+  const hostA = "11111111-1111-4111-8111-111111111111";
+  const hostB = "22222222-2222-4222-8222-222222222222";
+  const snapshot = (hostId: string): import("./types").HostSnapshot => ({
+    hostId, hostEpoch: "epoch", revision: 0,
+    revisions: { libraryRevision: 1, queueRevision: 1, outputRevision: 1, settingsRevision: 0 },
+    playback: { status: "paused", track: null, context: null, position: 0, duration: null, volume: 0.5, shuffle: false, repeat: "none" },
+    queue: { count: 0, currentEntryId: null }, output: { kind: "pc" }, outputs: [],
+    capabilities: { queries: ["snapshot"], intents: ["pause"] }, settings: {}, jobs: [],
+  });
+
+  it.each(["switch", "suspend", "forget", "complete"] as const)("preserves persisted and resume selection after %s during post-pair connect", async intent => {
+    const records = new Map([["audion_controller_hosts", JSON.stringify({ known: [hostB], selected: hostB })]]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => records.get(key) ?? null,
+      setItem: (key: string, value: string) => { records.set(key, value); },
+    });
+    const visibility = Object.assign(new EventTarget(), { visibilityState: "visible" });
+    vi.stubGlobal("document", visibility);
+    const prefs = () => JSON.parse(records.get("audion_controller_hosts")!);
+    let release!: (value: unknown) => void;
+    const held = new Promise(resolve => { release = resolve; });
+    const connections: string[] = [];
+    const { invoke } = await import("@tauri-apps/api/core");
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const input = args as { request?: { type: string; hostId: string } };
+      if (command === "controller_connection") {
+        if (input.request?.type === "begin_scope") return { type: "scope", scopeId: "pairing-test-scope" };
+        if (input.request?.type === "connect") {
+          const hostId = input.request.hostId;
+          connections.push(hostId);
+          if (hostId === hostA && connections.filter(id => id === hostA).length === 1) return held;
+          return { type: "connected", snapshot: snapshot(hostId) };
+        }
+      }
+      if (command === "controller_scan_pair") return { status: "invitation_ready" };
+      if (command === "controller_pair") return { hostId: hostA };
+      if (command === "controller_suspend" || command === "controller_forget") return;
+      if (command === "controller_request" && input.request?.type === "poll") return new Promise(() => {});
+      throw new Error(`Unexpected IPC: ${command}`);
+    });
+    const controller = await import("./controller/bootstrap");
+    const handle = await controller.bootstrapController();
+    try {
+      await vi.waitFor(() => expect(get(controller.controllerState).ready).toBe(true));
+      const pairing = controller.pairController();
+      await vi.waitFor(() => expect(connections).toEqual([hostB, hostA]));
+      if (intent === "switch") await controller.connectController(hostB);
+      else if (intent === "suspend") controller.suspendController();
+      else if (intent === "forget") await controller.forgetController(hostA);
+      const before = get(controller.controllerState);
+      release({ type: "connected", snapshot: snapshot(hostA) });
+      await pairing;
+      if (intent === "complete") expect(get(controller.controllerState)).toMatchObject({ ready: true, currentHostId: hostA });
+      else expect(get(controller.controllerState)).toEqual(before);
+      const selected = intent === "complete" ? hostA : hostB;
+      expect(prefs().selected).toBe(selected);
+      expect(prefs().known).toEqual(intent === "forget" ? [hostB] : [hostA, hostB]);
+      expect(get(controller.pairedHostIds)).toEqual(prefs().known);
+      visibility.visibilityState = "hidden";
+      visibility.dispatchEvent(new Event("visibilitychange"));
+      visibility.visibilityState = "visible";
+      visibility.dispatchEvent(new Event("visibilitychange"));
+      await vi.waitFor(() => expect(get(controller.controllerState)).toMatchObject({ ready: true, currentHostId: selected }));
+      expect(connections.at(-1)).toBe(selected);
+    } finally {
+      await handle.dispose();
+      await Promise.resolve();
+      vi.mocked(invoke).mockImplementation(original);
+    }
+  });
+});

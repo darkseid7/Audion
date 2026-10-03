@@ -194,3 +194,35 @@ it("library events dispose late media from the previous revision", async () => {
     expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:old-revision");
     s.suspendController();
 });
+
+it.each(["switch", "suspend", "forget"] as const)("held post-pair connect cannot own selection after %s", async (intent) => {
+    const n = bridge(), held = deferred<HostSnapshot>();
+    n.scan.mockResolvedValue({ status: "invitation_ready" });
+    n.pair.mockResolvedValue({ hostId: "one" });
+    n.connect.mockImplementation(async host => host === "one" ? held.promise : snapshot(host));
+    const s = createControllerSession(n);
+    const pending = s.pairController();
+    await vi.waitFor(() => expect(n.connect).toHaveBeenCalledOnce());
+    if (intent === "switch") await s.connectController("two");
+    else if (intent === "suspend") s.suspendController();
+    else await s.forgetController("one");
+    const before = get(s.state);
+    held.resolve(snapshot("one"));
+    expect(await pending).toBeUndefined();
+    expect(get(s.state)).toEqual(before);
+    s.suspendController();
+});
+
+it("pairing receipt retains connection ownership until the consumer commits selection", async () => {
+    const n = bridge();
+    n.scan.mockResolvedValue({ status: "invitation_ready" });
+    n.pair.mockResolvedValue({ hostId: "one" });
+    const catalog = vi.fn(() => expect(n.connect).not.toHaveBeenCalled());
+    const s = createControllerSession(n);
+    const receipt = await s.pairController(catalog);
+    expect(catalog).toHaveBeenCalledExactlyOnceWith("one");
+    expect(receipt?.hostId).toBe("one");
+    expect(receipt?.isCurrent()).toBe(true);
+    s.suspendController();
+    expect(receipt?.isCurrent()).toBe(false);
+});
