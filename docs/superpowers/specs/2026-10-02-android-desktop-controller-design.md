@@ -1,6 +1,6 @@
 # Android desktop controller design
 
-Date: 2026-10-02. Status: written design awaiting user review. The user approved proceeding from the architectural discussion to this document. Implementation planning and product changes require separate approval.
+Date: 2026-10-02. Status: written design approved by the user for implementation planning. The implementation plan and execution method still require review before product changes.
 
 ## Purpose and confirmed requirements
 
@@ -10,7 +10,7 @@ The primary workflow is to browse the PC's albums on a tablet, choose an album, 
 
 The controller connection is LAN-only: no cloud relay, account requirement, router port forwarding, or automatic port mapping. Existing desktop features that contact online metadata or music providers may continue to do so on the PC; the controller connection itself does not depend on those providers.
 
-The following sections propose the concrete design for written approval. They do not describe functionality already implemented.
+The following sections record the approved design. They do not describe functionality already implemented.
 
 ## Existing code and reusable foundations
 
@@ -148,4 +148,4 @@ Verification must cross the application interface and include both desktop adapt
 
 ## Review gate
 
-Approve or revise this written design before producing the implementation plan. No product code, dependencies, Android package or desktop build has been changed by this design document.
+The user approved this written design for the [implementation plan](../plans/2026-10-02-android-desktop-controller.md). Review that plan and select an execution method before product changes. No product code, dependencies, Android package or desktop build has been changed by these documents.

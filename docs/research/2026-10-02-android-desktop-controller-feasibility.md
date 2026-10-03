@@ -1,6 +1,6 @@
 # Android desktop controller feasibility review
 
-Date: 2026-10-02. Status: source investigation. The architecture conversation has since been approved for [written design drafting](../superpowers/specs/2026-10-02-android-desktop-controller-design.md); that specification awaits user review and is not an approved implementation plan.
+Date: 2026-10-02. Status: source investigation. The [written design](../superpowers/specs/2026-10-02-android-desktop-controller-design.md) has since been approved for implementation planning; the plan and execution method still require user review.
 
 ## Requested outcome
 
@@ -10,7 +10,7 @@ Source inspection supports the feasibility of this architecture, but it is not a
 
 ## Confirmed product scope
 
-The user confirmed LAN-only operation, without cloud dependency or router port forwarding, and authorized-device pairing. The shared desktop design and functionality must adapt responsively to both phones and tablets; this is not a requirement to shrink the literal desktop window onto every screen. The desktop executes domain work and owns application state; the Android extension sends commands and displays confirmed state. These product constraints are approved. The subsequent architecture conversation is approved for written design drafting; the written specification and execution plan still require their own review.
+The user confirmed LAN-only operation, without cloud dependency or router port forwarding, and authorized-device pairing. The shared desktop design and functionality must adapt responsively to both phones and tablets; this is not a requirement to shrink the literal desktop window onto every screen. The desktop executes domain work and owns application state; the Android extension sends commands and displays confirmed state. These product constraints and the written design are approved. The execution plan still requires its own review and an execution-method selection.
 
 ## Inspected revisions and limits
 
@@ -68,13 +68,13 @@ The shared Svelte views and presentation stores can be reused. However, Android 
 
 ## Recommended direction
 
-This is a proposed direction, not an approved implementation design. Keep one shared UI and place a desktop control module behind a typed interface for high-level commands, queries, and state subscriptions. A desktop adapter executes the existing host operations; an Android adapter sends intent and mirrors the host's confirmed state. Desktop execution may remain in existing TypeScript or Rust modules; moving everything to Rust is not a prerequisite.
+This direction is supported by the source review and has since been developed into the approved written design. Keep one shared UI and place a desktop control module behind a typed interface for high-level commands, queries, and state subscriptions. A desktop adapter executes the existing host operations; an Android adapter sends intent and mirrors the host's confirmed state. Desktop execution may remain in existing TypeScript or Rust modules; moving everything to Rust is not a prerequisite.
 
 The desktop remains the authority for library, queue, playback and selected output, metadata, application settings, and plugin execution. The APK retains only presentation state, connection credentials, and non-authoritative display caches. It must not initialize independent scanning, audio playback, plugin execution, cloud data merges, or its own authoritative music database. Covers should be served through authorized resource identifiers/URLs instead of converting desktop filesystem paths in the phone's Tauri runtime; see [tauri.ts lines 454 to 479](C:/Users/olive/Documents/GitHub/Audion/src/lib/api/tauri.ts).
 
 Use desktop track IDs and explicit operation types, not a network endpoint that blindly exposes every Tauri command. Folder selection, destructive file actions, backups, plugin installation, and OS-specific operations need deliberate host-side workflows and authorization. Selecting a music directory must select the PC's directory, not the phone's storage.
 
-The confirmed scope is LAN-only, so direct desktop connectivity is the recommended direction. The existing cloud relay is not part of the proposed controller path. Internet access and router port forwarding are out of scope. LAN scope still requires pairing, authorization, and deliberate connection security; exposing the existing unauthenticated Squeeze listener is not a substitute. Specific transport and pairing details remain part of the unapproved architecture design.
+The confirmed scope is LAN-only, so direct desktop connectivity is the recommended direction. The existing cloud relay is not part of the controller path. An Internet-dependent controller connection and router port forwarding are out of scope. LAN scope still requires pairing, authorization, and deliberate connection security; exposing the existing unauthenticated Squeeze listener is not a substitute. Specific transport and pairing details are recorded in the approved design; implementation still requires plan review.
 
 ## Candidate milestones
 
@@ -88,4 +88,4 @@ These milestones describe the work order, not approved tasks or a promise of com
 
 ## Open decisions
 
-LAN-only scope and responsive phone/tablet presentation are confirmed. The next step is review of the proposed desktop control module and shared local/remote interface. Pairing behavior, host-side workflows for OS-specific or destructive actions, and the written design still require approval before an implementation plan is prepared. No product-code change, build, or end-to-end success claim is made by this review.
+LAN-only scope and responsive phone/tablet presentation are confirmed, and the written design has been approved. The [implementation plan](../superpowers/plans/2026-10-02-android-desktop-controller.md) now specifies pairing, host-side workflows and execution tasks; it requires review and execution-method selection. No product-code change, build, or end-to-end success claim is made by this review.
