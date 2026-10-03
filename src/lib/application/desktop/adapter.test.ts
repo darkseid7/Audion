@@ -243,3 +243,56 @@ it("discloses acknowledged navigation when its authoritative state read fails", 
   expect(result).toMatchObject({ status: "failed", partialEffects: ["Squeeze navigation acknowledged"] });
   await adapter.dispose();
 });
+
+it.each([
+  { type: "next", duplicate: false, elapsed: 20, records: 1 },
+  { type: "previous", duplicate: false, elapsed: 20, records: 1 },
+  { type: "next", duplicate: true, elapsed: 20, records: 1 },
+  { type: "previous", duplicate: true, elapsed: 20, records: 1 },
+  { type: "seek", duplicate: true, elapsed: 20, records: 0 },
+  { type: "next", duplicate: false, elapsed: 5.9, records: 0 },
+  { type: "next", duplicate: false, elapsed: 6, records: 1 },
+] as const)("preserves navigation accounting once: $type duplicate=$duplicate elapsed=$elapsed", async ({ type, duplicate, elapsed, records }) => {
+  vi.useFakeTimers();
+  const { recordTrackPlay } = await import("$lib/stores/activity");
+  const library = await import("$lib/stores/library");
+  const increment = vi.spyOn(library, "incrementPlayCount").mockImplementation(() => {});
+  const { squeezeGetPlayerState, squeezePause } = await import("$lib/api/tauri");
+  const { initializeSqueeze, resetSqueezePollingForTests } = await import("$lib/stores/squeeze");
+  const { armTrackEndTimer, isTimerModeTrackOrAlbumEnd, stopSleepTimer } = await import("$lib/stores/sleepTimer");
+  const tracks = [{ id: 71, album_id: 44, duration: 100, cover_url: "fixture" }, { id: duplicate ? 71 : 72, album_id: 44, duration: 100, cover_url: "fixture" }] as any;
+  const from = type === "previous" ? 1 : 0;
+  const to = type === "seek" ? from : 1 - from;
+  state.queue.set(tracks); state.queueIndex.set(from); state.currentTrack.set(tracks[from]);
+  state.currentTime.set(elapsed); state.duration.set(100); state.isPlaying.set(true);
+  commitSqueezeTarget("A");
+  vi.mocked(recordTrackPlay).mockClear(); vi.mocked(squeezePause).mockClear();
+  vi.mocked(squeezeGetPlayerState).mockResolvedValue({ mac: "A", name: "A", state: "Playing", capabilities: "", current_track: tracks[to], elapsed_ms: type === "seek" ? 30000 : 1000, volume: 70, repeat: "Off", shuffle: false, queue_length: 2, queue_position: to, current_queue_index: to });
+  const adapter = createDesktopAdapter();
+  armTrackEndTimer();
+  let cleanup: (() => void) | undefined;
+  const assertAccounting = () => {
+    expect(recordTrackPlay).toHaveBeenCalledTimes(records);
+    expect(increment).toHaveBeenCalledTimes(records);
+    if (records) {
+      expect(recordTrackPlay).toHaveBeenCalledWith(tracks[from].id, 44, Math.floor(elapsed));
+      expect(increment).toHaveBeenCalledWith(tracks[from].id);
+    }
+  };
+  try {
+    const result = await adapter.port.execute(type === "seek" ? { type, seconds: 30 } : { type }, { hostEpoch: adapter.state.read().hostEpoch });
+    expect(result.status).toBe("applied");
+    expect(get(state.queueIndex)).toBe(to);
+    assertAccounting();
+    // Identical later samples cannot lose or duplicate the departed occurrence's account.
+    cleanup = initializeSqueeze();
+    await vi.advanceTimersByTimeAsync(500);
+    assertAccounting();
+    expect(isTimerModeTrackOrAlbumEnd()).toBe(true);
+    expect(squeezePause).not.toHaveBeenCalled();
+    expect(api.play).not.toHaveBeenCalled();
+  } finally {
+    cleanup?.(); resetSqueezePollingForTests(); stopSleepTimer(false);
+    await adapter.dispose(); increment.mockRestore(); vi.useRealTimers();
+  }
+});

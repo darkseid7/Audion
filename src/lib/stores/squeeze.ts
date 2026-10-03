@@ -221,11 +221,11 @@ export async function reconcileSqueezeAcknowledgement(mac: string): Promise<void
   const owner = captureSqueezePollOwner(mac);
   const info = await squeezeGetPlayerState(mac);
   if (!ownsSqueezePoll(owner)) throw new Error("Squeeze ownership changed during acknowledgement");
-  // Manual navigation is not a natural completion. The next poll may arm a watchdog.
-  await applySqueezeState(owner, info, false);
+  // Reconcile occurrence accounting now; only a later poll may arm natural-end work.
+  await applySqueezeState(owner, info);
 }
 
-async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInfo, recordNaturalTransition = true): Promise<void | (() => void)> {
+async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInfo): Promise<void | (() => void)> {
     squeezePlayerState.set(info);
 
     const playing = info.state === "Playing";
@@ -273,9 +273,9 @@ async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInf
 
       // Update when track changed, or when same track can be enriched with local metadata.
       if (!sameTrack || canUpgradeFromLocal) {
-        // In squeeze mode, track transitions are driven by state polling, not native/html5 end events.
-        // Record the previous track play when we detect a real track-id change.
-        if (recordNaturalTransition && !sameTrack && prevTrack) {
+        // Account the departed occurrence for both polling and command acknowledgements.
+        // This is history/count bookkeeping, not natural completion or timer dispatch.
+        if (!sameTrack && prevTrack) {
           const durationPlayed = Math.floor(prevElapsed);
           if (durationPlayed > 5) {
             if (ownsSqueezePoll(owner)) {
