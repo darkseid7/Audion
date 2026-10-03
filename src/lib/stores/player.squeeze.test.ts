@@ -193,3 +193,14 @@ it("disposes runtime subscriptions before a subsequent desktop startup", async (
   cleanupPlayer();
   vi.unstubAllGlobals();
 });
+
+
+it("shares pure playback helper identities between facade and runtime", async () => {
+  const helper = await import("$lib/application/playback-helpers");
+  const facade = await import("./player");
+  const runtime = await import("$lib/application/desktop/player-runtime");
+  expect(facade.isStreaming).toBe(helper.isStreaming);
+  expect(runtime.isStreaming).toBe(helper.isStreaming);
+  expect(facade.sliderToAudioVolume).toBe(runtime.sliderToAudioVolume);
+  expect(facade.audioVolumeToSlider).toBe(runtime.audioVolumeToSlider);
+});

@@ -152,3 +152,25 @@ it("rejects legacy playTrack options instead of silently dropping them from a ty
   expect(execute).not.toHaveBeenCalled();
   uninstall();
 });
+
+
+it("keeps the shared streaming classifier passive and preserves local/provider precedence", async () => {
+  const { isStreaming, sliderToAudioVolume, audioVolumeToSlider } = await import("./playback-helpers");
+  const cases = [
+    [{ path: "https://host/song", source_type: "local" }, false],
+    [{ path: "https://host/song", local_src: "C:/song.flac", source_type: "provider" }, false],
+    [{ path: "file://song", source_type: "provider" }, false],
+    [{ path: "asset://song", source_type: "provider" }, false],
+    [{ path: "tauri://song", source_type: "provider" }, false],
+    [{ path: "https://host/song" }, true],
+    [{ path: "http://host/song" }, true],
+    [{ path: "provider://song", source_type: "provider" }, true],
+    [{ path: "C:/song.flac" }, false],
+    [{ path: "blob:track" }, false],
+  ] as const;
+  for (const [track, expected] of cases) {
+    expect(isStreaming(track as import("$lib/api/tauri").Track)).toBe(expected);
+  }
+  expect(sliderToAudioVolume(0.5)).toBe(0.25);
+  expect(audioVolumeToSlider(0.25)).toBe(0.5);
+});

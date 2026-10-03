@@ -1,3 +1,4 @@
+export { isStreaming, sliderToAudioVolume, audioVolumeToSlider } from "$lib/application/playback-helpers";
 /** Shared typed facade. Never import the desktop runtime here. */
 import { get } from "svelte/store";
 import { getApplicationPort } from "$lib/application/port";
@@ -55,30 +56,6 @@ export function isAlbumPlaying(albumId: number): boolean {
 export function isArtistPlaying(artistName: string): boolean {
   const ctx = get(playbackContext);
   return ctx?.type === "artist" && ctx.artistName === artistName;
-}
-export const sliderToAudioVolume = (value: number) => Math.pow(value, 2);
-export const audioVolumeToSlider = (value: number) => Math.sqrt(value);
-export function isStreaming(track: Track): boolean {
-    // 1. Explicitly local sources (by type or path)
-    if (track.source_type === "local" || track.local_src)
-        return false;
-    if (track.path) {
-        // Tauri local protocols are always local
-        if (track.path.startsWith("file://") ||
-            track.path.startsWith("asset://") ||
-            track.path.startsWith("tauri://")) {
-            return false;
-        }
-        // Explicitly streaming protocols
-        if (track.path.startsWith("http://") || track.path.startsWith("https://")) {
-            return true;
-        }
-    }
-    // 3. Known external source types (Tidal, etc.)
-    if (track.source_type && track.source_type !== "local")
-        return true;
-    // 4. Default to local for anything else (safer for absolute paths)
-    return false;
 }
 export function selectThisDevice(): void { unavailable(); }
 export function toggleRemoteControl(_device: import("./websocket").RemoteDevice): void { unavailable(); }

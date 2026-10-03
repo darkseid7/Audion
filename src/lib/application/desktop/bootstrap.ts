@@ -96,15 +96,18 @@ async function stop(): Promise<void> {
 }
 /** Shared desktop resources remain alive until their last handle is released. */
 export async function bootstrapDesktop(): Promise<ApplicationHandle> {
-    await shutdown;
+    // Reserve synchronously: awaiting even a resolved promise must not open
+    // a gap where the previous handle can become the last owner.
     owners += 1;
-    startup ??= start();
     try {
+        await shutdown;
+        startup ??= start();
         await startup;
     }
     catch (error) {
         if (--owners === 0) {
-            shutdown = stop();
+            // Publish the teardown barrier before any cleanup callback can re-enter.
+            shutdown = shutdown.then(stop);
             await shutdown;
         }
         throw error;
@@ -118,7 +121,8 @@ export async function bootstrapDesktop(): Promise<ApplicationHandle> {
                 return;
             disposed = true;
             if (--owners === 0) {
-                shutdown = stop();
+                // Publish the teardown barrier before any cleanup callback can re-enter.
+                shutdown = shutdown.then(stop);
                 await shutdown;
             }
         },

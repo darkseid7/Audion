@@ -1,3 +1,5 @@
+import { isStreaming, sliderToAudioVolume, audioVolumeToSlider } from "../playback-helpers";
+export { isStreaming, sliderToAudioVolume, audioVolumeToSlider } from "../playback-helpers";
 import { disconnectSqueezePlayer } from "$lib/stores/squeeze";
 import type { RemoteDevice } from "$lib/stores/websocket";
 import { playbackStateWriter, pluginEvents, currentPlaylistId, currentAlbumId, currentArtistName, currentTrackId, progress, type PlaybackContext, type ActiveBackend } from "$lib/stores/playback-state";
@@ -436,35 +438,6 @@ function setupHtml5AudioListeners(audio: HTMLAudioElement): void {
   });
 }
 
-/**
- * Detect if a track needs HTML5 streaming or native local playback
- */
-export function isStreaming(track: Track): boolean {
-  // 1. Explicitly local sources (by type or path)
-  if (track.source_type === "local" || track.local_src) return false;
-
-  if (track.path) {
-    // Tauri local protocols are always local
-    if (
-      track.path.startsWith("file://") ||
-      track.path.startsWith("asset://") ||
-      track.path.startsWith("tauri://")
-    ) {
-      return false;
-    }
-    // Explicitly streaming protocols
-    if (track.path.startsWith("http://") || track.path.startsWith("https://")) {
-      return true;
-    }
-  }
-
-  // 3. Known external source types (Tidal, etc.)
-  if (track.source_type && track.source_type !== "local") return true;
-
-  // 4. Default to local for anything else (safer for absolute paths)
-  return false;
-}
-
 // =============================================================================
 // PLAYLIST URL RESOLUTION
 // =============================================================================
@@ -583,62 +556,6 @@ async function resolvePlaylistUrl(url: string): Promise<string> {
     );
     return url;
   }
-}
-
-// Plugin event emitter (global singleton for plugin system)
-
-
-// Playback Context Tracking
-// source from which tracks are being played.
-
-
-/**
- * The current playback context - what source is playing
- */
-
-/**
- * Current playlist ID (if playing from a playlist)
- */
-
-
-/**
- * Current album ID (if playing from an album)
- */
-
-
-/**
- * Current artist name (if playing from an artist)
- */
-
-
-// Current track
-
-/**
- * Current track ID (if playing from a track)
- */
-
-
-// Playing state
-
-// Queue
-// Tracks the number of user-added tracks in the queue (Spotify-like behavior)
-
-// Volume (0-1) - this is the SLIDER value (linear)
-// We use a logarithmic curve for actual audio output
-
-// Convert linear slider value (0-1) to logarithmic audio volume (0-1)
-// Human hearing is logarithmic, so linear sliders feel wrong
-// Using: audioVolume = sliderValue^2 (quadratic approximation of log curve)
-// This makes the slider feel more natural
-export function sliderToAudioVolume(sliderValue: number): number {
-  // Quadratic curve: softer at low end, more range at high end
-  // Alternative: Math.pow(sliderValue, 2.5) for steeper curve
-  return Math.pow(sliderValue, 2);
-}
-
-// Convert audio volume back to slider value (for display if needed)
-export function audioVolumeToSlider(audioVolume: number): number {
-  return Math.sqrt(audioVolume);
 }
 
 // Playback session tracking
