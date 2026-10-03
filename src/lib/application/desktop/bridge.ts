@@ -38,6 +38,28 @@ export async function connectHostBridge(port: ApplicationPort, attach: (authorit
       // rejected natively, without executing or logging their untrusted payload.
     });
   });
+  let release: Promise<void> | undefined;
+  const dispose = (): Promise<void> => {
+    if (release) return release;
+    // Local admission and observation end immediately, independently of native
+    // release, which may be waiting behind protected storage on the host mutex.
+    disposed = true; ready = false; publisher?.(); unlisten();
+    const capturedLease = lease;
+    if (!capturedLease) return release = Promise.resolve();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    release = Promise.race([
+      Promise.resolve().then(() => transport.register({ phase: "release", lease: capturedLease })).then(() => {}),
+      new Promise<never>((_, reject) => {
+        // Cleanup gets its own short bound, not another publication deadline.
+        // This does not cancel native work or claim the lease was invalidated.
+        deadline = setTimeout(() => reject(new Error("Controller release unavailable; native invalidation outcome unknown")), 1000);
+      }),
+    ]).finally(() => clearTimeout(deadline));
+    // Publication failure can start cleanup without a waiting caller. Retain
+    // this exact outcome for dispose(), including after a late native receipt.
+    void release.catch(() => {});
+    return release;
+  };
   try {
     const registration = await transport.register({ phase: "prepare" });
     lease = registration.lease;
@@ -49,22 +71,17 @@ export async function connectHostBridge(port: ApplicationPort, attach: (authorit
       return result.revision!;
     }, () => {
       if (!ready) return; // Initial failure is handled by preparation cleanup below.
-      ready = false;
-      void transport.register({ phase: "release", lease: capturedLease }).catch(() => {}).finally(unlisten);
+      void dispose();
     });
     await publisher.ready;
     await publisher.flush();
     // Listener may receive an event as soon as native readiness is committed.
     ready = true;
     await transport.register({ phase: "ready", lease });
+    if (disposed) throw new Error("Controller bridge unavailable");
   } catch (error) {
-    ready = false; publisher?.();
-    try { if (lease) await transport.register({ phase: "release", lease }); } finally { unlisten(); }
+    await dispose();
     throw error;
   }
-  return { async dispose() {
-    if (disposed) return;
-    disposed = true; ready = false; publisher?.();
-    try { await transport.register({ phase: "release", lease: lease! }); } finally { unlisten(); }
-  } };
+  return { dispose };
 }

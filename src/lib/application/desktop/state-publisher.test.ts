@@ -54,3 +54,20 @@ it("flush is a bounded command-effect barrier and disposal rejects blocked publi
   await vi.advanceTimersByTimeAsync(5000); await timedOut;
   expect(f.listeners.size).toBe(0);
 });
+
+it.each(["initial timeout", "steady timeout", "dispose"])("ignores late publication settlement after %s with immediate idempotent local cleanup", async reason => {
+  vi.useFakeTimers(); const f = fixture(); const failed = vi.fn();
+  let deliver!: (revision: number) => void; let publications = 0;
+  const stop = startStatePublisher(f.coordinator, () => {
+    if (reason !== "initial timeout" && publications++ === 0) return Promise.resolve(1);
+    return new Promise(resolve => { deliver = resolve; });
+  }, failed);
+  if (reason !== "initial timeout") { await stop.ready; f.change({ queue: { count: 1, currentEntryId: null } }); }
+  const barrier = stop.flush(); const rejected = expect(barrier).rejects.toThrow(reason === "dispose" ? "stopped" : "timed out");
+  if (reason === "dispose") { stop(); stop(); expect(f.listeners.size).toBe(0); }
+  else await vi.advanceTimersByTimeAsync(5000);
+  await rejected; expect(f.listeners.size).toBe(0); expect(failed).toHaveBeenCalledTimes(reason === "dispose" ? 0 : 1);
+  deliver(999); await vi.advanceTimersByTimeAsync(0);
+  await expect(stop.flush()).rejects.toThrow(reason === "dispose" ? "stopped" : "timed out");
+  expect(vi.getTimerCount()).toBe(0); expect(f.listeners.size).toBe(0);
+});

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { connectHostBridge, type HostDispatch, type HostTransport } from "./bridge";
 import type { ApplicationPort, ExecutionResult } from "../types";
 import type { PlaybackCoordinator } from "./playback-coordinator";
@@ -38,7 +38,7 @@ describe("native host bridge", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(completed).toEqual([{ lease, ticket: "native-ticket", result: { status: "applied", revision: 8 } }]);
     await bridge.dispose();
-    expect(steps.slice(-2)).toEqual(["release", "unlisten"]);
+    expect(steps.slice(-2)).toEqual(["unlisten", "release"]);
     receive({ ticket: "late", envelope });
     expect(steps.filter(step => step === "execute")).toHaveLength(1);
   });
@@ -51,7 +51,7 @@ describe("native host bridge", () => {
       async complete() { throw new Error("unexpected completion"); },
     };
     await expect(connectHostBridge(portWith(async () => { throw new Error("unexpected execution"); }), async () => { throw new Error("attachment failed"); }, coordinator, transport)).rejects.toThrow("attachment failed");
-    expect(steps).toEqual(["prepare", "release", "unlisten"]);
+    expect(steps).toEqual(["prepare", "unlisten", "release"]);
   });
   it("rejects forged and duplicate events and executes only the native claimed envelope", async () => {
     let receive!: (dispatch: HostDispatch) => void;
@@ -103,4 +103,96 @@ it("holds native completion behind command-effect publication and releases on fa
   receive(event); await new Promise(resolve => setTimeout(resolve, 0)); rejectDelivery(new Error("revoked"));
   await new Promise(resolve => setTimeout(resolve, 0)); expect(completed).toHaveLength(1); expect(phases.at(-1)).toBe("release");
   await bridge.dispose();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
+function stalledBridgeFixture(initialPublication = false, waitForReady = false) {
+  const ack = { hostId: "host", lease: { leaseId: "lease", hostEpoch: "epoch" }, revision: 1 };
+  const publication = deferred<typeof ack>(); const release = deferred<typeof ack>(); const nativeReady = deferred<typeof ack>();
+  const phases: string[] = []; const unlisten = vi.fn(); const unsubscribe = vi.fn();
+  const complete = vi.fn(async () => {});
+  let receive!: (dispatch: HostDispatch) => void;
+  let observe!: (snapshot: ReturnType<PlaybackCoordinator["captureSnapshot"]>) => void;
+  let snapshot = coordinator.captureSnapshot(); let publications = 0;
+  const source: PlaybackCoordinator = { ...coordinator, captureSnapshot: () => snapshot, subscribeSnapshot: listener => { observe = listener; return unsubscribe; } };
+  const envelope = { protocolVersion: 1 as const, requestId: "one", preconditions: { hostEpoch: "epoch" }, intent: { type: "pause" as const } };
+  const execute = vi.fn(async (): Promise<ExecutionResult> => {
+    snapshot = { ...snapshot, queue: { count: 1, currentEntryId: null } }; observe(snapshot);
+    return { status: "applied", revision: 1 };
+  });
+  const transport: HostTransport = {
+    async listen(listener) { receive = listener; return unlisten; },
+    register(request) {
+      phases.push(request.phase);
+      if (request.phase === "release") return release.promise;
+      if (request.phase === "ready" && waitForReady) return nativeReady.promise;
+      if (request.phase === "publish" && (initialPublication || publications++ > 0)) return publication.promise;
+      return Promise.resolve(ack);
+    },
+    async authorize() { return envelope; }, complete,
+  };
+  return { connect: () => connectHostBridge(portWith(execute), async () => {}, source, transport),
+    send: () => receive({ ticket: "ticket", envelope }), ack, publication, release, nativeReady, phases, unlisten, unsubscribe, execute, complete };
+}
+afterEach(() => vi.useRealTimers());
+it.each(["rejection", "timeout"])("detaches initial publication %s immediately and reports unknown when release stalls", async failure => {
+  vi.useFakeTimers(); const f = stalledBridgeFixture(true);
+  let outcome: unknown;
+  const connecting = f.connect().catch(error => { outcome = error; });
+  await settle();
+  if (failure === "rejection") { f.publication.reject(new Error("publication failed")); await settle(); }
+  else await vi.advanceTimersByTimeAsync(5000);
+  expect(f.unsubscribe).toHaveBeenCalledTimes(1); expect(f.unlisten).toHaveBeenCalledTimes(1);
+  expect(f.phases).not.toContain("ready"); expect(outcome).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(999); expect(outcome).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(outcome).toBeInstanceOf(Error); expect((outcome as Error).message).toMatch(/unavailable.*unknown/i);
+  await connecting;
+  f.release.resolve(f.ack); f.publication.resolve(f.ack); await settle(); f.send(); await settle();
+  expect(f.execute).not.toHaveBeenCalled(); expect(f.complete).not.toHaveBeenCalled();
+  expect(f.phases).not.toContain("ready"); expect(f.unlisten).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it.each([
+  ["timeout", "resolve"], ["timeout", "reject"], ["dispose", "resolve"], ["dispose", "reject"],
+])("detaches on steady publication %s and bounds one shared release despite late %s without acknowledging entered effects", async (reason, late) => {
+  vi.useFakeTimers(); const f = stalledBridgeFixture(); const bridge = await f.connect();
+  f.send(); await settle(); expect(f.execute).toHaveBeenCalledTimes(1); expect(f.complete).not.toHaveBeenCalled();
+  if (reason === "timeout") await vi.advanceTimersByTimeAsync(5000);
+  const first = bridge.dispose(); const second = bridge.dispose();
+  let firstError: unknown; let secondError: unknown;
+  const firstDone = first.catch(error => { firstError = error; }); const secondDone = second.catch(error => { secondError = error; });
+  expect(f.unlisten).toHaveBeenCalledTimes(1); expect(f.unsubscribe).toHaveBeenCalledTimes(1);
+  await settle(); expect(f.phases.filter(phase => phase === "release")).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(firstError).toBeInstanceOf(Error); expect((firstError as Error).message).toMatch(/unavailable.*unknown/i);
+  expect(secondError).toBe(firstError); await Promise.all([firstDone, secondDone]);
+  // Neither a late acknowledgement nor a release receipt revives the stopped lease locally.
+  if (late === "resolve") { f.publication.resolve(f.ack); f.release.resolve(f.ack); }
+  else { f.publication.reject(new Error("late publication failure")); f.release.reject(new Error("late release failure")); }
+  await settle(); f.send(); await settle();
+  expect(f.complete).not.toHaveBeenCalled(); expect(f.execute).toHaveBeenCalledTimes(1);
+  await expect(bridge.dispose()).rejects.toBe(firstError);
+  expect(f.unlisten).toHaveBeenCalledTimes(1); expect(f.phases.filter(phase => phase === "release")).toHaveLength(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("rejects a late readiness receipt after publication failure already closed the bridge", async () => {
+  vi.useFakeTimers(); const f = stalledBridgeFixture(false, true);
+  let outcome: unknown; let connected = false;
+  const connecting = f.connect().then(() => { connected = true; }, error => { outcome = error; });
+  await settle(); expect(f.phases).toContain("ready");
+  f.send(); await settle(); await vi.advanceTimersByTimeAsync(5000);
+  expect(f.unlisten).toHaveBeenCalledTimes(1); f.release.resolve(f.ack); await settle();
+  f.nativeReady.resolve(f.ack); await settle(); await connecting;
+  expect(connected).toBe(false); expect(outcome).toBeInstanceOf(Error);
+  expect((outcome as Error).message).toMatch(/unavailable/);
+  f.publication.resolve(f.ack); await settle(); expect(f.complete).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
 });
