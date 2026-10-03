@@ -97,14 +97,26 @@ impl PlayQueue {
 
     /// Replace the queue tracks and order without changing the current playback position.
     /// Used when the frontend reorders the queue.
-    pub fn replace_queue_keep_current(&mut self, tracks: Vec<QueueTrack>, current_track_id: i64) {
+    pub fn replace_queue_keep_current_at(
+        &mut self,
+        tracks: Vec<QueueTrack>,
+        current_track_id: i64,
+        current_index: Option<usize>,
+    ) -> Result<(), String> {
+        // Resolve and validate before replacing any state. An occurrence is not a track ID.
+        let position = match current_index {
+            Some(index) => {
+                if tracks.get(index).map(|track| track.id) != Some(current_track_id) {
+                    return Err("Current queue occurrence is invalid".into());
+                }
+                Some(index)
+            }
+            None => tracks.iter().position(|track| track.id == current_track_id),
+        };
         let len = tracks.len();
         self.tracks = tracks;
         self.order = (0..len).collect();
-
-        // Find where the currently playing track is in the new queue
-        self.position = self.tracks.iter().position(|t| t.id == current_track_id);
-
+        self.position = position;
         if self.shuffle && len > 1 {
             if let Some(pos) = self.position {
                 let current_idx = self.order[pos];
@@ -112,6 +124,12 @@ impl PlayQueue {
                 self.position = Some(0);
             }
         }
+        Ok(())
+    }
+
+    /// Underlying queue occurrence; unlike current_position this is not a shuffled cursor.
+    pub fn current_track_index(&self) -> Option<usize> {
+        self.order.get(self.position?).copied()
     }
 
     /// Get the currently playing track.
@@ -274,5 +292,40 @@ impl PlayQueue {
     /// Find a track by its ID and return a clone.
     pub fn find_track_by_id(&self, id: i64) -> Option<QueueTrack> {
         self.tracks.iter().find(|t| t.id == id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod occurrence_tests {
+    use super::*;
+    fn track(id: i64) -> QueueTrack {
+        QueueTrack { id, title: id.to_string(), artist: String::new(), album: String::new(), path: String::new(), duration: 1.0, format: String::new() }
+    }
+    #[test]
+    fn explicit_occurrence_survives_replacement_and_shuffle() {
+        for shuffled in [false, true] {
+            let mut queue = PlayQueue::new();
+            queue.shuffle = shuffled;
+            queue.set_tracks(vec![track(7), track(9), track(7)], 2);
+            queue.replace_queue_keep_current_at(vec![track(7), track(7), track(9)], 7, Some(1)).unwrap();
+            assert_eq!(queue.current_track_index(), Some(1));
+            assert_eq!(queue.current().unwrap().id, 7);
+        }
+    }
+    #[test]
+    fn invalid_occurrence_does_not_mutate_queue() {
+        let mut queue = PlayQueue::new();
+        queue.set_tracks(vec![track(3), track(7)], 1);
+        for index in [0, 5] {
+            assert!(queue.replace_queue_keep_current_at(vec![track(9), track(7)], 7, Some(index)).is_err());
+            assert_eq!(queue.current_track_index(), Some(1));
+            assert_eq!(queue.tracks[0].id, 3);
+        }
+    }
+    #[test]
+    fn omitted_occurrence_preserves_legacy_first_match() {
+        let mut queue = PlayQueue::new();
+        queue.replace_queue_keep_current_at(vec![track(7), track(7)], 7, None).unwrap();
+        assert_eq!(queue.current_track_index(), Some(0));
     }
 }

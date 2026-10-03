@@ -40,6 +40,7 @@ pub struct PlayerInfo {
     pub shuffle: bool,
     pub queue_length: usize,
     pub queue_position: Option<usize>,
+    pub current_queue_index: Option<usize>,
 }
 
 static NEXT_TCP_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -449,6 +450,7 @@ impl SqueezePlayer {
             shuffle: self.queue.shuffle,
             queue_length: self.queue.len(),
             queue_position: self.queue.current_position(),
+            current_queue_index: self.queue.current_track_index(),
         }
     }
 }

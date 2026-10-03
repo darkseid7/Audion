@@ -1444,6 +1444,8 @@ export interface SqueezePlayerInfo {
   shuffle: boolean;
   queue_length: number;
   queue_position: number | null;
+  /** Underlying queue occurrence, independent of shuffled playback order. */
+  current_queue_index?: number | null;
 }
 
 export interface SqueezeQueueTrack {
@@ -1556,10 +1558,12 @@ export async function squeezeUpdateQueue(
   mac: string,
   trackIds: number[],
   currentTrackId: number,
+  currentIndex?: number,
 ): Promise<void> {
   return await invoke("squeeze_update_queue", {
     mac,
     trackIds,
     currentTrackId,
+    currentIndex,
   });
 }

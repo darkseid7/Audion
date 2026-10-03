@@ -4,7 +4,9 @@ import type { Track } from "$lib/api/tauri";
 import { EventEmitter, type PluginEvents } from "$lib/plugins/event-emitter";
 export type ActiveBackend = "native" | "html5" | "remote" | "squeeze" | "none";
 export interface PlaybackContext {
-    type: "playlist" | "album" | "artist";
+    type: "playlist" | "album" | "artist" | "liked" | "track" | "queue";
+    playMode?: "all" | "liked_only";
+    trackId?: number;
     /** For playlists: playlist ID */
     playlistId?: number;
     /** For albums: album ID */

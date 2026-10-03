@@ -24,7 +24,7 @@ describe("confirmed playback lane", () => {
   it("awaits old-output stop before selecting and publishing the new target", async () => {
     const f = fixture();
     let stop!: (result: RuntimeResult) => void;
-    f.runtime.stopOwnedOutput = vi.fn(() => new Promise(resolve => { stop = resolve; }));
+    f.runtime.stopOwnedOutput = vi.fn(() => new Promise<RuntimeResult>(resolve => { stop = resolve; }));
     const pending = f.coordinator.execute({ type: "select_output", output: { kind: "squeeze", playerId: "A" } }, { hostEpoch: "host", outputRevision: 0 });
     await vi.waitFor(() => expect(f.runtime.stopOwnedOutput).toHaveBeenCalledOnce());
     expect(f.runtime.selectOutput).not.toHaveBeenCalled();
@@ -42,7 +42,7 @@ describe("confirmed playback lane", () => {
   });
   it.each(["failed", "rejected", "unknown"])("never selects after %s stop", async mode => {
     const f = fixture();
-    f.runtime.stopOwnedOutput = vi.fn(async () => {
+    f.runtime.stopOwnedOutput = vi.fn(async (): Promise<RuntimeResult> => {
       if (mode === "rejected") throw new Error("IPC lost");
       return mode === "unknown" ? { ...fail, error: { code: "outcome_unknown", message: "unknown", retryable: false } } : fail;
     });
@@ -70,4 +70,61 @@ describe("confirmed playback lane", () => {
     expect(await f.coordinator.execute({ type: "select_output", output: { kind: "squeeze", playerId: "A" } }, { hostEpoch: "host", outputRevision: 0 })).toMatchObject({ status: "failed", revision: 1, partialEffects: ["Previous output stopped"] });
     expect(f.state.read().selectedOutput).toEqual({ kind: "pc" });
   });
+});
+
+describe("signal and command ownership", () => {
+  it("deduplicates completion/gapless but preserves a time expiry across natural advance", async () => {
+    const f = fixture();
+    const signal = { output: { kind: "pc" as const }, ownershipGeneration: 1, transitionGeneration: 1 };
+    await Promise.all([
+      f.coordinator.enqueueSignal({ ...signal, kind: "gapless" }),
+      f.coordinator.enqueueSignal({ ...signal, kind: "completion" }),
+      f.coordinator.enqueueSignal({ ...signal, kind: "timer" }),
+    ]);
+    expect(f.runtime.applySignal).toHaveBeenCalledOnce();
+    expect(f.runtime.apply).toHaveBeenCalledExactlyOnceWith({ type: "pause" });
+  });
+  it("discards an expiry captured before a manual replacement", async () => {
+    const f = fixture();
+    const signal = { kind: "timer" as const, output: { kind: "pc" as const }, ownershipGeneration: 1, transitionGeneration: 1 };
+    await f.coordinator.execute({ type: "next" }, { hostEpoch: "host" });
+    await f.coordinator.enqueueSignal(signal);
+    expect(f.runtime.apply).toHaveBeenCalledExactlyOnceWith({ type: "next" }, undefined);
+  });
+  it("validates repeated tracks by entry identity, not track ID", async () => {
+    const f = fixture();
+    f.state.commit({ queue: [{ entryId: "first", track: { id: 7 } as any }, { entryId: "second", track: { id: 7 } as any }] });
+    expect((await f.coordinator.execute({ type: "queue_remove", entryId: "7" }, { hostEpoch: "host" })).status).toBe("failed");
+    expect((await f.coordinator.execute({ type: "queue_remove", entryId: "second" }, { hostEpoch: "host" })).status).toBe("applied");
+    expect(f.runtime.apply).toHaveBeenCalledExactlyOnceWith({ type: "queue_remove", entryId: "second" }, undefined);
+  });
+  it("recovers the lane after a caught runtime error", async () => {
+    const f = fixture();
+    f.runtime.apply = vi.fn().mockRejectedValueOnce(new Error("native refused")).mockResolvedValue(ok);
+    expect(await f.coordinator.execute({ type: "pause" }, { hostEpoch: "host" })).toMatchObject({ status: "failed", revision: 0 });
+    expect(await f.coordinator.execute({ type: "resume" }, { hostEpoch: "host" })).toEqual({ status: "applied", revision: 1 });
+  });
+});
+
+it("keeps the origin generation until an in-flight natural transition finishes", async () => {
+  const f = fixture();
+  let finish!: (result: RuntimeResult) => void;
+  f.runtime.applySignal = vi.fn().mockImplementationOnce(() => new Promise<RuntimeResult>(resolve => { finish = resolve; })).mockResolvedValue(ok);
+  const capture = () => ({ kind: "completion" as const, output: f.state.read().selectedOutput, ownershipGeneration: f.state.read().ownershipGeneration, transitionGeneration: f.state.read().transitionGeneration });
+  const first = f.coordinator.enqueueSignal(capture());
+  await vi.waitFor(() => expect(f.runtime.applySignal).toHaveBeenCalledOnce());
+  const duplicate = f.coordinator.enqueueSignal(capture());
+  finish(ok);
+  await first;
+  await duplicate;
+  expect(f.runtime.applySignal).toHaveBeenCalledOnce();
+});
+
+it("invalidates an old timer after a failed manual command with confirmed playback effects", async () => {
+  const f = fixture();
+  const timer = { kind: "timer" as const, output: { kind: "pc" as const }, ownershipGeneration: 1, transitionGeneration: 1 };
+  f.runtime.apply = vi.fn().mockResolvedValue({ ...fail, partialEffects: ["Playback started"] });
+  expect(await f.coordinator.execute({ type: "next" }, { hostEpoch: "host" })).toMatchObject({ status: "failed", partialEffects: ["Playback started"] });
+  await f.coordinator.enqueueSignal(timer);
+  expect(f.runtime.apply).toHaveBeenCalledOnce();
 });

@@ -1,3 +1,7 @@
+vi.mock("./adapter", () => ({ createDesktopAdapter: () => ({
+  port: { execute: async () => ({ status: "applied", revision: 1 }) },
+  pauseForTimer: async () => {}, dispose: async () => {},
+}) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
@@ -95,4 +99,11 @@ describe("real desktop resource ownership", () => {
     state.stopPlugins = async () => {};
     await second.dispose();
   });
+});
+
+it("returns the initialized desktop adapter rather than an unavailable port", async () => {
+  const { bootstrapDesktop } = await import("./bootstrap");
+  const handle = await bootstrapDesktop();
+  await expect(handle.port.execute({ type: "pause" }, { hostEpoch: "test" })).resolves.toMatchObject({ status: "applied" });
+  await handle.dispose();
 });

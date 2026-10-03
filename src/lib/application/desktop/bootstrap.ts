@@ -1,7 +1,7 @@
 import { get } from "svelte/store";
-import { createUnavailablePort } from "../port";
+import { createDesktopAdapter } from "./adapter";
 import { setMigrationStatus, type ApplicationHandle } from "../bootstrap";
-import { initAudioBackend, cleanupPlayer, pause } from "./player-runtime";
+import { initAudioBackend, cleanupPlayer } from "./player-runtime";
 import { appSettings } from "$lib/stores/settings";
 import { equalizer } from "$lib/stores/equalizer";
 import { initializeSleepTimer } from "$lib/stores/sleepTimer";
@@ -21,6 +21,7 @@ import { loadLibrary, loadPlaylists, refreshLibrarySilently } from "$lib/stores/
 import { pluginStore } from "$lib/stores/plugin-store";
 import { migrateCoversToFiles, startWatcher, squeezeStartServer } from "$lib/api/tauri";
 import { listen } from "@tauri-apps/api/event";
+let adapter: ReturnType<typeof createDesktopAdapter> | undefined;
 let owners = 0;
 let startup: Promise<void> | undefined;
 let stops: (() => void)[] = [];
@@ -35,7 +36,8 @@ async function start(): Promise<void> {
     equalizer.initialize();
     stops.push(initializePinned(), initializeCustomArtwork(), initializePlaylistCovers(), initializeLyricsPreferences());
     initializeFromPersistedState();
-    stops.push(setupAutoSave(), initializeSleepTimer(pause), initializeSqueeze(), wsStore.initialize());
+    adapter = createDesktopAdapter();
+    stops.push(setupAutoSave(), initializeSleepTimer(() => adapter!.pauseForTimer()), initializeSqueeze(), wsStore.initialize());
     await initAudioBackend();
     initDiscordPresence();
     stops.push(disposeDiscordPresence, destroySync, destroyLyricsSync);
@@ -89,6 +91,8 @@ async function stop(): Promise<void> {
         cancelIdleCallback(pluginLoad);
     await pluginStartup;
     pluginStartup = undefined;
+    await adapter?.dispose();
+    adapter = undefined;
     stops.splice(0).reverse().forEach(dispose => dispose());
     cleanupPlayer();
     await pluginStore.dispose();
@@ -114,8 +118,7 @@ export async function bootstrapDesktop(): Promise<ApplicationHandle> {
     }
     let disposed = false;
     return {
-        // Task 3 supplies the real desktop adapter. This intermediate build is not a release.
-        port: createUnavailablePort(),
+        port: adapter!.port,
         async dispose() {
             if (disposed)
                 return;

@@ -242,6 +242,7 @@ export function restartSleepTimerWithLastDuration(): void {
 export function handleSleepTimerCheck(
     _prevTrack: Track | null,
     nextAlbumId: number | null,
+    pauseOnTrigger = true,
 ): boolean {
     const mode = get(triggerMode);
 
@@ -254,7 +255,7 @@ export function handleSleepTimerCheck(
         endsAt.set(null);
         triggerMode.set('time');
         persist();
-        void pause();
+        if (pauseOnTrigger) void pause();
         addToast('Sleep timer: end of track reached', 'info');
         return true;
     }
@@ -270,7 +271,7 @@ export function handleSleepTimerCheck(
             triggerMode.set('time');
             armedAlbumId.set(null);
             persist();
-            void pause();
+            if (pauseOnTrigger) void pause();
             addToast('Sleep timer: end of track reached', 'info');
             return true;
         }
@@ -282,7 +283,7 @@ export function handleSleepTimerCheck(
             triggerMode.set('time');
             armedAlbumId.set(null);
             persist();
-            void pause();
+            if (pauseOnTrigger) void pause();
             addToast('Sleep timer: end of album reached', 'info');
             return true;
         }

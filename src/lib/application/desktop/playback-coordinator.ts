@@ -1,0 +1,126 @@
+import type { Track } from "$lib/api/tauri";
+import type { PlaybackContext } from "$lib/stores/playback-state";
+import type { ApplicationIntent, CommandPreconditions, ControlError, DomainRevisions, ExecutionResult, OutputRef, SnapshotOutputRef } from "../types";
+
+export type PlaybackIntent = ApplicationIntent;
+export interface HostQueueEntry { entryId: string; track: Track }
+export interface HostState {
+  hostEpoch: string;
+  revision: number;
+  revisions: DomainRevisions;
+  selectedOutput: SnapshotOutputRef;
+  ownershipGeneration: number;
+  transitionGeneration: number;
+  queue: HostQueueEntry[];
+}
+export type HostDelta = Partial<Omit<HostState, "revisions">> & { revisions?: Partial<DomainRevisions> };
+export interface HostStateAccess { read(): HostState; commit(delta: HostDelta): void }
+export interface ResolvedPlayback { tracks: Track[]; startIndex: number; context: PlaybackContext | null }
+export type RuntimeResult = { status: "applied" } | { status: "failed" | "superseded"; error: ControlError; partialEffects: string[] };
+export interface PlaybackSignal {
+  kind: "completion" | "gapless" | "timer";
+  output: SnapshotOutputRef;
+  ownershipGeneration: number;
+  transitionGeneration: number;
+}
+export interface DesktopPlaybackRuntime {
+  validateOutput(output: OutputRef): Promise<RuntimeResult>;
+  resolvePlayback(intent: PlaybackIntent): Promise<ResolvedPlayback>;
+  stopOwnedOutput(output: OutputRef): Promise<RuntimeResult>;
+  selectOutput(output: OutputRef): Promise<RuntimeResult>;
+  apply(intent: PlaybackIntent, resolved?: ResolvedPlayback): Promise<RuntimeResult>;
+  applySignal(signal: PlaybackSignal): Promise<RuntimeResult>;
+}
+export interface PlaybackCoordinator {
+  execute(intent: PlaybackIntent, context: CommandPreconditions): Promise<ExecutionResult>;
+  enqueueSignal(signal: PlaybackSignal): Promise<void>;
+  /** Desktop-only commands use the same lane, never the network protocol. */
+  executeLocal(operation: () => Promise<RuntimeResult>, replacesPlayback?: boolean): Promise<ExecutionResult>;
+  dispose(): Promise<void>;
+}
+export const sameOutput = (a: SnapshotOutputRef, b: SnapshotOutputRef): boolean => a.kind === b.kind && (a.kind === "pc" || a.kind === "desktop_only" && b.kind === "desktop_only" && a.reason === b.reason || a.kind === "squeeze" && b.kind === "squeeze" && a.playerId === b.playerId);
+const replacement = (intent: PlaybackIntent) => intent.type.startsWith("play_") || ["next", "previous", "queue_play"].includes(intent.type);
+const resolvesTracks = (intent: PlaybackIntent) => intent.type.startsWith("play_") || intent.type === "queue_insert" || intent.type === "queue_append";
+export function runtimeFailure(error: unknown): RuntimeResult {
+  if (error instanceof PlaybackFailure) return { status: error.status, error: error.controlError, partialEffects: error.partialEffects };
+  return { status: "failed", error: { code: "execution_failed", message: error instanceof Error ? error.message : String(error), retryable: false }, partialEffects: [] };
+}
+export class PlaybackFailure extends Error {
+  constructor(public controlError: ControlError, public status: "failed" | "superseded" = "failed", public partialEffects: string[] = []) { super(controlError.message); }
+}
+/** All preconditions are checked in the lane, not at request arrival. */
+export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state: HostStateAccess): PlaybackCoordinator {
+  let tail: Promise<unknown> = Promise.resolve();
+  let disposed = false;
+  const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = tail.then(operation);
+    tail = result.catch(() => {});
+    return result;
+  };
+  const failed = (code: ControlError["code"], message: string, status: "failed" | "superseded" = "failed"): ExecutionResult => ({ status, error: { code, message, retryable: false }, revision: state.read().revision, partialEffects: [] });
+  const result = (value: RuntimeResult, partialEffects: string[] = []): ExecutionResult => value.status === "applied"
+    ? { status: "applied", revision: state.read().revision }
+    : { ...value, revision: state.read().revision, partialEffects: [...partialEffects, ...value.partialEffects] };
+  const attempt = async (operation: () => Promise<RuntimeResult>): Promise<RuntimeResult> => { try { return await operation(); } catch (error) { return runtimeFailure(error); } };
+  const advanceGeneration = (manual: boolean) => { const s = state.read(); state.commit({ transitionGeneration: s.transitionGeneration + 1, ...(manual ? { ownershipGeneration: s.ownershipGeneration + 1 } : {}) }); };
+  return {
+    execute(intent, context) {
+      if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
+      return enqueue(async () => {
+        const before = state.read();
+        if (context.hostEpoch !== before.hostEpoch) return failed("resync_required", "Host epoch changed", "superseded");
+        for (const key of ["queueRevision", "outputRevision", "libraryRevision"] as const) {
+          if (context[key] !== undefined && context[key] !== before.revisions[key]) return failed("revision_conflict", `${key} changed`, "superseded");
+        }
+        if (before.selectedOutput.kind === "desktop_only") return failed("unsupported", "Legacy cloud output is desktop-only");
+        const previousOutput = before.selectedOutput;
+        if (intent.type === "select_output") {
+          if (sameOutput(before.selectedOutput, intent.output)) return result({ status: "applied" });
+          const validated = await attempt(() => runtime.validateOutput(intent.output));
+          if (validated.status !== "applied") return result(validated);
+          const stopped = await attempt(() => runtime.stopOwnedOutput(previousOutput));
+          if (stopped.status !== "applied") return result(stopped);
+          // The stop is already a real effect even if selecting the new target fails.
+          advanceGeneration(true);
+          const selected = await attempt(() => runtime.selectOutput(intent.output));
+          if (selected.status !== "applied") return result(selected, ["Previous output stopped"]);
+          state.commit({ selectedOutput: intent.output, revisions: { outputRevision: before.revisions.outputRevision + 1 } });
+          return result(selected);
+        }
+        if ("entryId" in intent) {
+          if (!before.queue.some(entry => entry.entryId === intent.entryId) || intent.type === "queue_reorder" && intent.beforeEntryId !== null && !before.queue.some(entry => entry.entryId === intent.beforeEntryId)) return failed("not_found", "Queue entry no longer exists");
+        }
+        const applied = await attempt(async () => runtime.apply(intent, resolvesTracks(intent) ? await runtime.resolvePlayback(intent) : undefined));
+        if (applied.status !== "applied" && applied.partialEffects.length && replacement(intent)) advanceGeneration(true);
+        if (applied.status === "applied") {
+          if (replacement(intent)) advanceGeneration(true);
+          else state.commit({});
+        }
+        return result(applied);
+      });
+    },
+    enqueueSignal(signal) {
+      if (disposed) return Promise.resolve();
+      return enqueue(async () => {
+        const current = state.read();
+        if (!sameOutput(signal.output, current.selectedOutput) || signal.ownershipGeneration !== current.ownershipGeneration || signal.kind !== "timer" && signal.transitionGeneration !== current.transitionGeneration) return;
+        const applied = await attempt(() => signal.kind === "timer" ? runtime.apply({ type: "pause" }) : runtime.applySignal(signal));
+        // Keep the origin while awaiting so duplicates arriving in-flight retain
+        // the old generation. Consume it even on failure (scrobble may have run).
+        if (signal.kind !== "timer") advanceGeneration(false);
+        if (applied.status !== "applied") throw new PlaybackFailure(applied.error, applied.status, applied.partialEffects);
+        if (signal.kind === "timer") state.commit({});
+      });
+    },
+    executeLocal(operation, replacesPlayback = false) {
+      if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
+      return enqueue(async () => {
+        const applied = await attempt(operation);
+        if (applied.status !== "applied" && applied.partialEffects.length && replacesPlayback) advanceGeneration(true);
+        if (applied.status === "applied") { if (replacesPlayback) advanceGeneration(true); else state.commit({}); }
+        return result(applied);
+      });
+    },
+    async dispose() { disposed = true; await tail; },
+  };
+}

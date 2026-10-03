@@ -1,3 +1,4 @@
+import { PlaybackFailure } from "./playback-coordinator";
 import { isStreaming, sliderToAudioVolume, audioVolumeToSlider } from "../playback-helpers";
 export { isStreaming, sliderToAudioVolume, audioVolumeToSlider } from "../playback-helpers";
 import { disconnectSqueezePlayer } from "$lib/stores/squeeze";
@@ -560,6 +561,8 @@ async function resolvePlaylistUrl(url: string): Promise<string> {
 
 // Playback session tracking
 let currentSessionId = 0;
+let observationGeneration = 0;
+export function invalidateDesktopObservations(): void { observationGeneration += 1; }
 
 // Track play start time for accurate duration recording
 let playStartTime: number = 0;
@@ -683,7 +686,7 @@ export async function initAudioBackend(): Promise<void> {
         transferPlayback(payload);
         break;
       case "remote_command":
-        handleRemoteCommand(payload);
+        void handleRemoteCommand(payload).catch(console.error);
         break;
       case "player_state":
         handleRemotePlayerState(payload);
@@ -781,12 +784,16 @@ function startStatePoller(): void {
   if (nativeStatePoller) return;
 
   nativeStatePoller = setInterval(async () => {
+    const emitCompletion = completionSink?.();
+    const session = currentSessionId;
+    const observation = observationGeneration;
     try {
       const track = get(currentTrack);
       if (!track) return;
 
       if (get(activeBackend) === "native") {
         const state = await nativeAudioGetState();
+        if (observation !== observationGeneration || session !== currentSessionId || get(activeBackend) !== "native") return;
         const uiDuration = get(duration);
 
         // Only advance currentTime while the backend reports playback.
@@ -845,7 +852,7 @@ function startStatePoller(): void {
           if (pendingForcedEnd === null) {
             pendingForcedEnd = setTimeout(() => {
               pendingForcedEnd = null;
-              if (get(activeBackend) !== "native") return;
+              if (observation !== observationGeneration || session !== currentSessionId || get(activeBackend) !== "native") return;
               const st = get(currentTime);
               const du = get(duration);
               if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
@@ -855,8 +862,7 @@ function startStatePoller(): void {
                 // Make sure the native backend actually stops playing — if
                 // it's stuck emitting silence past the end, this is the only
                 // way to make the queue advance to the next track (or stop).
-                nativeAudioStop().catch(console.error);
-                handleTrackEnd();
+                handleTrackEnd(emitCompletion);
               }
             }, 400);
           }
@@ -866,17 +872,18 @@ function startStatePoller(): void {
 
         // Poll for audio events
         const event = await nativeAudioPollEvent();
+        if (observation !== observationGeneration || session !== currentSessionId || get(activeBackend) !== "native") return;
 
         if (event.type === "TrackFinished") {
           // Track ended naturally, nothing was preloaded.
           clearPendingForcedEnd();
-          handleTrackEnd();
+          handleTrackEnd(emitCompletion);
         } else if (event.type === "TrackAdvanced") {
           // Gapless advance: audio backend already moved to the next track.
           // We must NOT call nativeAudioPlay() — that would restart it.
           // Just advance the UI queue index and update metadata.
           clearPendingForcedEnd();
-          handleGaplessAdvance();
+          handleGaplessAdvance(emitCompletion);
         } else if (event.type === "StateChanged") {
           // Backend confirmed a seek or loop — update UI immediately
           currentTime.set(event.data.position);
@@ -953,16 +960,14 @@ function startStatePoller(): void {
           if (pendingForcedEnd === null) {
             pendingForcedEnd = setTimeout(() => {
               pendingForcedEnd = null;
-              if (get(activeBackend) !== "html5" || !html5Audio) return;
+              if (observation !== observationGeneration || session !== currentSessionId || get(activeBackend) !== "html5" || !html5Audio) return;
               const st = get(currentTime);
               const du = get(duration);
               if (du > 0 && st >= du - 0.1 && get(isPlaying)) {
                 console.warn(
                   "[Player] Forced track end via watchdog (HTML5 missed `ended` event)",
                 );
-                html5Audio.pause();
-                html5Audio.currentTime = 0;
-                handleTrackEnd();
+                handleTrackEnd(emitCompletion);
               }
             }, 400);
           }
@@ -1117,13 +1122,13 @@ async function initWindowsThumbarIntegration(): Promise<void> {
 
         switch (action) {
           case "previous":
-            void previousTrack();
+            emitDesktopCommand({ type: "previous" }, previousTrack);
             break;
           case "toggle_play_pause":
-            void togglePlay();
+            emitDesktopCommand({ type: get(isPlaying) ? "pause" : "resume" }, togglePlay);
             break;
           case "next":
-            nextTrack();
+            emitDesktopCommand({ type: "next" }, nextTrack);
             break;
         }
       },
@@ -1160,25 +1165,25 @@ function initMediaSessionHandlers(): void {
   // Some Bluetooth headsets can emit repeated pause events; toggle would
   // accidentally resume playback and make pause appear broken.
   setHandler("play", () => {
-    void resume();
+    emitDesktopCommand({ type: "resume" }, resume);
   });
   setHandler("pause", () => {
-    void pause();
+    emitDesktopCommand({ type: "pause" }, pause);
   });
   setHandler("stop", () => {
-    void pause();
+    emitDesktopCommand({ type: "pause" }, pause);
   });
   setHandler("previoustrack", () => {
-    void previousTrack();
+    emitDesktopCommand({ type: "previous" }, previousTrack);
   });
   setHandler("nexttrack", () => {
-    void nextTrack();
+    emitDesktopCommand({ type: "next" }, nextTrack);
   });
   setHandler("seekto", (details) => {
     if (details.seekTime != null) {
       const dur = get(duration);
       if (dur > 0) {
-        nativeAudioSeek(details.seekTime / dur).catch(console.error);
+        emitDesktopCommand({ type: "seek", seconds: details.seekTime }, () => seek(details.seekTime! / dur));
       }
     }
   });
@@ -1187,7 +1192,7 @@ function initMediaSessionHandlers(): void {
     const cur = get(currentTime);
     const dur = get(duration);
     if (dur > 0) {
-      nativeAudioSeek(Math.max(0, cur - offset) / dur).catch(console.error);
+      emitDesktopCommand({ type: "seek", seconds: Math.max(0, cur - offset) }, () => seek(Math.max(0, cur - offset) / dur));
     }
   });
   setHandler("seekforward", (details) => {
@@ -1195,7 +1200,7 @@ function initMediaSessionHandlers(): void {
     const cur = get(currentTime);
     const dur = get(duration);
     if (dur > 0) {
-      nativeAudioSeek(Math.min(dur, cur + offset) / dur).catch(console.error);
+      emitDesktopCommand({ type: "seek", seconds: Math.min(dur, cur + offset) }, () => seek(Math.min(dur, cur + offset) / dur));
     }
   });
 
@@ -1309,7 +1314,7 @@ export interface SqueezePlayCommit {
 }
 
 /**
- * Issue a Squeeze play request and commit optimistic state only on success.
+ * Issue a Squeeze play request and commit confirmed state only on success.
  * The callback keeps this seam independent from the rest of the audio setup,
  * while the session predicate prevents an older successful request winning.
  */
@@ -1340,13 +1345,14 @@ export async function playTrack(
   track: Track,
   skipLocalSrc = false,
   startTime = 0,
+  queuePlan?: { tracks: Track[]; index: number; commit(): void },
 ): Promise<void> {
   const previousTrackObj = get(currentTrack);
   const sessionId = ++currentSessionId;
 
   // Reset playStartTime — play counting only happens on natural track completion
   // (handleTrackEnd / handleGaplessAdvance), not on manual skip/play.
-  playStartTime = Date.now();
+  const partialEffects: string[] = [];
   clearPendingForcedEnd();
 
   // ListenBrainz: notify 'playing_now'
@@ -1364,13 +1370,13 @@ export async function playTrack(
   const fullTrack = await getFullTrack(track.id, true);
 
   // Check session ID before proceeding after await
-  if (sessionId !== currentSessionId) return;
+  if (sessionId !== currentSessionId) throw new PlaybackFailure({ code: "revision_conflict", message: "Playback session changed", retryable: false }, "superseded");
 
   const trackForPlugins = fullTrack || track;
-  pluginEvents.emit("trackChange", {
-    track: trackForPlugins,
-    previousTrack: previousTrackObj,
-  });
+  const confirmTrack = () => {
+    playStartTime = Date.now();
+    pluginEvents.emit("trackChange", { track: trackForPlugins, previousTrack: previousTrackObj });
+  };
 
   // Update Media Session early so the UI reflects the change immediately
   // even if the audio engine takes a moment to initialize or resolve streams.
@@ -1431,29 +1437,34 @@ export async function playTrack(
     console.log(
       "[Player] Session changed during metadata update, aborting playback",
     );
-    return;
+    throw new PlaybackFailure({ code: "revision_conflict", message: "Playback session changed", retryable: false }, "superseded");
   }
 
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     if (mac) {
-      const q = get(queue);
-      const idx = get(queueIndex);
+      const q = queuePlan?.tracks ?? get(queue);
+      const idx = queuePlan?.index ?? get(queueIndex);
       const trackIds = q.length > 0 ? q.map((t) => t.id) : [track.id];
       const startIdx = q.length > 0 ? idx : 0;
       const ownsTarget = captureSqueezeTargetOwnership(mac);
-      await playTrackOnSqueeze(mac, trackIds, startIdx, {
+      const result = await playTrackOnSqueeze(mac, trackIds, startIdx, {
         track: trackForPlugins,
         startTime,
         sessionId,
         isCurrentSession: () => sessionId === currentSessionId && ownsTarget(),
         commit: () => {
+          confirmTrack();
+          queuePlan?.commit();
           currentTrack.set(trackForPlugins);
           currentTime.set(startTime);
           duration.set(track.duration || 0);
           isPlaying.set(true);
         },
       });
+      if (result !== "played") throw new PlaybackFailure({ code: result === "failed" ? "execution_failed" : "revision_conflict", message: `Squeeze playback ${result}`, retryable: false }, result, result === "superseded" ? ["Previous Squeeze target acknowledged playback"] : []);
+    } else {
+      throw new PlaybackFailure({ code: "output_unavailable", message: "No Squeeze target selected", retryable: false });
     }
     return;
   }
@@ -1486,7 +1497,8 @@ export async function playTrack(
       }
 
       // Stop native audio
-      await nativeAudioStop().catch(() => {});
+      await nativeAudioStop();
+      partialEffects.push("Previous PC playback stopped");
 
       // Resolve custom schemes (like tidal://) to HTTP or blob URLs
       if (classifyAudioPath(audioPath) === "custom-scheme") {
@@ -1531,6 +1543,8 @@ export async function playTrack(
         audio.volume = sliderToAudioVolume(get(volume));
 
         await playWithDash(audioPath, audio);
+        partialEffects.push("Playback started");
+        activeBackend.set("html5");
         console.log("[Player] dash.js DASH streaming started:", track.title);
       } else {
         // Resolve playlist-format URLs (.m3u, .pls, .m3u8) to direct stream URLs
@@ -1543,12 +1557,15 @@ export async function playTrack(
         // Wrap play in a handler to catch AbortError (common with rapid skipping)
         try {
           await audio.play();
+          partialEffects.push("Playback started");
+          activeBackend.set("html5");
         } catch (err) {
           if (err instanceof DOMException && err.name === "AbortError") {
             console.warn(
               "[Player] Playback aborted (likely replaced by new track)",
               err,
             );
+            throw new PlaybackFailure({ code: "revision_conflict", message: "Playback aborted", retryable: false }, "superseded");
           } else {
             throw err;
           }
@@ -1576,6 +1593,8 @@ export async function playTrack(
 
         // Play via native backend
         await nativeAudioPlay(audioPath, (track as any).replay_gain_db ?? null);
+        partialEffects.push("Playback started");
+        activeBackend.set("native");
 
         // Sync volume
         const vol = sliderToAudioVolume(get(volume));
@@ -1602,6 +1621,8 @@ export async function playTrack(
         audio.volume = sliderToAudioVolume(get(volume));
 
         await audio.play();
+        partialEffects.push("Playback started");
+        activeBackend.set("html5");
         if (startTime > 0) {
           audio.currentTime = startTime;
         }
@@ -1610,6 +1631,8 @@ export async function playTrack(
       }
     }
 
+    confirmTrack();
+    queuePlan?.commit();
     currentTrack.set(trackForPlugins);
     currentTime.set(startTime);
     duration.set(track.duration || 0);
@@ -1624,6 +1647,8 @@ export async function playTrack(
       `Playback failed: ${err instanceof Error ? err.message : "Unknown error"}`,
       "error",
     );
+    if (err instanceof PlaybackFailure) throw new PlaybackFailure(err.controlError, err.status, [...partialEffects, ...err.partialEffects]);
+    throw new PlaybackFailure({ code: "execution_failed", message: err instanceof Error ? err.message : String(err), retryable: false }, "failed", partialEffects);
   }
 }
 
@@ -1640,84 +1665,23 @@ function shuffleArray<T>(array: T[]): T[] {
 }
 
 // Play a list of tracks starting at index
-export function playTracks(
-  tracks: Track[],
-  startIndex: number = 0,
-  context?: PlaybackContext,
-): void {
-  const currentQueue = get(queue);
-
-  // Check if the new tracks are effectively the same as the current queue
-  // usage of JSON.stringify is a simple way to check deep equality for arrays of objects
-  // optimization: check length and first/last ID first to avoid expensive stringify
-  let isSameQueue = false;
-
-  if (tracks.length === currentQueue.length) {
-    if (tracks.length === 0) {
-      isSameQueue = true;
-    } else {
-      // Check first and last ID match
-      if (
-        tracks[0].id === currentQueue[0].id &&
-        tracks[tracks.length - 1].id ===
-          currentQueue[currentQueue.length - 1].id
-      ) {
-        // If ends match, do a full check to be sure (or just trust it for performance?)
-        // Let's do a quick ID check
-        isSameQueue = tracks.every((t, i) => t.id === currentQueue[i].id);
-      }
-    }
-  }
-
-  // Update queue only if different (though setting it again might be harmless store-update-wise,
-  // we want to know if it CHANGED for shuffle logic)
-  if (!isSameQueue) {
-    queue.set(tracks);
-  }
-
-  queueIndex.set(startIndex);
-  userQueueCount.set(0); // Reset user queue when starting fresh context
-
-  // Set playback context
-  playbackContext.set(context ?? null);
-
-  // Shuffle Logic
-  if (get(shuffle)) {
-    // FORCE START Logic:
-    // When user plays a track (even if it's in the same queue), we want that track to play NOW,
-    // and we want ALL OTHER tracks to be in the "Next Up" queue (shuffled).
-    // We do NOT want to preserve the old shuffle order because jumping to a track "late" in the
-    // shuffle order causes all previous tracks to be "skipped" into history.
-
-    // 1. Get all indices
-    const allIndices = tracks.map((_, i) => i);
-
-    // 2. Remove startIndex (the track we want to play)
-    const otherIndices = allIndices.filter((i) => i !== startIndex);
-
-    // 3. Shuffle the rest
-    const shuffledOthers = shuffleArray(otherIndices);
-
-    // 4. Construct new order: [startIndex, ...shuffledRest]
-    const newShuffledIndices = [startIndex, ...shuffledOthers];
-
-    console.log(`Regenerating shuffle with forced start: ${startIndex}`);
-    shuffledIndices.set(newShuffledIndices);
-
-    // 5. Set cursor to 0 (since our track is now at index 0)
-    shuffledIndex.set(0);
-  }
-
-  // Emit queueChange event for plugins
-  // If same queue, we might still want to emit if the logical "context" changed,
-  // but usually plugins care about the list content.
-  // If we filtered or sorted the SAME list, isSameQueue might be false (order matters).
-  // Our ID check strictly checks order. So sorting changes the queue.
-  pluginEvents.emit("queueChange", { queue: tracks, index: startIndex });
-
-  if (tracks.length > 0 && startIndex < tracks.length) {
-    playTrack(tracks[startIndex]);
-  }
+export async function playTracks(
+  tracks: Track[], startIndex = 0, context?: PlaybackContext,
+): Promise<void> {
+  if (!tracks[startIndex]) throw new Error("Starting track is unavailable");
+  const indices = get(shuffle) ? [startIndex, ...shuffleArray(tracks.map((_, i) => i).filter(i => i !== startIndex))] : get(shuffledIndices);
+  await playTrack(tracks[startIndex], false, 0, {
+    tracks, index: startIndex,
+    commit() {
+      queue.set(tracks);
+      queueIndex.set(startIndex);
+      userQueueCount.set(0);
+      playbackContext.set(context ?? null);
+      if (get(shuffle)) { shuffledIndices.set(indices); shuffledIndex.set(0); }
+      pluginEvents.emit("queueChange", { queue: tracks, index: startIndex });
+    },
+  });
+  _schedulePreload();
 }
 
 export async function togglePlay(): Promise<void> {
@@ -1731,7 +1695,9 @@ export async function togglePlay(): Promise<void> {
 export async function pause(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) squeezePause(mac).catch(console.error);
+    if (!mac) throw new Error("No Squeeze target selected");
+    await runOwnedSqueeze(mac, () => squeezePause(mac));
+    isPlaying.set(false);
     return;
   }
 
@@ -1753,28 +1719,30 @@ export async function pause(): Promise<void> {
     updateMediaSessionPlaybackState("paused");
   } catch (err) {
     console.error("[Player] Pause failed:", err);
+    throw err;
   }
 }
 
 export async function resume(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (!mac) return;
+    if (!mac) throw new Error("No Squeeze target selected");
 
     const state = get(squeezePlayerState);
     if (state?.current_track) {
-      squeezeResume(mac).catch(console.error);
+      await runOwnedSqueeze(mac, () => squeezeResume(mac));
     } else {
       const q = get(queue);
       const idx = get(queueIndex);
       const track = get(currentTrack);
       if (q.length > 0) {
         const trackIds = q.map((t) => t.id);
-        squeezePlay(mac, trackIds, idx).catch(console.error);
+        await runOwnedSqueeze(mac, () => squeezePlay(mac, trackIds, idx));
       } else if (track) {
-        squeezePlay(mac, [track.id], 0).catch(console.error);
-      }
+        await runOwnedSqueeze(mac, () => squeezePlay(mac, [track.id], 0));
+      } else throw new Error("No track to resume");
     }
+    isPlaying.set(true);
     return;
   }
 
@@ -1808,6 +1776,7 @@ export async function resume(): Promise<void> {
     updateMediaSessionPosition();
   } catch (err) {
     console.error("[Player] Resume failed:", err);
+    throw err;
   }
 }
 
@@ -1872,10 +1841,10 @@ function _advanceQueueIndex(dry = false): number | null {
 }
 
 // Next track
-export function nextTrack(): void {
+export async function nextTrack(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) squeezeNext(mac).catch(console.error);
+    if (mac) await runOwnedSqueeze(mac, () => squeezeNext(mac));
     return;
   }
 
@@ -1891,11 +1860,11 @@ export function nextTrack(): void {
   const settings = get(appSettings);
 
   if (q.length === 0) {
-    if (settings.autoplay) playRandomFromLibrary();
+    if (settings.autoplay) await playRandomFromLibrary();
     return;
   }
 
-  const idx = _advanceQueueIndex();
+  const idx = _advanceQueueIndex(true);
 
   if (idx === null) {
     // End of queue — check if we should remove from listen-later
@@ -1910,11 +1879,11 @@ export function nextTrack(): void {
 
     // End of queue/shuffle with no repeat
     if (settings.autoplay) {
-      playRandomFromLibrary();
+      await playRandomFromLibrary();
     } else {
       // Stop playback completely
       if (get(activeBackend) === "native") {
-        nativeAudioStop().catch(console.error);
+        await nativeAudioStop();
       } else if (get(activeBackend) === "html5" && html5Audio) {
         html5Audio.pause();
         html5Audio.currentTime = 0;
@@ -1926,12 +1895,11 @@ export function nextTrack(): void {
     return;
   }
 
-  queueIndex.set(idx);
-  playTrack(q[idx]);
+  await playTrack(q[idx], false, 0, { tracks: q, index: idx, commit() { _advanceQueueIndex(); queueIndex.set(idx); } });
 }
 
 // Play a random track from the library (for autoplay feature)
-function playRandomFromLibrary(): void {
+async function playRandomFromLibrary(): Promise<void> {
   const allTracks = get(libraryTracks);
   if (allTracks.length === 0) {
     isPlaying.set(false);
@@ -1950,18 +1918,16 @@ function playRandomFromLibrary(): void {
   const randomTrack = availableTracks[randomIndex];
 
   // Add to queue and play
-  queue.update((q) => [...q, randomTrack]);
-  const newQueue = get(queue);
-  queueIndex.set(newQueue.length - 1);
-
-  playTrack(randomTrack);
+  const newQueue = [...get(queue), randomTrack];
+  const index = newQueue.length - 1;
+  await playTrack(randomTrack, false, 0, { tracks: newQueue, index, commit() { queue.set(newQueue); queueIndex.set(index); } });
 }
 
 // Previous track
 export async function previousTrack(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) squeezePrevious(mac).catch(console.error);
+    if (mac) await runOwnedSqueeze(mac, () => squeezePrevious(mac));
     return;
   }
 
@@ -1993,8 +1959,10 @@ export async function previousTrack(): Promise<void> {
     }
   } catch (err) {
     console.error("[Player] Restart track failed:", err);
+    throw err;
   }
 
+  let nextShuffleIndex = get(shuffledIndex);
   if (shuf) {
     // Persistent Shuffle Previous
     const shufIndices = get(shuffledIndices);
@@ -2005,7 +1973,7 @@ export async function previousTrack(): Promise<void> {
       shufIdx = get(repeat) === "all" ? shufIndices.length - 1 : 0;
     }
 
-    shuffledIndex.set(shufIdx);
+    nextShuffleIndex = shufIdx;
     idx = shufIndices[shufIdx];
   } else {
     idx = idx - 1;
@@ -2014,8 +1982,7 @@ export async function previousTrack(): Promise<void> {
     }
   }
 
-  queueIndex.set(idx);
-  playTrack(q[idx]);
+  await playTrack(q[idx], false, 0, { tracks: q, index: idx, commit() { queueIndex.set(idx); if (shuf) shuffledIndex.set(nextShuffleIndex); } });
 }
 
 // Seek to position (0-1)
@@ -2024,7 +1991,7 @@ export async function seek(position: number): Promise<void> {
     const mac = get(activeSqueezePlayer);
     if (mac) {
       const posSeconds = position * get(duration);
-      squeezeSeek(mac, posSeconds).catch(console.error);
+      await runOwnedSqueeze(mac, () => squeezeSeek(mac, posSeconds));
     }
     return;
   }
@@ -2053,6 +2020,7 @@ export async function seek(position: number): Promise<void> {
     updateMediaSessionPosition();
   } catch (err) {
     console.error("[Player] Seek failed:", err);
+    throw err;
   }
 }
 
@@ -2061,9 +2029,9 @@ export async function setVolume(sliderValue: number): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     if (mac) {
+      await runOwnedSqueeze(mac, () => squeezeSetVolume(mac, Math.round(sliderValue * 100)));
       volume.set(sliderValue);
       setSqueezeVolumeCooldown();
-      throttledSqueezeVolume(mac, Math.round(sliderValue * 100));
     }
     return;
   }
@@ -2076,7 +2044,6 @@ export async function setVolume(sliderValue: number): Promise<void> {
     return;
   }
 
-  volume.set(sliderValue);
   const vol = sliderToAudioVolume(sliderValue);
 
   try {
@@ -2088,16 +2055,18 @@ export async function setVolume(sliderValue: number): Promise<void> {
     if (nativeAudioUsed) {
       await nativeAudioSetVolume(vol);
     }
+    volume.set(sliderValue);
   } catch (err) {
     console.error("[Player] Volume set failed:", err);
+    throw err;
   }
 }
 
 // Toggle shuffle
-export function toggleShuffle(): void {
+export async function toggleShuffle(): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) squeezeSetShuffle(mac, !get(shuffle)).catch(console.error);
+    if (mac) { await runOwnedSqueeze(mac, () => squeezeSetShuffle(mac, !get(shuffle))); shuffle.set(!get(shuffle)); }
     return;
   }
 
@@ -2146,38 +2115,25 @@ export function toggleShuffle(): void {
 }
 
 // Cycle repeat mode
-export function cycleRepeat(): void {
+export async function setRepeatMode(mode: "none" | "all" | "one"): Promise<void> {
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
-    if (mac) {
-      const r = get(repeat);
-      const next = r === "none" ? "all" : r === "all" ? "one" : "off";
-      squeezeSetRepeat(mac, next).catch(console.error);
-    }
+    if (!mac) throw new Error("No Squeeze target selected");
+    await runOwnedSqueeze(mac, () => squeezeSetRepeat(mac, mode === "none" ? "off" : mode));
+  } else if (get(activeBackend) === "remote") {
+    const target = get(activeRemoteDevice);
+    if (target) sendRemoteCommand(target, "repeat", { repeat: mode });
     return;
-  }
-
-  if (get(activeBackend) === "remote") {
-    const targetId = get(activeRemoteDevice);
-    if (targetId) {
-      const r = get(repeat);
-      const next = r === "none" ? "all" : r === "all" ? "one" : "none";
-      sendRemoteCommand(targetId, "repeat", { repeat: next });
-    }
-    return;
-  }
-
-  repeat.update((r) => {
-    const next = r === "none" ? "all" : r === "all" ? "one" : "none";
-    if (get(activeBackend) === "native") {
-      nativeAudioSetRepeatOne(next === "one").catch(console.error);
-    }
-    return next;
-  });
+  } else if (get(activeBackend) === "native") await nativeAudioSetRepeatOne(mode === "one");
+  repeat.set(mode);
+}
+export async function cycleRepeat(): Promise<void> {
+  const mode = get(repeat);
+  await setRepeatMode(mode === "none" ? "all" : mode === "all" ? "one" : "none");
 }
 
 // Handle track end
-function handleTrackEnd(): void {
+export async function applyTrackEnd(): Promise<void> {
   // Record play for the track that just ended
   const track = get(currentTrack);
   if (track && playStartTime > 0) {
@@ -2225,7 +2181,7 @@ function handleTrackEnd(): void {
       }
     }
     // nextAlbumId=null means: no next track (queue end) or next track has no album
-    if (handleSleepTimerCheck(track, nextAlbumId)) {
+    if (handleSleepTimerCheck(track, nextAlbumId, false)) {
       // Timer fired — stop here, don't advance or repeat-one
       return;
     }
@@ -2234,15 +2190,15 @@ function handleTrackEnd(): void {
   // Repeat one logic for backends that don't handle it internally (like HTML5)
   if (get(repeat) === "one" && track) {
     console.log("[Player] Repeat one: restarting current track");
-    playTrack(track).catch(console.error);
+    await playTrack(track);
     return;
   }
 
-  nextTrack();
+  await nextTrack();
 }
 
 // Handle gapless advance — audio backend already playing the next track.
-function handleGaplessAdvance(): void {
+export async function applyGaplessAdvance(): Promise<void> {
   const q = get(queue);
 
   // Record play for the track that just ended
@@ -2289,12 +2245,13 @@ function handleGaplessAdvance(): void {
         nextAlbumId = nextTrack.album_id ?? null;
       }
     }
-    if (handleSleepTimerCheck(prevTrack, nextAlbumId)) {
+    if (handleSleepTimerCheck(prevTrack, nextAlbumId, false)) {
+      await pause();
       return;
     }
   }
 
-  const idx = _advanceQueueIndex();
+  const idx = _advanceQueueIndex(true);
   if (idx === null) {
     // End of queue after gapless advance — play was already recorded above.
     // Just handle queue end (listen-later removal, autoplay, stop).
@@ -2309,11 +2266,11 @@ function handleGaplessAdvance(): void {
     }
     const settings = get(appSettings);
     if (settings.autoplay) {
-      playRandomFromLibrary();
+      await playRandomFromLibrary();
     } else {
       // Stop playback completely
       if (get(activeBackend) === "native") {
-        nativeAudioStop().catch(console.error);
+        await nativeAudioStop();
       } else if (get(activeBackend) === "html5" && html5Audio) {
         html5Audio.pause();
         html5Audio.currentTime = 0;
@@ -2325,7 +2282,7 @@ function handleGaplessAdvance(): void {
     return;
   }
 
-  queueIndex.set(idx);
+  const commitAdvance = () => { _advanceQueueIndex(); queueIndex.set(idx); };
   const nextTrackObj = q[idx];
   if (!nextTrackObj) return;
 
@@ -2341,21 +2298,22 @@ function handleGaplessAdvance(): void {
       lastPreloadedPath,
     );
     lastPreloadedPath = null;
-    playTrack(nextTrackObj).catch(console.error);
+    await playTrack(nextTrackObj, false, 0, { tracks: q, index: idx, commit: commitAdvance });
     return;
   }
 
-  _advanceUiToTrack(nextTrackObj);
+  await _advanceUiToTrack(nextTrackObj, commitAdvance);
 }
 
 // Update all UI state for a track without touching the audio backend.
-async function _advanceUiToTrack(track: Track): Promise<void> {
+async function _advanceUiToTrack(track: Track, commitAdvance: () => void): Promise<void> {
   const previousTrackObj = get(currentTrack);
 
   // Full track for plugins / cover art
   const fullTrack = await getFullTrack(track.id, true);
   const trackForPlugins = fullTrack || track;
 
+  commitAdvance();
   currentTrack.set(trackForPlugins);
   currentTime.set(0);
   duration.set(track.duration || 0);
@@ -2440,47 +2398,33 @@ function _schedulePreload(): void {
 // Queue management functions
 
 // Add tracks to queue (Spotify-like: after current track + previously user-added tracks)
-export function addToQueue(tracks: Track[]): void {
-  const currentIdx = get(queueIndex);
-  const userCount = get(userQueueCount);
+export async function addToQueue(tracks: Track[]): Promise<void> {
+  const plan = readQueuePlan();
+  const currentIdx = plan.queueIndex;
+  const userCount = plan.userQueueCount;
   // Insert position: after current track + user-added tracks
   const insertPosition = currentIdx + 1 + userCount;
   const addedCount = tracks.length;
 
-  queue.update((q) => {
+  plan.queue = ((q) => {
     const newQueue = [...q];
     newQueue.splice(insertPosition, 0, ...tracks);
 
     // Emit queueChange event for plugins
-    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
 
     return newQueue;
-  });
+  })(plan.queue);
 
   // Update user queue count
-  userQueueCount.update((c) => c + addedCount);
+  plan.userQueueCount += addedCount;
 
   // Sync queue change to the active backend
-  if (get(activeBackend) === "squeeze") {
-    const mac = get(activeSqueezePlayer);
-    if (mac) {
-      squeezeInsertQueue(
-        mac,
-        tracks.map((t) => t.id),
-        insertPosition,
-      ).catch((e) =>
-        console.error("[Player] Failed to insert into squeeze queue:", e),
-      );
-    }
-  } else {
-    // Re-schedule gapless preload so the native backend picks up the new next track
-    _schedulePreload();
-  }
+
 
   // Update shuffled indices to reflect the shift in queue
   if (get(shuffle)) {
     console.log("Updating shuffle in addToQueue");
-    shuffledIndices.update((indices) => {
+    plan.shuffledIndices = ((indices) => {
       // 1. Shift existing indices that are after insertion point
       const shifted = indices.map((i) =>
         i >= insertPosition ? i + addedCount : i,
@@ -2499,52 +2443,50 @@ export function addToQueue(tracks: Track[]): void {
       const shuffledNew = shuffleArray(newIndices);
 
       return [...shifted, ...shuffledNew];
-    });
+    })(plan.shuffledIndices);
   }
+
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      await runOwnedSqueeze(mac, () => squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ));
+    }
+  }
+  commitQueuePlan(plan);
 }
+
 
 // Append tracks to the END of the queue (after all existing tracks).
 // Unlike `addToQueue` (which inserts "up next"), this preserves whatever
 // is already playing and whatever is queued — the new tracks play last.
-export function appendToQueueEnd(tracks: Track[]): void {
+export async function appendToQueueEnd(tracks: Track[]): Promise<void> {
+  const plan = readQueuePlan();
   if (tracks.length === 0) return;
-  const currentIdx = get(queueIndex);
+  const currentIdx = plan.queueIndex;
   const addedCount = tracks.length;
-  const insertPosition = currentIdx + 1 + get(userQueueCount);
+  const insertPosition = currentIdx + 1 + plan.userQueueCount;
 
-  queue.update((q) => {
+  plan.queue = ((q) => {
     const newQueue = [...q, ...tracks];
-
-    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
     return newQueue;
-  });
+  })(plan.queue);
 
   // These tracks go to the end, so they're "user-added" but only after
   // whatever user tracks are already pending. Bump userQueueCount by
   // the new count.
-  userQueueCount.update((c) => c + addedCount);
+  plan.userQueueCount += addedCount;
 
   // Sync to Squeeze backend (it has its own queue model).
-  if (get(activeBackend) === "squeeze") {
-    const mac = get(activeSqueezePlayer);
-    if (mac) {
-      squeezeInsertQueue(
-        mac,
-        tracks.map((t) => t.id),
-        // -1 means "append" in squeezeInsertQueue.
-        -1,
-      ).catch((e) =>
-        console.error("[Player] Failed to append to squeeze queue:", e),
-      );
-    }
-  } else {
-    _schedulePreload();
-  }
+
 
   // Shuffle: append the new indices at the tail of the shuffled list
   // so they play after everything else.
   if (get(shuffle)) {
-    shuffledIndices.update((indices) => {
+    plan.shuffledIndices = ((indices) => {
       const start = indices.length > 0
         ? Math.max(...indices) + 1
         : currentIdx + 1;
@@ -2553,10 +2495,24 @@ export function appendToQueueEnd(tracks: Track[]): void {
         (_, i) => start + i,
       );
       return [...indices, ...newIndices];
-    });
+    })(plan.shuffledIndices);
   }
-  void insertPosition;
+
+
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      await runOwnedSqueeze(mac, () => squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        // -1 means "append" in squeezeInsertQueue.
+        -1,
+      ));
+    }
+  }
+  commitQueuePlan(plan);
 }
+
 
 // Insert tracks at currentIdx + 1 — plays immediately after the current track.
 // Does NOT increment userQueueCount (AD4). The track at currentIdx+1 is picked
@@ -2565,20 +2521,19 @@ export function appendToQueueEnd(tracks: Track[]): void {
 // Shuffle-aware: when shuffle is ON, indices are inserted at shuffledIndex+1
 // (not appended to end). The batch is internally shuffled so they are random
 // relative to each other while maintaining position.
-export function playNext(tracks: Track[]): void {
+export async function playNext(tracks: Track[]): Promise<void> {
+  const plan = readQueuePlan();
   if (tracks.length === 0) return;
-  const currentIdx = get(queueIndex);
+  const currentIdx = plan.queueIndex;
   const addedCount = tracks.length;
   // Insert at currentIdx+1 — directly after current track
   const insertPosition = currentIdx + 1;
 
-  queue.update((q) => {
+  plan.queue = ((q) => {
     const newQueue = [...q];
     newQueue.splice(insertPosition, 0, ...tracks);
-
-    pluginEvents.emit("queueChange", { queue: newQueue, index: currentIdx });
     return newQueue;
-  });
+  })(plan.queue);
 
   // Play Next does NOT increment userQueueCount.
   // The inserted tracks sit at currentIdx+1 and are picked up by
@@ -2586,24 +2541,11 @@ export function playNext(tracks: Track[]): void {
   // shift _advanceQueueIndex into the user-queue decrement path (AD4).
 
   // Sync to Squeeze backend
-  if (get(activeBackend) === "squeeze") {
-    const mac = get(activeSqueezePlayer);
-    if (mac) {
-      squeezeInsertQueue(
-        mac,
-        tracks.map((t) => t.id),
-        insertPosition,
-      ).catch((e) =>
-        console.error("[Player] Failed to insert into squeeze queue:", e),
-      );
-    }
-  } else {
-    _schedulePreload();
-  }
+
 
   // Update shuffled indices — insert at shuffledIndex+1, NOT appended to end.
   if (get(shuffle)) {
-    shuffledIndices.update((indices) => {
+    plan.shuffledIndices = ((indices) => {
       // 1. Shift existing indices at or after insertion point
       const shifted = indices.map((i) =>
         i >= insertPosition ? i + addedCount : i,
@@ -2620,7 +2562,7 @@ export function playNext(tracks: Track[]): void {
       const shuffledNew = shuffleArray(newIndices);
 
       // 4. Insert at shuffledIndex+1 (not append to end)
-      const shufIdx = get(shuffledIndex);
+      const shufIdx = plan.shuffledIndex;
       const insertAt = shufIdx + 1;
 
       return [
@@ -2628,103 +2570,95 @@ export function playNext(tracks: Track[]): void {
         ...shuffledNew,
         ...shifted.slice(insertAt),
       ];
-    });
+    })(plan.shuffledIndices);
   }
+
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    if (mac) {
+      await runOwnedSqueeze(mac, () => squeezeInsertQueue(
+        mac,
+        tracks.map((t) => t.id),
+        insertPosition,
+      ));
+    }
+  }
+  commitQueuePlan(plan);
 }
 
-// Remove track from queue by index
-export function removeFromQueue(index: number): void {
-  const currentIdx = get(queueIndex);
 
-  queue.update((q) => {
+// Remove track from queue by index
+export async function removeFromQueue(index: number): Promise<void> {
+  if (get(activeBackend) === "squeeze" && get(currentTrack) && index === get(queueIndex)) {
+    throw new PlaybackFailure({ code: "unsupported", message: "The active Squeeze queue entry cannot be removed; select another entry first", retryable: false });
+  }
+  const plan = readQueuePlan();
+  const currentIdx = plan.queueIndex;
+
+  plan.queue = ((q) => {
     const newQueue = [...q];
     newQueue.splice(index, 1);
     return newQueue;
-  });
+  })(plan.queue);
 
   // Adjust current index if needed
   if (index < currentIdx) {
-    queueIndex.update((i) => i - 1);
+    plan.queueIndex -= 1;
   }
 
   // Update shuffle indices
   if (get(shuffle)) {
-    shuffledIndices.update((indices) => {
+    plan.shuffledIndices = ((indices) => {
       // Remove the deleted index and shift others
       return indices
         .filter((i) => i !== index)
         .map((i) => (i > index ? i - 1 : i));
-    });
+    })(plan.shuffledIndices);
 
-    // Handle shuffledIndex pointer if strictly necessary (e.g. if we removed the current shuffled track)
-    // But usually queueIndex update handles the 'current track' logic.
-    // If we removed the track we were PLAYING, we might need to find where we are now.
-    // But the player usually keeps playing the same audio element until explicitly changed.
 
-    // Sync shuffledIndex to where currentIdx is now
-    const newCurrentIdx = index < currentIdx ? currentIdx - 1 : currentIdx;
-    // If we removed the current track (index === currentIdx), then we are now pointing to the next one (which shifted down)
-    // but queueIndex might still be pointing to the same slot number (if it wasn't last).
-
-    // Safest is to just re-find currentIdx in shuffled list?
-    // But wait, if we are playing, we want to stay consistent.
-    // Let's rely on 'nextTrack' logic to use the pointers.
-    // But we should ensure shuffledIndex points to the correct shuffled slot that corresponds to queueIndex.
-    // However, updating the list (filter/map) preserved relative order of remaining items.
-    // So the pointer `shuffledIndex` (which is an index into shuffledIndices array) should mostly be fine,
-    // UNLESS we removed an item *before* the current shuffled position in the SHUFFLED list.
-
-    // Actually, shuffledIndex is "index in the shuffled array".
-    // If we removed an item that was at shuffledIndices[0] and we are at shuffledIndices[5],
-    // then our pointer is now off by 1?
-    // YES. We need to know WHICH item in shuffledIndices was removed.
-    const ptr = get(shuffledIndex);
-    const indices = get(shuffledIndices); // This is the OLD list (before update runs technically, but inside update we return new)
-    // Wait, 'update' callback gets the old value.
-    // We can't easily sync the separate store 'shuffledIndex' inside 'shuffledIndices.update'.
-    // We should do it outside.
   }
 
   // Fix shuffledIndex pointer
   if (get(shuffle)) {
     // We need to find where the current track is now in the shuffled list
     // The current track index in queue might have changed (handled above).
-    const actualCurrentQIdx = get(queueIndex);
-    const sIndices = get(shuffledIndices);
+    const actualCurrentQIdx = plan.queueIndex;
+    const sIndices = plan.shuffledIndices;
     const ptr = sIndices.indexOf(actualCurrentQIdx);
     if (ptr !== -1) {
-      shuffledIndex.set(ptr);
+      plan.shuffledIndex = ptr;
     }
   }
 
   // Sync queue change to the active backend
+
+
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     const current = get(currentTrack);
     if (mac && current) {
-      const q = get(queue);
-      squeezeUpdateQueue(
+      const q = plan.queue;
+      await runOwnedSqueeze(mac, () => squeezeUpdateQueue(
         mac,
         q.map((t) => t.id),
         current.id,
-      ).catch((e) =>
-        console.error("[Player] Failed to update squeeze queue:", e),
-      );
+        plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined,
+      ));
     }
-  } else {
-    // Re-schedule gapless preload since queue changed
-    _schedulePreload();
   }
+  commitQueuePlan(plan);
 }
 
+
 // Reorder queue (move track from one position to another)
-export function reorderQueue(fromIndex: number, toIndex: number): void {
-  const currentIdx = get(queueIndex);
+export async function reorderQueue(fromIndex: number, toIndex: number): Promise<void> {
+  const plan = readQueuePlan();
+  const currentIdx = plan.queueIndex;
   const isShuffle = get(shuffle);
 
   if (fromIndex === toIndex) return;
 
-  const queueBefore = get(queue);
+  const queueBefore = plan.queue;
   if (
     fromIndex < 0 ||
     toIndex < 0 ||
@@ -2734,20 +2668,20 @@ export function reorderQueue(fromIndex: number, toIndex: number): void {
     return;
   }
 
-  queue.update((q) => {
+  plan.queue = ((q) => {
     const newQueue = [...q];
     const [removed] = newQueue.splice(fromIndex, 1);
     newQueue.splice(toIndex, 0, removed);
     return newQueue;
-  });
+  })(plan.queue);
 
   // Adjust current index
   if (fromIndex === currentIdx) {
-    queueIndex.set(toIndex);
+    plan.queueIndex = toIndex;
   } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
-    queueIndex.update((i) => i - 1);
+    plan.queueIndex -= 1;
   } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
-    queueIndex.update((i) => i + 1);
+    plan.queueIndex += 1;
   }
 
   // Update shuffle indices
@@ -2755,7 +2689,7 @@ export function reorderQueue(fromIndex: number, toIndex: number): void {
   // Indices between A and B shifted.
   // The item at 'fromIndex' is now at 'toIndex'.
   if (isShuffle) {
-    shuffledIndices.update((indices) => {
+    plan.shuffledIndices = ((indices) => {
       const fromPos = indices.indexOf(fromIndex);
       const toPos = indices.indexOf(toIndex);
 
@@ -2780,88 +2714,73 @@ export function reorderQueue(fromIndex: number, toIndex: number): void {
       }
 
       return remapped;
-    });
+    })(plan.shuffledIndices);
 
     // Keep shuffled cursor aligned to the currently playing queue index.
-    const currentQueueIdx = get(queueIndex);
-    const ptr = get(shuffledIndices).indexOf(currentQueueIdx);
+    const currentQueueIdx = plan.queueIndex;
+    const ptr = plan.shuffledIndices.indexOf(currentQueueIdx);
     if (ptr !== -1) {
-      shuffledIndex.set(ptr);
+      plan.shuffledIndex = ptr;
     }
   }
 
-  pluginEvents.emit("queueChange", {
-    queue: get(queue),
-    index: get(queueIndex),
-  });
-
   // Sync queue change to the active backend
+
+
   if (get(activeBackend) === "squeeze") {
     const mac = get(activeSqueezePlayer);
     const current = get(currentTrack);
     if (mac && current) {
-      const q = get(queue);
-      squeezeUpdateQueue(
+      const q = plan.queue;
+      await runOwnedSqueeze(mac, () => squeezeUpdateQueue(
         mac,
         q.map((t) => t.id),
         current.id,
-      ).catch((e) =>
-        console.error("[Player] Failed to update squeeze queue:", e),
-      );
+        plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined,
+      ));
     }
-  } else {
-    _schedulePreload();
   }
+  commitQueuePlan(plan);
 }
 
+
 // Clear upcoming queue (keep history)
-export function clearUpcoming(): void {
-  const currentIdx = get(queueIndex);
-  queue.update((q) => q.slice(0, currentIdx + 1));
-  userQueueCount.set(0); // Clear user queue count
+export async function clearUpcoming(): Promise<void> {
+  const plan = readQueuePlan();
+  const currentIdx = plan.queueIndex;
+  plan.queue = ((q) => q.slice(0, currentIdx + 1))(plan.queue);
+  plan.userQueueCount = 0; // Clear user queue count
 
   // Update shuffle: remove indices that are now out of bounds
   if (get(shuffle)) {
-    shuffledIndices.update((indices) => indices.filter((i) => i <= currentIdx));
+    plan.shuffledIndices = ((indices) => indices.filter((i) => i <= currentIdx))(plan.shuffledIndices);
     // And reset/sync pointer
-    const ptr = get(shuffledIndices).indexOf(currentIdx);
-    shuffledIndex.set(ptr !== -1 ? ptr : 0);
+    const ptr = plan.shuffledIndices.indexOf(currentIdx);
+    plan.shuffledIndex = ptr !== -1 ? ptr : 0;
   }
+
+  if (get(activeBackend) === "squeeze") {
+    const mac = get(activeSqueezePlayer);
+    const current = get(currentTrack);
+    if (mac && current) await runOwnedSqueeze(mac, () => squeezeUpdateQueue(mac, plan.queue.map(t => t.id), current.id, plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined));
+  }
+  commitQueuePlan(plan);
 }
 
+
 // Play from specific index in queue
-export function playFromQueue(index: number): void {
-  const q = get(queue);
-  const currentIdx = get(queueIndex);
-  const userCount = get(userQueueCount);
-
-  if (index >= 0 && index < q.length) {
-    // Calculate how many user-queued tracks are being skipped
-    const userQueueEnd = currentIdx + 1 + userCount;
-    if (index > currentIdx && index <= userQueueEnd) {
-      // Skipping within user queue
-      const skipped = index - currentIdx;
-      userQueueCount.update((c) => Math.max(0, c - skipped));
-    } else if (index > userQueueEnd) {
-      // Skipping past user queue entirely
-      userQueueCount.set(0);
-    }
-    // If jumping backwards, keep user queue count as is
-
-    queueIndex.set(index);
-    playTrack(q[index]);
-
-    // Sync shuffle pointer
-    if (get(shuffle)) {
-      const ptr = get(shuffledIndices).indexOf(index);
-      if (ptr !== -1) {
-        shuffledIndex.set(ptr);
-      } else {
-        // If not found in shuffle list (weird state), regenerate or append?
-        // Should be there.
-      }
-    }
+export async function playFromQueue(index: number): Promise<void> {
+  const plan = readQueuePlan();
+  if (!plan.queue[index]) throw new Error("Queue entry is unavailable");
+  const userQueueEnd = plan.queueIndex + 1 + plan.userQueueCount;
+  if (index > plan.queueIndex && index <= userQueueEnd) plan.userQueueCount = Math.max(0, plan.userQueueCount - (index - plan.queueIndex));
+  else if (index > userQueueEnd) plan.userQueueCount = 0;
+  plan.queueIndex = index;
+  if (get(shuffle)) {
+    const pointer = plan.shuffledIndices.indexOf(index);
+    if (pointer !== -1) plan.shuffledIndex = pointer;
   }
+  await playTrack(plan.queue[index], false, 0, { tracks: plan.queue, index, commit: () => commitQueuePlan(plan) });
 }
 
 /**
@@ -3001,54 +2920,18 @@ function throttledSqueezeVolume(mac: string, vol: number) {
  */
 async function handleRemoteCommand(payload: any) {
   const { command, data } = payload;
-  console.log("[Player] Received remote command:", command);
-
+  const dispatch = async (intent: import("../types").ApplicationIntent, fallback: () => Promise<void>) => {
+    if (commandSink) await commandSink(intent); else await fallback();
+  };
   switch (command) {
-    case "resume":
-      await resume();
-      break;
-    case "pause":
-      await pause();
-      break;
-    case "next":
-      nextTrack();
-      break;
-    case "previous":
-      previousTrack();
-      break;
-    case "seek":
-      if (data?.position != null) {
-        seek(data.position);
-      }
-      break;
-    case "volume":
-      if (data?.volume != null) {
-        setVolume(data.volume);
-      }
-      break;
-    case "shuffle":
-      if (data?.shuffle != null) {
-        // If local, use toggleShuffle to handle index regeneration
-        if (get(activeBackend) !== "remote") {
-          if (get(shuffle) !== data.shuffle) toggleShuffle();
-        } else {
-          shuffle.set(data.shuffle);
-        }
-      }
-      break;
-    case "repeat":
-      if (data?.repeat != null) {
-        if (get(activeBackend) !== "remote") {
-          // Cycle until match? Or just set directly
-          repeat.set(data.repeat);
-          if (get(activeBackend) === "native") {
-            nativeAudioSetRepeatOne(data.repeat === "one").catch(console.error);
-          }
-        } else {
-          repeat.set(data.repeat);
-        }
-      }
-      break;
+    case "resume": await dispatch({ type: "resume" }, resume); break;
+    case "pause": await dispatch({ type: "pause" }, pause); break;
+    case "next": await dispatch({ type: "next" }, nextTrack); break;
+    case "previous": await dispatch({ type: "previous" }, previousTrack); break;
+    case "seek": if (data?.position != null) await dispatch({ type: "seek", seconds: data.position * get(duration) }, () => seek(data.position)); break;
+    case "volume": if (data?.volume != null) await dispatch({ type: "set_volume", volume: data.volume }, () => setVolume(data.volume)); break;
+    case "shuffle": if (data?.shuffle != null) await dispatch({ type: "set_shuffle", enabled: data.shuffle }, async () => { if (get(shuffle) !== data.shuffle) await toggleShuffle(); }); break;
+    case "repeat": if (["none", "all", "one"].includes(data?.repeat)) await dispatch({ type: "set_repeat", mode: data.repeat }, () => setRepeatMode(data.repeat)); break;
   }
 }
 
@@ -3099,3 +2982,42 @@ export function toggleRemoteControl(device: RemoteDevice) {
       }
     }
   }
+
+/** Backend completion sources enter the same desktop command lane. */
+type CompletionEmitter = (kind: "completion" | "gapless") => Promise<void>;
+let completionSink: (() => CompletionEmitter) | undefined;
+export function bindPlaybackSignals(sink: typeof completionSink): void { completionSink = sink; }
+function handleTrackEnd(emit = completionSink?.()): void { void (emit ? emit("completion") : applyTrackEnd()).catch(console.error); }
+function handleGaplessAdvance(emit = completionSink?.()): void { void (emit ? emit("gapless") : applyGaplessAdvance()).catch(console.error); }
+/** Stop the owned PC pipeline before confirming a different output. */
+export async function stopLocalOutput(): Promise<void> {
+  if (get(activeBackend) === "native") await nativeAudioStop();
+  if (html5Audio) { html5Audio.pause(); html5Audio.currentTime = 0; }
+  isPlaying.set(false);
+  currentTime.set(0);
+}
+
+function readQueuePlan() {
+  return { queue: get(queue), queueIndex: get(queueIndex), userQueueCount: get(userQueueCount), shuffledIndices: get(shuffledIndices), shuffledIndex: get(shuffledIndex) };
+}
+function commitQueuePlan(plan: ReturnType<typeof readQueuePlan>): void {
+  queue.set(plan.queue);
+  queueIndex.set(plan.queueIndex);
+  userQueueCount.set(plan.userQueueCount);
+  shuffledIndices.set(plan.shuffledIndices);
+  shuffledIndex.set(plan.shuffledIndex);
+  pluginEvents.emit("queueChange", { queue: plan.queue, index: plan.queueIndex });
+  _schedulePreload();
+}
+
+let commandSink: ((intent: import("../types").ApplicationIntent) => Promise<void>) | undefined;
+export function bindDesktopCommands(sink: typeof commandSink): void { commandSink = sink; }
+function emitDesktopCommand(intent: import("../types").ApplicationIntent, fallback: () => Promise<void>): void {
+  void (commandSink ? commandSink(intent) : fallback()).catch(console.error);
+}
+
+async function runOwnedSqueeze(mac: string, operation: () => Promise<void>): Promise<void> {
+  const owns = captureSqueezeTargetOwnership(mac);
+  await operation();
+  if (!owns()) throw new PlaybackFailure({ code: "revision_conflict", message: "Squeeze output ownership changed", retryable: false }, "superseded", ["Previous Squeeze target acknowledged the operation"]);
+}

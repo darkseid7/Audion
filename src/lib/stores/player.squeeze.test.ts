@@ -125,7 +125,7 @@ describe("Squeeze play request ownership", () => {
     duration.set(200);
     isPlaying.set(false);
 
-    await playTrack({ id: 1, title: "Failed request", duration: 100, cover_url: "fixture" } as any);
+    await expect(playTrack({ id: 1, title: "Failed request", duration: 100, cover_url: "fixture" } as any)).rejects.toThrow("Squeeze playback failed");
 
     expect(get(currentTrack)?.id).toBe(2);
     expect(get(currentTime)).toBe(7);
@@ -160,7 +160,7 @@ describe("Squeeze play request ownership", () => {
       }
 
       finishPlay();
-      await playing;
+      await expect(playing).rejects.toThrow("Squeeze playback superseded");
 
       expect(get(currentTrack)?.id ?? null).toBe(transition === "disconnect" ? null : 2);
       expect(get(currentTime)).toBe(transition === "disconnect" ? 0 : 7);
@@ -203,4 +203,82 @@ it("shares pure playback helper identities between facade and runtime", async ()
   expect(runtime.isStreaming).toBe(helper.isStreaming);
   expect(facade.sliderToAudioVolume).toBe(runtime.sliderToAudioVolume);
   expect(facade.audioVolumeToSlider).toBe(runtime.audioVolumeToSlider);
+});
+
+it("does not publish a replacement queue until Squeeze acknowledges it", async () => {
+  vi.stubGlobal("navigator", {});
+  const { playTracks, queueIndex } = await import("$lib/application/desktop/player-runtime");
+  activeBackend.set("squeeze");
+  activeSqueezePlayer.set("A");
+  queue.set([{ id: 9 } as any]);
+  queueIndex.set(0);
+  let finish!: () => void;
+  squeezePlay.mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+  const pending = playTracks([{ id: 1, cover_url: "fixture" } as any, { id: 2, cover_url: "fixture" } as any], 1);
+  await vi.waitFor(() => expect(squeezePlay).toHaveBeenCalledWith("A", [1, 2], 1));
+  expect(get(queue).map(t => t.id)).toEqual([9]);
+  finish();
+  await pending;
+  expect(get(queue).map(t => t.id)).toEqual([1, 2]);
+  expect(get(queueIndex)).toBe(1);
+  activeBackend.set("none");
+  activeSqueezePlayer.set(null);
+  vi.unstubAllGlobals();
+});
+
+it("keeps the queue and shuffle cursor unchanged when Squeeze queue synchronization fails", async () => {
+  const { playNext, queueIndex, shuffle, shuffledIndices } = await import("$lib/application/desktop/player-runtime");
+  const { squeezeInsertQueue } = await import("$lib/api/tauri");
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  queue.set([{ id: 1 } as any, { id: 2 } as any]); queueIndex.set(0);
+  shuffle.set(true); shuffledIndices.set([0, 1]);
+  vi.mocked(squeezeInsertQueue).mockRejectedValueOnce(new Error("queue refused"));
+  await expect(playNext([{ id: 3 } as any])).rejects.toThrow("queue refused");
+  expect(get(queue).map(t => t.id)).toEqual([1, 2]);
+  expect(get(shuffledIndices)).toEqual([0, 1]);
+  activeBackend.set("none"); activeSqueezePlayer.set(null); shuffle.set(false);
+});
+
+it.each([
+  ["pause", "squeezePause"], ["resume", "squeezeResume"],
+  ["nextTrack", "squeezeNext"], ["previousTrack", "squeezePrevious"],
+  ["seek", "squeezeSeek"], ["setVolume", "squeezeSetVolume"],
+] as const)("propagates %s backend rejection without a success-shaped return", async (method, apiMethod) => {
+  const runtime = await import("$lib/application/desktop/player-runtime");
+  const api = await import("$lib/api/tauri");
+  const { squeezePlayerState } = await import("./squeeze");
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  squeezePlayerState.set({ current_track: { id: 1 } } as any);
+  vi.mocked(api[apiMethod]).mockRejectedValueOnce(new Error("acknowledgement failed"));
+  await expect((runtime[method] as (value?: number) => Promise<void>)(0.5)).rejects.toThrow("acknowledgement failed");
+  activeBackend.set("none"); activeSqueezePlayer.set(null);
+});
+
+it("does not commit an acknowledged queue edit after its Squeeze owner changed", async () => {
+  const { playNext } = await import("$lib/application/desktop/player-runtime");
+  const { squeezeInsertQueue } = await import("$lib/api/tauri");
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  queue.set([{ id: 1 } as any]);
+  let finish!: () => void;
+  vi.mocked(squeezeInsertQueue).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+  const editing = playNext([{ id: 2 } as any]);
+  activeBackend.set("remote");
+  finish();
+  await expect(editing).rejects.toMatchObject({ status: "superseded" });
+  expect(get(queue).map(t => t.id)).toEqual([1]);
+  activeBackend.set("none"); activeSqueezePlayer.set(null);
+});
+
+it.each([true, false])("rejects removing the active Squeeze occurrence before effects (playing=%s)", async playing => {
+  const { removeFromQueue, queueIndex } = await import("$lib/application/desktop/player-runtime");
+  const { squeezeUpdateQueue } = await import("$lib/api/tauri");
+  vi.mocked(squeezeUpdateQueue).mockClear();
+  const tracks = [{ id: 7 } as any, { id: 7 } as any];
+  activeBackend.set("squeeze"); activeSqueezePlayer.set("A");
+  queue.set(tracks); queueIndex.set(1); currentTrack.set(tracks[1]); isPlaying.set(playing);
+  await expect(removeFromQueue(1)).rejects.toMatchObject({ controlError: { code: "unsupported" } });
+  expect(get(queue)).toBe(tracks);
+  expect(get(queueIndex)).toBe(1);
+  expect(squeezeUpdateQueue).not.toHaveBeenCalled();
+  activeBackend.set("none"); activeSqueezePlayer.set(null);
 });

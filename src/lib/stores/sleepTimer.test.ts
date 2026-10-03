@@ -207,3 +207,13 @@ describe('playNext() shuffle index manipulation', () => {
     expect(q.map((t) => t.title)).toEqual(['A', 'B', 'F', 'G', 'C', 'D', 'E']);
   });
 });
+
+it('supports a decision-only timer trigger without recursively dispatching pause', () => {
+  const dispatched = vi.fn().mockResolvedValue(undefined);
+  const dispose = initializeSleepTimer(dispatched);
+  armTrackEndTimer();
+  expect(handleSleepTimerCheck(makeTrack(), null, false)).toBe(true);
+  expect(dispatched).not.toHaveBeenCalled();
+  expect(get(sleepTimerTriggerMode)).toBe('time');
+  dispose();
+});

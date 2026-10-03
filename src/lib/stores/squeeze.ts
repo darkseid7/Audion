@@ -10,7 +10,7 @@ import {
   type SqueezePlayerInfo,
 } from "$lib/api/tauri";
 import { playbackStateWriter } from "$lib/stores/playback-state";
-const { currentTrack, isPlaying, currentTime, duration, volume, activeBackend, shuffle, repeat } = playbackStateWriter;
+const { currentTrack, isPlaying, currentTime, duration, volume, activeBackend, shuffle, repeat, queueIndex } = playbackStateWriter;
 import { activeRemoteDevice } from "$lib/stores/websocket";
 import {
   getTrackByIdSync,
@@ -199,12 +199,24 @@ export function initializeSqueeze(): () => void {
     };
 }
 
+type ObservationSink = () => (apply: () => Promise<void>) => Promise<void>;
+let observationSink: ObservationSink | undefined;
+export function bindSqueezeObservations(sink: ObservationSink | undefined): void { observationSink = sink; }
 async function pollSqueezeState(owner: SqueezePollOwner) {
   if (!ownsSqueezePoll(owner)) return;
-
+  const publish = observationSink?.();
   try {
     const info = await squeezeGetPlayerState(owner.mac);
-    if (!ownsSqueezePoll(owner)) return;
+    const apply = async () => {
+      if (!ownsSqueezePoll(owner)) return;
+      await applySqueezeState(owner, info);
+    };
+    if (publish) await publish(apply); else await apply();
+  } catch {
+    // Player may have disconnected; ownership checks prevent stale publication.
+  }
+}
+async function applySqueezeState(owner: SqueezePollOwner, info: SqueezePlayerInfo): Promise<void> {
     squeezePlayerState.set(info);
 
     const playing = info.state === "Playing";
@@ -226,7 +238,7 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
 
       const currentObj = get(currentTrack);
       let localTrack = getTrackByIdSync(info.current_track.id);
-      const sameTrack = currentObj?.id === info.current_track.id;
+      const sameTrack = currentObj?.id === info.current_track.id && (info.current_queue_index == null || get(queueIndex) === info.current_queue_index);
 
       // If track not in memory cache, fetch from backend and cache it
       if (!localTrack && !sameTrack) {
@@ -254,7 +266,7 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
       if (!sameTrack || canUpgradeFromLocal) {
         // In squeeze mode, track transitions are driven by state polling, not native/html5 end events.
         // Record the previous track play when we detect a real track-id change.
-        if (!sameTrack && prevTrack && prevTrack.id !== info.current_track.id) {
+        if (!sameTrack && prevTrack) {
           const durationPlayed = Math.floor(prevElapsed);
           if (durationPlayed > 5) {
             if (ownsSqueezePoll(owner)) {
@@ -288,6 +300,8 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
       if (get(currentTrack) !== null) currentTrack.set(null);
     }
 
+    if (info.current_queue_index != null) queueIndex.set(info.current_queue_index);
+
     if (Date.now() > volumeCooldownUntil) {
       const vol = info.volume / 100;
       if (Math.abs(get(volume) - vol) > 0.01) volume.set(vol);
@@ -315,8 +329,10 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
     ) {
       if (pendingSqueezeForcedEnd === null) {
         const watchdogOwner = owner;
+        const publishWatchdog = observationSink?.();
         pendingSqueezeForcedEnd = setTimeout(() => {
           pendingSqueezeForcedEnd = null;
+          const finish = async () => {
           if (!ownsSqueezePoll(watchdogOwner)) return;
           const st = get(currentTime);
           const du = get(duration);
@@ -339,10 +355,12 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
             }
             // Stop the LMS player so it transitions to "Stopped" — the
             // next poll will then drive isPlaying to false normally.
-            squeezeStop(watchdogOwner.mac).catch(console.error);
-            // Mark this track so we don't fire the watchdog again for it.
+            // Claim this completion even if stopping fails: its play was already recorded.
             lastForcedEndTrackId = trackId;
+            await squeezeStop(watchdogOwner.mac);
           }
+          };
+          void (publishWatchdog ? publishWatchdog(finish) : finish()).catch(console.error);
         }, 1500);
       }
     } else {
@@ -355,13 +373,10 @@ async function pollSqueezeState(owner: SqueezePollOwner) {
         lastForcedEndTrackId = null;
       }
     }
-  } catch {
-    // Player may have disconnected
-  }
 }
 
 /** Activate a player as the Squeeze control target. */
-export function activateSqueezeTarget(mac: string): void {
+export function commitSqueezeTarget(mac: string): void {
   activeRemoteDevice.set(null);
   activeBackend.set("squeeze");
   activeSqueezePlayer.set(mac);
@@ -378,3 +393,11 @@ export function resetSqueezePollingForTests(): void {
   lastForcedEndTrackId = null;
 }
 
+
+let selectTarget: ((mac: string) => Promise<void>) | undefined;
+export function bindSqueezeSelection(select: typeof selectTarget): void { selectTarget = select; }
+/** Desktop UI selection is serialized once desktop bootstrap registers its owner. */
+export function activateSqueezeTarget(mac: string): void | Promise<void> {
+  if (selectTarget) return selectTarget(mac);
+  commitSqueezeTarget(mac);
+}

@@ -552,6 +552,7 @@ pub async fn squeeze_update_queue(
     mac: String,
     track_ids: Vec<i64>,
     current_track_id: i64,
+    current_index: Option<usize>,
     state: State<'_, SqueezeState>,
     db: State<'_, Database>,
 ) -> Result<(), String> {
@@ -559,11 +560,10 @@ pub async fn squeeze_update_queue(
 
     let tracks: Vec<QueueTrack> = {
         let conn = db.conn.lock().unwrap();
-        track_ids.iter().filter_map(|&id| {
+        resolve_queue_replacement(&track_ids, current_index, |id| {
             crate::db::queries::get_track_by_id(&conn, id)
-                .ok()
-                .flatten()
-                .map(|t| QueueTrack {
+                .map_err(|error| error.to_string())
+                .map(|track| track.map(|t| QueueTrack {
                     id: t.id,
                     title: t.title.unwrap_or_else(|| "Unknown".to_string()),
                     artist: t.artist.unwrap_or_default(),
@@ -571,14 +571,47 @@ pub async fn squeeze_update_queue(
                     path: t.path,
                     duration: t.duration.map(|d| d as f64).unwrap_or(0.0),
                     format: t.format.unwrap_or_else(|| "mp3".to_string()),
-                })
-        }).collect()
+                }))
+        })?
     };
 
     let server = state.0.lock().await;
     let mut map = server.players.lock().await;
     let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-    player.queue.replace_queue_keep_current(tracks, current_track_id);
+    player.queue.replace_queue_keep_current_at(tracks, current_track_id, current_index)?;
 
     Ok(())
+}
+
+/// Explicit occurrence indices require a complete resolution; filtering would shift identity.
+fn resolve_queue_replacement(
+    ids: &[i64],
+    current_index: Option<usize>,
+    mut load: impl FnMut(i64) -> Result<Option<QueueTrack>, String>,
+) -> Result<Vec<QueueTrack>, String> {
+    let mut tracks = Vec::with_capacity(ids.len());
+    for &id in ids {
+        match load(id) {
+            Ok(Some(track)) => tracks.push(track),
+            Ok(None) if current_index.is_some() => return Err(format!("Track {id} is unavailable")),
+            Err(error) if current_index.is_some() => return Err(error),
+            _ => {}, // Retain the legacy omitted-index filtering behavior.
+        }
+    }
+    Ok(tracks)
+}
+
+#[cfg(test)]
+mod occurrence_resolution_tests {
+    use super::*;
+    #[test]
+    fn explicit_occurrence_rejects_missing_tracks_instead_of_shifting_indices() {
+        let resolved = resolve_queue_replacement(&[7, 9, 7], Some(2), |_| Ok(None));
+        assert!(resolved.is_err());
+    }
+    #[test]
+    fn legacy_resolution_keeps_filtering_missing_tracks() {
+        let resolved = resolve_queue_replacement(&[7, 9], None, |_| Ok(None)).unwrap();
+        assert!(resolved.is_empty());
+    }
 }
