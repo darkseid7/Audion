@@ -1,0 +1,861 @@
+[
+  {
+    "name": "play_album-0",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-0",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 1,
+        "playMode": "liked_only",
+        "startTrackId": 2
+      }
+    }
+  },
+  {
+    "name": "play_playlist-1",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-1",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_playlist",
+        "playlistId": 1
+      }
+    }
+  },
+  {
+    "name": "play_artist-2",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-2",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_artist",
+        "artistName": "Artist"
+      }
+    }
+  },
+  {
+    "name": "play_liked-3",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-3",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_liked"
+      }
+    }
+  },
+  {
+    "name": "play_track-4",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-4",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_track",
+        "trackId": 2
+      }
+    }
+  },
+  {
+    "name": "select_output-5",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-5",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "select_output",
+        "output": {
+          "kind": "pc"
+        }
+      }
+    }
+  },
+  {
+    "name": "pause-6",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-6",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "pause"
+      }
+    }
+  },
+  {
+    "name": "resume-7",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-7",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "resume"
+      }
+    }
+  },
+  {
+    "name": "next-8",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-8",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "next"
+      }
+    }
+  },
+  {
+    "name": "previous-9",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-9",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "previous"
+      }
+    }
+  },
+  {
+    "name": "seek-10",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-10",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "seek",
+        "seconds": 12.5
+      }
+    }
+  },
+  {
+    "name": "set_volume-11",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-11",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_volume",
+        "volume": 0.5
+      }
+    }
+  },
+  {
+    "name": "set_shuffle-12",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-12",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_shuffle",
+        "enabled": true
+      }
+    }
+  },
+  {
+    "name": "set_repeat-13",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-13",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_repeat",
+        "mode": "all"
+      }
+    }
+  },
+  {
+    "name": "queue_insert-14",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-14",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_insert",
+        "trackIds": [
+          1,
+          2
+        ],
+        "placement": "next"
+      }
+    }
+  },
+  {
+    "name": "queue_append-15",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-15",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_append",
+        "trackIds": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "name": "queue_remove-16",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-16",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_remove",
+        "entryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "queue_reorder-17",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-17",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_reorder",
+        "entryId": "entry-2",
+        "beforeEntryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "queue_clear_upcoming-18",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-18",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_clear_upcoming"
+      }
+    }
+  },
+  {
+    "name": "queue_play-19",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-19",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_play",
+        "entryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "select_output-20",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-20",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "select_output",
+        "output": {
+          "kind": "squeeze",
+          "playerId": "00:11:22:33:44:55"
+        }
+      }
+    }
+  },
+  {
+    "name": "queue_reorder-21",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-21",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_reorder",
+        "entryId": "entry-1",
+        "beforeEntryId": null
+      }
+    }
+  },
+  {
+    "name": "play_album-22",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-22",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 1,
+        "playMode": "all"
+      }
+    }
+  },
+  {
+    "name": "set_repeat-23",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-23",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_repeat",
+        "mode": "none"
+      }
+    }
+  },
+  {
+    "name": "set_repeat-24",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-24",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_repeat",
+        "mode": "one"
+      }
+    }
+  },
+  {
+    "name": "queue_insert-25",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-25",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_insert",
+        "trackIds": [
+          1
+        ],
+        "placement": "after_user_queue"
+      }
+    }
+  },
+  {
+    "name": "play_album minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-0",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 1,
+        "playMode": "liked_only",
+        "startTrackId": 2
+      }
+    }
+  },
+  {
+    "name": "play_playlist minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-1",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_playlist",
+        "playlistId": 1
+      }
+    }
+  },
+  {
+    "name": "play_artist minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-2",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_artist",
+        "artistName": "Artist"
+      }
+    }
+  },
+  {
+    "name": "play_liked minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-3",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_liked"
+      }
+    }
+  },
+  {
+    "name": "play_track minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-4",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_track",
+        "trackId": 2
+      }
+    }
+  },
+  {
+    "name": "select_output minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-5",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "select_output",
+        "output": {
+          "kind": "pc"
+        }
+      }
+    }
+  },
+  {
+    "name": "pause minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-6",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "pause"
+      }
+    }
+  },
+  {
+    "name": "resume minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-7",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "resume"
+      }
+    }
+  },
+  {
+    "name": "next minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-8",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "next"
+      }
+    }
+  },
+  {
+    "name": "previous minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-9",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "previous"
+      }
+    }
+  },
+  {
+    "name": "seek minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-10",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "seek",
+        "seconds": 12.5
+      }
+    }
+  },
+  {
+    "name": "set_volume minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-11",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_volume",
+        "volume": 0.5
+      }
+    }
+  },
+  {
+    "name": "set_shuffle minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-12",
+      "preconditions": {
+        "hostEpoch": "epoch-1"
+      },
+      "intent": {
+        "type": "set_shuffle",
+        "enabled": true
+      }
+    }
+  },
+  {
+    "name": "set_repeat minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-13",
+      "preconditions": {
+        "hostEpoch": "epoch-1"
+      },
+      "intent": {
+        "type": "set_repeat",
+        "mode": "all"
+      }
+    }
+  },
+  {
+    "name": "queue_insert minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-14",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0
+      },
+      "intent": {
+        "type": "queue_insert",
+        "trackIds": [
+          1,
+          2
+        ],
+        "placement": "next"
+      }
+    }
+  },
+  {
+    "name": "queue_append minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-15",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0
+      },
+      "intent": {
+        "type": "queue_append",
+        "trackIds": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "name": "queue_remove minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-16",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0
+      },
+      "intent": {
+        "type": "queue_remove",
+        "entryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "queue_reorder minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-17",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0
+      },
+      "intent": {
+        "type": "queue_reorder",
+        "entryId": "entry-2",
+        "beforeEntryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "queue_clear_upcoming minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-18",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0
+      },
+      "intent": {
+        "type": "queue_clear_upcoming"
+      }
+    }
+  },
+  {
+    "name": "queue_play minimal required revisions",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-19",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "queue_play",
+        "entryId": "entry-1"
+      }
+    }
+  },
+  {
+    "name": "utf8 at byte bound",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 1,
+        "playMode": "liked_only",
+        "startTrackId": 2
+      }
+    }
+  },
+  {
+    "name": "safe integer maximum",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-0",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 9007199254740991,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 9007199254740991,
+        "playMode": "liked_only",
+        "startTrackId": 2
+      }
+    }
+  },
+  {
+    "name": "integer encoded as float",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-0",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 1.0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "play_album",
+        "albumId": 1.0,
+        "playMode": "liked_only",
+        "startTrackId": 2
+      }
+    }
+  },
+  {
+    "name": "volume boundary 0",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-11",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_volume",
+        "volume": 0
+      }
+    }
+  },
+  {
+    "name": "volume boundary 1",
+    "envelope": {
+      "protocolVersion": 1,
+      "requestId": "request-11",
+      "preconditions": {
+        "hostEpoch": "epoch-1",
+        "queueRevision": 0,
+        "libraryRevision": 0,
+        "outputRevision": 0
+      },
+      "intent": {
+        "type": "set_volume",
+        "volume": 1
+      }
+    }
+  }
+]

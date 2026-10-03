@@ -3,6 +3,7 @@
 
 mod app_exit;
 mod commands;
+pub mod controller;
 mod db;
 #[cfg(desktop)]
 mod discord;
