@@ -1463,3 +1463,25 @@ mod tests {
         }
     }
 }
+
+/// Only projections cross from the authoritative WebView. Replay ordering is native.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostUpdate {
+    Projection { snapshot: HostSnapshot },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventCursor {
+    #[serde(deserialize_with = "identifier")]
+    pub host_epoch: String,
+    #[serde(deserialize_with = "safe_revision")]
+    pub revision: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventBatch {
+    pub host_epoch: String,
+    pub revision: u64,
+    pub events: Vec<HostEvent>,
+}

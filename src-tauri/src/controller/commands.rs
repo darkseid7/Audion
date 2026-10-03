@@ -5,7 +5,8 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -40,8 +41,8 @@ impl AuthoritativeWindow {
     }
 }
 pub struct AuthenticatedDevice {
-    id: Uuid,
-    secret: Zeroizing<Vec<u8>>,
+    pub(super) id: Uuid,
+    pub(super) secret: Zeroizing<Vec<u8>>,
 }
 impl AuthenticatedDevice {
     pub fn authenticate(
@@ -67,20 +68,30 @@ struct Entry {
     claimed: bool,
     executing: bool,
 }
-struct Coordinator {
+pub(super) struct Coordinator {
     window: AuthoritativeWindow,
     lease: CoordinatorLease,
-    ready: bool,
+    pub(super) ready: bool,
 }
 #[derive(Default)]
-struct State {
+pub(super) struct State {
+    pub(super) events: super::events::EventState,
     coordinator: Option<Coordinator>,
     ledger: HashMap<(Uuid, String), Entry>,
 }
+impl State {
+    pub(super) fn coordinator_ready(&self) -> bool {
+        self.coordinator.as_ref().is_some_and(|c| c.ready)
+    }
+}
 pub struct CommandService {
-    pairing: Arc<PairingService>,
+    stopping: AtomicBool,
+    pub(super) stopped: watch::Sender<bool>,
+    pub(super) polls: Mutex<HashSet<Uuid>>,
+    pub(super) pairing: Arc<PairingService>,
+    pub(super) host_id: String,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
-    state: Mutex<State>,
+    pub(super) state: Mutex<State>,
 }
 pub(crate) fn error(code: ControlErrorCode) -> ControlError {
     ControlError {
@@ -94,6 +105,7 @@ pub(crate) fn error(code: ControlErrorCode) -> ControlError {
 }
 fn invalidate(state: &mut State, now: Instant) {
     state.coordinator = None;
+    state.events.invalidate();
     for entry in state.ledger.values_mut() {
         if entry.completed.is_none() {
             entry
@@ -105,7 +117,7 @@ fn invalidate(state: &mut State, now: Instant) {
         entry.pending = None;
     }
 }
-fn current<'a>(
+pub(super) fn current<'a>(
     state: &'a mut State,
     window: &str,
     lease: &CoordinatorLease,
@@ -117,16 +129,30 @@ fn current<'a>(
         .ok_or_else(|| error(ControlErrorCode::Unauthorized))
 }
 impl CommandService {
+    /// Exit never waits for a command/credential-store lock or an admitted effect.
+    pub fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        self.stopped.send_replace(true);
+    }
+    pub(super) fn ensure_running(&self) -> Result<(), ControlError> {
+        if self.stopping.load(Ordering::Acquire) {
+            Err(error(ControlErrorCode::HostNotReady))
+        } else {
+            Ok(())
+        }
+    }
     pub fn claim(
         &self,
         window: &str,
         lease: &CoordinatorLease,
         ticket: ExecutionTicket,
     ) -> Result<CommandEnvelope, ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         if !current(&mut state, window, lease)?.ready {
             return Err(error(ControlErrorCode::HostNotReady));
         }
@@ -156,13 +182,18 @@ impl CommandService {
             entry.completed = Some((self.clock)());
             return Err(failure);
         }
+        self.ensure_running()?;
         entry.claimed = true;
         entry.executing = true;
         Ok(envelope)
     }
-    pub fn new(pairing: Arc<PairingService>) -> Self {
+    pub fn new(pairing: Arc<PairingService>, host_id: String) -> Self {
         Self {
             pairing,
+            host_id,
+            stopping: AtomicBool::new(false),
+            stopped: watch::channel(false).0,
+            polls: Mutex::new(HashSet::new()),
             clock: Arc::new(Instant::now),
             state: Mutex::new(State::default()),
         }
@@ -171,10 +202,12 @@ impl CommandService {
         &self,
         window: AuthoritativeWindow,
     ) -> Result<CoordinatorLease, ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         invalidate(&mut state, (self.clock)());
         let lease = CoordinatorLease {
             lease_id: Uuid::new_v4(),
@@ -188,23 +221,35 @@ impl CommandService {
         Ok(lease)
     }
     pub fn ready(&self, window: &str, lease: &CoordinatorLease) -> Result<(), ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
+        current(&mut state, window, lease)?;
+        if state.events.snapshot.is_none() {
+            return Err(error(ControlErrorCode::HostNotReady));
+        }
         current(&mut state, window, lease)?.ready = true;
+        state.events.wake();
         Ok(())
     }
     pub fn release(&self, window: &str, lease: &CoordinatorLease) -> Result<(), ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         current(&mut state, window, lease)?;
         invalidate(&mut state, (self.clock)());
         Ok(())
     }
     pub fn invalidate_window(&self, window: &str) {
+        if self.ensure_running().is_err() {
+            return;
+        }
         if let Ok(mut state) = self.state.lock() {
             if state
                 .coordinator
@@ -216,12 +261,13 @@ impl CommandService {
         }
     }
     pub fn host_epoch(&self) -> Result<Uuid, ControlError> {
+        self.ensure_running()?;
         self.state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?
             .coordinator
             .as_ref()
-            .filter(|c| c.ready)
+            .filter(|c| c.ready && self.ensure_running().is_ok())
             .map(|c| c.lease.host_epoch)
             .ok_or_else(|| error(ControlErrorCode::HostNotReady))
     }
@@ -230,14 +276,28 @@ impl CommandService {
         window: &str,
         lease: &CoordinatorLease,
         ticket: ExecutionTicket,
-        result: ExecutionResult,
+        mut result: ExecutionResult,
     ) -> Result<(), ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         if !current(&mut state, window, lease)?.ready {
             return Err(error(ControlErrorCode::HostNotReady));
+        }
+        let native_revision = state
+            .events
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| error(ControlErrorCode::HostNotReady))?
+            .revision;
+        match &mut result {
+            ExecutionResult::Applied { revision }
+            | ExecutionResult::Accepted { revision, .. }
+            | ExecutionResult::Failed { revision, .. }
+            | ExecutionResult::Superseded { revision, .. } => *revision = native_revision,
         }
         let entry = state
             .ledger
@@ -256,12 +316,15 @@ impl CommandService {
         Ok(())
     }
     pub async fn submit(&self, device: &AuthenticatedDevice, envelope: CommandEnvelope) -> Outcome {
+        self.ensure_running()?;
         let mut receiver = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+            self.ensure_running()?;
             let grants = self.pairing.authenticate(device.id, &device.secret)?;
+            self.ensure_running()?;
             if !grants.control {
                 return Err(error(ControlErrorCode::PermissionRequired));
             }
@@ -286,7 +349,7 @@ impl CommandService {
                 let coordinator = state
                     .coordinator
                     .as_ref()
-                    .filter(|c| c.ready)
+                    .filter(|c| c.ready && self.ensure_running().is_ok())
                     .ok_or_else(|| error(ControlErrorCode::HostNotReady))?;
                 if envelope.preconditions.host_epoch != coordinator.lease.host_epoch.to_string() {
                     return Err(error(ControlErrorCode::ResyncRequired));
@@ -342,14 +405,18 @@ impl CommandService {
                 receiver
             }
         };
+        let mut stopped = self.stopped.subscribe();
         loop {
+            if self.ensure_running().is_err() {
+                return Err(error(ControlErrorCode::OutcomeUnknown));
+            }
             if let Some(result) = receiver.borrow().clone() {
                 return result;
             }
-            receiver
-                .changed()
-                .await
-                .map_err(|_| error(ControlErrorCode::OutcomeUnknown))?;
+            tokio::select! {
+                _=stopped.changed()=>return Err(error(ControlErrorCode::OutcomeUnknown)),
+                result=receiver.changed()=>{result.map_err(|_|error(ControlErrorCode::OutcomeUnknown))?;}
+            }
         }
     }
     pub fn status(
@@ -357,11 +424,14 @@ impl CommandService {
         device: &AuthenticatedDevice,
         request_id: &str,
     ) -> Result<Option<Outcome>, ControlError> {
+        self.ensure_running()?;
         let state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         self.pairing.authenticate(device.id, &device.secret)?;
+        self.ensure_running()?;
         state
             .ledger
             .get(&(device.id, request_id.into()))
@@ -369,11 +439,14 @@ impl CommandService {
             .ok_or_else(|| error(ControlErrorCode::NotFound))
     }
     pub fn revoke(&self, id: Uuid) -> Result<(), ControlError> {
+        self.ensure_running()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| error(ControlErrorCode::HostNotReady))?;
+        self.ensure_running()?;
         let revoked = self.pairing.revoke_device(id);
+        state.events.wake();
         // Cancel native waiters even if protected-record cleanup failed after membership removal.
         for ((device, _), entry) in &mut state.ledger {
             if *device == id && entry.completed.is_none() {
@@ -432,7 +505,12 @@ mod tests {
         .unwrap();
         let count = Arc::new(AtomicUsize::new(0));
         let dispatches = Arc::new(Mutex::new(Vec::new()));
-        (CommandService::new(pairing), device, count, dispatches)
+        (
+            CommandService::new(pairing, "host".into()),
+            device,
+            count,
+            dispatches,
+        )
     }
     fn prepare(
         service: &CommandService,
@@ -453,10 +531,46 @@ mod tests {
     fn envelope(lease: &CoordinatorLease, id: &str) -> CommandEnvelope {
         serde_json::from_value(serde_json::json!({"protocolVersion":1,"requestId":id,"preconditions":{"hostEpoch":lease.host_epoch.to_string(),"outputRevision":0},"intent":{"type":"pause"}})).unwrap()
     }
+    #[test]
+    fn exit_does_not_wait_for_command_or_vault_state_lock() {
+        let (service, _, _, _) = fixture();
+        let service = Arc::new(service);
+        let held = service.state.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = service.clone();
+        let thread = std::thread::spawn(move || {
+            worker.stop();
+            tx.send(()).unwrap();
+        });
+        let returned = rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        drop(held);
+        thread.join().unwrap();
+        assert!(returned, "Exit waited for command/vault state");
+    }
+    #[test]
+    fn ready_requires_initial_projection() {
+        let (service, _, count, dispatches) = fixture();
+        let lease = prepare(&service, count, dispatches);
+        assert_eq!(
+            service.ready("main", &lease).unwrap_err().code,
+            ControlErrorCode::HostNotReady
+        );
+    }
     #[tokio::test]
     async fn ticket_claim_is_authoritative_single_use_and_window_scoped() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count, dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let expected = envelope(&lease, "claim");
         let check = async {
@@ -490,6 +604,17 @@ mod tests {
     async fn revoked_before_claim_never_yields_an_executable_envelope() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count, dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let check = async {
             tokio::task::yield_now().await;
@@ -508,9 +633,20 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let identity = load_or_create_identity(store.as_ref()).unwrap();
         let pairing = Arc::new(PairingService::new(&identity, store).unwrap());
-        let service = CommandService::new(pairing.clone());
+        let service = CommandService::new(pairing.clone(), "host".into());
         let dispatches = Arc::new(Mutex::new(Vec::<HostDispatch>::new()));
         let lease = prepare(&service, Arc::new(AtomicUsize::new(0)), dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let pair = || {
             let invitation = create_invitation(
@@ -585,12 +721,51 @@ mod tests {
             service.submit(&device, envelope(&lease, "after-completion")),
             complete
         );
-        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 2 });
+        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 0 });
+    }
+    #[tokio::test]
+    async fn completion_revisions_are_native_for_every_result_variant() {
+        let (service, device, count, dispatches) = fixture();
+        let lease = prepare(&service, count, dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
+        service.ready("main", &lease).unwrap();
+        for (n,value) in [
+            serde_json::json!({"status":"applied","revision":999}),
+            serde_json::json!({"status":"accepted","jobId":"job","revision":999}),
+            serde_json::json!({"status":"failed","revision":999,"error":{"code":"execution_failed","message":"failed","retryable":false},"partialEffects":["Previous output stopped"]}),
+            serde_json::json!({"status":"superseded","revision":999,"error":{"code":"revision_conflict","message":"changed","retryable":false},"partialEffects":[]}),
+        ].into_iter().enumerate() {
+            let result:ExecutionResult=serde_json::from_value(value).unwrap();
+            let complete=async { tokio::task::yield_now().await;let ticket=dispatches.lock().unwrap().last().unwrap().ticket;service.claim("main",&lease,ticket).unwrap();service.complete("main",&lease,ticket,result).unwrap(); };
+            let (outcome,())=tokio::join!(service.submit(&device,envelope(&lease,&format!("variant-{n}"))),complete);
+            assert_eq!(serde_json::to_value(outcome.unwrap()).unwrap()["revision"],0);
+        }
     }
     #[tokio::test]
     async fn duplicate_submits_execute_once() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count.clone(), dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let request = envelope(&lease, "same");
         let execution = async {
@@ -622,6 +797,17 @@ mod tests {
         let lease = prepare(&service, count, dispatches.clone());
         assert!(service.ready("main", &old).is_err());
         assert!(service.release("main", &old).is_err());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let execution = async {
             tokio::task::yield_now().await;
@@ -654,12 +840,23 @@ mod tests {
         };
         let (result, ()) =
             tokio::join!(service.submit(&device, envelope(&lease, "new")), execution);
-        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 2 });
+        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 0 });
     }
     #[tokio::test]
     async fn unknown_ticket_cannot_resolve_pending_request() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count, dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let execution = async {
             tokio::task::yield_now().await;
@@ -684,12 +881,23 @@ mod tests {
         };
         let (result, ()) =
             tokio::join!(service.submit(&device, envelope(&lease, "new")), execution);
-        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 1 });
+        assert_eq!(result.unwrap(), ExecutionResult::Applied { revision: 0 });
     }
     #[tokio::test]
     async fn bounded_command_admission_returns_busy() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count, dispatches);
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let check = async {
             tokio::task::yield_now().await;
@@ -713,6 +921,17 @@ mod tests {
         let clock = time.clone();
         service.clock = Arc::new(move || *clock.lock().unwrap());
         let lease = prepare(&service, count.clone(), dispatches.clone());
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         for i in 0..256 {
             let complete = async {
@@ -756,6 +975,17 @@ mod tests {
     async fn request_id_payload_reuse_is_rejected() {
         let (service, device, count, dispatches) = fixture();
         let lease = prepare(&service, count, dispatches);
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         let check = async {
             tokio::task::yield_now().await;
@@ -781,6 +1011,17 @@ mod tests {
                 .code,
             ControlErrorCode::HostNotReady
         );
+        service
+            .publish(
+                "main",
+                &lease,
+                super::super::protocol::HostUpdate::Projection {
+                    snapshot: super::super::events::tests::projection(
+                        &lease.host_epoch.to_string(),
+                    ),
+                },
+            )
+            .unwrap();
         service.ready("main", &lease).unwrap();
         service.revoke(device.id).unwrap();
         assert_eq!(

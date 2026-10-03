@@ -3,7 +3,9 @@ use super::{
     commands::{error, AuthenticatedDevice, CommandService},
     identity::HostIdentity,
     pairing::{Grants, NativeCredential, PairingService},
-    protocol::{CommandEnvelope, ControlError, ControlErrorCode},
+    protocol::{
+        ApplicationQuery, CommandEnvelope, ControlError, ControlErrorCode, EventCursor, QueryResult,
+    },
     secrets::SecretStore,
 };
 use axum::{
@@ -92,8 +94,8 @@ impl HostDependencies {
     pub fn new(identity: HostIdentity, store: Arc<dyn SecretStore>) -> Result<Self, ControlError> {
         let pairing = Arc::new(PairingService::new(&identity, store)?);
         Ok(Self {
+            commands: Arc::new(CommandService::new(pairing.clone(), identity.id().into())),
             identity: Arc::new(identity),
-            commands: Arc::new(CommandService::new(pairing.clone())),
             pairing,
             admission: Mutex::new(Admission::default()),
             requests: tokio::sync::Semaphore::new(64),
@@ -187,6 +189,7 @@ async fn route_inner(
     peer: SocketAddr,
     request: Request,
 ) -> Result<Response, ControlError> {
+    deps.commands.ensure_running()?;
     let path = request.uri().path().to_owned();
     if request.method() != axum::http::Method::POST
         || request.uri().query().is_some()
@@ -335,14 +338,38 @@ async fn route_inner(
         }
         "/control/v1/handshake" => {
             let _: EmptyRequest = decode(&body)?;
-            Ok(axum::Json(serde_json::json!({"protocolVersion":1,"hostId":deps.identity.id(),"hostEpoch":deps.commands.host_epoch()?,"capabilities":{"queries":[],"intents":[]}})).into_response())
+            let snapshot = deps
+                .commands
+                .authenticated_snapshot(device.as_ref().unwrap())?;
+            Ok(axum::Json(serde_json::json!({"protocolVersion":1,"hostId":snapshot.host_id,"hostEpoch":snapshot.host_epoch,"capabilities":snapshot.capabilities})).into_response())
         }
-        // Tasks 7/8 own publication/projections. Never fabricate state or invoke
-        // arbitrary native methods, including administrative operations.
+        "/control/v1/queries" => {
+            let query: ApplicationQuery = decode(&body)?;
+            let snapshot = deps
+                .commands
+                .authenticated_snapshot(device.as_ref().unwrap())?;
+            let result = match query {
+                ApplicationQuery::Snapshot {} => QueryResult::Snapshot { snapshot },
+                ApplicationQuery::Outputs {} => QueryResult::Outputs {
+                    outputs: snapshot.outputs,
+                    revision: snapshot.revisions.output_revision,
+                },
+                _ => return Err(error(ControlErrorCode::Unsupported)),
+            };
+            Ok(axum::Json(result).into_response())
+        }
+        "/control/v1/events" => {
+            let cursor: EventCursor = decode(&body)?;
+            Ok(axum::Json(
+                deps.commands
+                    .poll_events(device.as_ref().unwrap(), cursor)
+                    .await?,
+            )
+            .into_response())
+        }
+        // Library resources/admin remain explicit later-task seams.
         "/control/v1/admin" => Err(error(ControlErrorCode::PermissionRequired)),
-        "/control/v1/queries" | "/control/v1/events" | "/control/v1/resources" => {
-            Err(error(ControlErrorCode::Unsupported))
-        }
+        "/control/v1/resources" => Err(error(ControlErrorCode::Unsupported)),
         _ => Err(error(ControlErrorCode::NotFound)),
     }
 }
@@ -368,7 +395,7 @@ pub async fn start_host(
     deps: Arc<HostDependencies>,
 ) -> Result<HostHandle, ControlError> {
     let endpoint = config.validate()?;
-    deps.commands.host_epoch()?;
+    deps.commands.capture_snapshot()?;
     let listener = bind_listener(endpoint)?;
     start_prebound(listener, deps).await
 }
@@ -638,8 +665,8 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         for (path, expected, body) in [
-            ("queries", StatusCode::NOT_IMPLEMENTED, "{}".into()),
-            ("events", StatusCode::NOT_IMPLEMENTED, "{}".into()),
+            ("queries", StatusCode::BAD_REQUEST, "{}".into()),
+            ("events", StatusCode::BAD_REQUEST, "{}".into()),
             ("resources", StatusCode::NOT_IMPLEMENTED, "{}".into()),
             ("admin", StatusCode::FORBIDDEN, "{}".into()),
             (
@@ -672,6 +699,102 @@ mod tests {
                     .status(),
                 expected
             );
+        }
+    }
+    #[tokio::test]
+    async fn authenticated_snapshot_outputs_and_event_routes_share_native_cursor() {
+        use crate::controller::{commands::AuthoritativeWindow, protocol::HostUpdate};
+        let deps = fixture();
+        let invitation = super::super::pairing::create_invitation(
+            &deps.identity,
+            "192.168.1.2:9010".parse().unwrap(),
+            SystemTime::now(),
+        )
+        .unwrap();
+        deps.pairing.register_invitation(&invitation).unwrap();
+        let pending = deps
+            .pairing
+            .request_pairing(invitation, "Phone".into())
+            .unwrap();
+        let credential = deps
+            .pairing
+            .approve_pairing(
+                pending.id,
+                Grants {
+                    control: true,
+                    administration: false,
+                },
+            )
+            .unwrap();
+        let lease = deps
+            .commands
+            .register_coordinator(AuthoritativeWindow::new(
+                "main".into(),
+                Arc::new(|_| Ok(())),
+            ))
+            .unwrap();
+        let mut snapshot = super::super::events::tests::projection(&lease.host_epoch.to_string());
+        snapshot.host_id = deps.identity.id().into();
+        deps.commands
+            .publish(
+                "main",
+                &lease,
+                HostUpdate::Projection {
+                    snapshot: snapshot.clone(),
+                },
+            )
+            .unwrap();
+        deps.commands.ready("main", &lease).unwrap();
+        snapshot.playback.position = 5.0;
+        deps.commands
+            .publish("main", &lease, HostUpdate::Projection { snapshot })
+            .unwrap();
+        for (path, body) in [
+            ("queries", serde_json::json!({"type":"snapshot"})),
+            ("queries", serde_json::json!({"type":"outputs"})),
+            (
+                "events",
+                serde_json::json!({"hostEpoch":lease.host_epoch,"revision":0}),
+            ),
+            ("handshake", serde_json::json!({})),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/control/v1/{path}"))
+                .header(
+                    "authorization",
+                    format!(
+                        "Bearer {}:{}",
+                        credential.device_id(),
+                        URL_SAFE_NO_PAD.encode(credential.secret())
+                    ),
+                )
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(
+                "192.168.1.3:23456".parse::<SocketAddr>().unwrap(),
+            ));
+            let response = router(deps.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            if path == "queries" && body["type"] == "outputs" {
+                assert_eq!(
+                    value["revision"], 0,
+                    "Progress must not become an output mutation precondition"
+                );
+            }
+            if path == "events" {
+                assert_eq!(value["revision"], 1);
+                assert_eq!(value["events"][0]["playback"]["position"], 5.0);
+            }
+            if path == "handshake" {
+                assert_eq!(
+                    value["capabilities"]["queries"],
+                    serde_json::json!(["snapshot", "outputs"])
+                );
+            }
         }
     }
     #[tokio::test]

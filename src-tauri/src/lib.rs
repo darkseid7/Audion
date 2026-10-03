@@ -754,7 +754,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(move |app, event| {
-            let action = exit_coordinator.on_event(&event);
+            let action = exit_coordinator.on_event(&event, || {
+                app.state::<commands::controller::NativeHostState>().stop();
+            });
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 match action {
                     app_exit::ExitAction::Allow => {}

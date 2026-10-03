@@ -24,19 +24,21 @@ pub struct AppExit {
 }
 
 impl AppExit {
-    pub fn on_event(&self, event: &tauri::RunEvent) -> ExitAction {
+    pub fn on_event(&self, event: &tauri::RunEvent, unavailable: impl FnOnce()) -> ExitAction {
         match event {
-            tauri::RunEvent::ExitRequested { code, .. } => self.request(*code),
+            tauri::RunEvent::ExitRequested { code, .. } => self.request(*code, unavailable),
             _ => ExitAction::Allow,
         }
     }
 
-    pub fn request(&self, code: Option<i32>) -> ExitAction {
+    pub fn request(&self, code: Option<i32>, unavailable: impl FnOnce()) -> ExitAction {
         match self
             .phase
             .compare_exchange(IDLE, STOPPING, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
+                // Synchronous invalidation precedes allocation of the Squeeze budget.
+                unavailable();
                 let code = code.unwrap_or(0);
                 tracing::info!(
                     exit_code = code,
@@ -67,6 +69,30 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::oneshot;
 
+    #[tokio::test(start_paused = true)]
+    async fn controller_unavailable_is_synchronous_before_cleanup_budget() {
+        let coordinator = AppExit::default();
+        let unavailable = AtomicUsize::new(0);
+        assert_eq!(
+            coordinator.request(None, || {
+                unavailable.fetch_add(1, Ordering::SeqCst);
+            }),
+            ExitAction::StopPlayers(0)
+        );
+        assert_eq!(unavailable.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            coordinator.request(None, || {
+                unavailable.fetch_add(1, Ordering::SeqCst);
+            }),
+            ExitAction::Prevent
+        );
+        let start = tokio::time::Instant::now();
+        coordinator
+            .stop_players(std::future::pending(), APP_EXIT_TIMEOUT)
+            .await;
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(3));
+        assert_eq!(unavailable.load(Ordering::SeqCst), 1);
+    }
     // Catches allowing exit before cleanup, duplicate cleanup, and a lost exit code.
     #[tokio::test]
     async fn repeated_exit_waits_for_one_cleanup_before_allowing_final_exit() {
@@ -75,7 +101,7 @@ mod tests {
         let (started_tx, started_rx) = oneshot::channel();
         let (finish_tx, finish_rx) = oneshot::channel();
 
-        let code = match coordinator.request(Some(7)) {
+        let code = match coordinator.request(Some(7), || {}) {
             ExitAction::StopPlayers(code) => code,
             action => panic!("First exit must start cleanup, got {action:?}"),
         };
@@ -96,14 +122,14 @@ mod tests {
         });
 
         started_rx.await.unwrap();
-        assert_eq!(coordinator.request(Some(99)), ExitAction::Prevent);
-        assert_eq!(coordinator.request(None), ExitAction::Prevent);
+        assert_eq!(coordinator.request(Some(99), || {}), ExitAction::Prevent);
+        assert_eq!(coordinator.request(None, || {}), ExitAction::Prevent);
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert!(!cleanup.is_finished());
 
         finish_tx.send(()).unwrap();
         assert_eq!(cleanup.await.unwrap(), 7);
-        assert_eq!(coordinator.request(Some(7)), ExitAction::Allow);
+        assert_eq!(coordinator.request(Some(7), || {}), ExitAction::Allow);
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -111,7 +137,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_server_mutex_does_not_hold_exit_forever() {
         let coordinator = AppExit::default();
-        assert_eq!(coordinator.request(None), ExitAction::StopPlayers(0));
+        assert_eq!(coordinator.request(None, || {}), ExitAction::StopPlayers(0));
         let state = crate::commands::squeeze::SqueezeState::new();
         let server = state.0.clone();
         let held = state.0.lock().await;
@@ -128,7 +154,7 @@ mod tests {
                 .is_ok(),
             "Exit must fall back even while another IPC command holds the server mutex"
         );
-        assert_eq!(coordinator.request(Some(0)), ExitAction::Allow);
+        assert_eq!(coordinator.request(Some(0), || {}), ExitAction::Allow);
         drop(held);
     }
 
@@ -136,7 +162,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_panic_still_allows_final_exit() {
         let coordinator = Arc::new(AppExit::default());
-        assert_eq!(coordinator.request(Some(-9)), ExitAction::StopPlayers(-9));
+        assert_eq!(
+            coordinator.request(Some(-9), || {}),
+            ExitAction::StopPlayers(-9)
+        );
         let worker = coordinator.clone();
         let cleanup = tokio::spawn(async move {
             worker
@@ -150,7 +179,7 @@ mod tests {
             cleanup.await.is_ok(),
             "Cleanup panic must not strand graceful exit"
         );
-        assert_eq!(coordinator.request(Some(-9)), ExitAction::Allow);
+        assert_eq!(coordinator.request(Some(-9), || {}), ExitAction::Allow);
     }
 
     // Catches non-exit events starting cleanup; hiding the window does not request exit.
@@ -158,8 +187,8 @@ mod tests {
     fn non_exit_events_do_not_start_shutdown() {
         let coordinator = AppExit::default();
         let event = tauri::RunEvent::Ready;
-        assert_eq!(coordinator.on_event(&event), ExitAction::Allow);
-        assert_eq!(coordinator.request(None), ExitAction::StopPlayers(0));
+        assert_eq!(coordinator.on_event(&event, || {}), ExitAction::Allow);
+        assert_eq!(coordinator.request(None, || {}), ExitAction::StopPlayers(0));
     }
 
     // Catches an initial-request race starting multiple cleanup tasks.
@@ -173,7 +202,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    coordinator.request(Some(7))
+                    coordinator.request(Some(7), || {})
                 })
             })
             .collect();

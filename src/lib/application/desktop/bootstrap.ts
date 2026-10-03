@@ -28,7 +28,7 @@ let hostBridge: ReturnType<typeof connectHostBridge> | undefined;
 /** One bridge per shared adapter; settings opt-in never creates another lane. */
 export async function prepareHostBridge(): Promise<void> {
     if (!adapter || stopped) throw new Error("Desktop is not ready");
-    hostBridge ??= connectHostBridge(adapter.port, adapter.attachAuthority).catch(error => { hostBridge = undefined; throw error; });
+    hostBridge ??= connectHostBridge(adapter.port, adapter.attachAuthority, adapter.coordinator).catch(error => { hostBridge = undefined; throw error; });
     await hostBridge;
 }
 export async function releaseHostBridge(): Promise<void> {
@@ -109,9 +109,9 @@ async function stop(): Promise<void> {
     setMigrationStatus(null);
     if (pluginLoad !== undefined)
         cancelIdleCallback(pluginLoad);
+    try { await releaseHostBridge(); } catch (error) { console.warn("Controller bridge release unavailable", error); }
     await pluginStartup;
     pluginStartup = undefined;
-    try { await releaseHostBridge(); } catch (error) { console.warn("Controller bridge release unavailable", error); }
     await adapter?.dispose();
     adapter = undefined;
     stops.splice(0).reverse().forEach(dispose => dispose());

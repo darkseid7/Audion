@@ -313,3 +313,34 @@ it.each([
     await adapter.dispose(); increment.mockRestore(); vi.useRealTimers();
   }
 });
+
+it("observes PC progress, output discovery and library invalidation through the real coordinator projection", async () => {
+  const adapter = createDesktopAdapter();
+  const seen: import("../types").HostSnapshot[] = [];
+  const unsubscribe = adapter.coordinator.subscribeSnapshot(s => seen.push(s));
+  const queueRevision = adapter.state.read().revisions.queueRevision;
+  state.currentTime.set(42);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(seen.at(-1)?.playback.position).toBe(42);
+  expect(seen.at(-1)?.revisions.queueRevision).toBe(queueRevision);
+  const { discoveredSqueezePlayers } = await import("$lib/stores/squeeze");
+  const outputRevision = adapter.state.read().revisions.outputRevision;
+  discoveredSqueezePlayers.set([{ mac: "A", name: "Living room", state: "Stopped", capabilities: "", current_track: null, elapsed_ms: 0, volume: 50, repeat: "Off", shuffle: false, queue_length: 0, queue_position: null }]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(seen.at(-1)?.outputs.some(item => item.output.kind === "squeeze" && item.output.playerId === "A")).toBe(true);
+  expect(seen.at(-1)?.revisions.outputRevision).toBe(outputRevision + 1);
+  discoveredSqueezePlayers.update(devices => devices.map(device => ({ ...device, elapsed_ms: 5000 })));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(adapter.state.read().revisions.outputRevision).toBe(outputRevision + 1);
+  const before = adapter.state.read().revisions.libraryRevision;
+  const { tracks } = await import("$lib/stores/library");
+  tracks.set([]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(seen.at(-1)?.revisions.libraryRevision).toBe(before + 1);
+  expect(await adapter.port.query({ type: "outputs" })).toMatchObject({ revision: outputRevision + 1 });
+  const projection = adapter.coordinator.captureSnapshot();
+  expect(projection.capabilities.queries).toEqual(["snapshot", "outputs"]);
+  unsubscribe(); await adapter.dispose();
+  const count = seen.length; state.currentTime.set(43);
+  await new Promise(resolve => setTimeout(resolve, 0)); expect(seen).toHaveLength(count);
+});

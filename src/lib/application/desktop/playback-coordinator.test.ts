@@ -128,3 +128,28 @@ it("invalidates an old timer after a failed manual command with confirmed playba
   await f.coordinator.enqueueSignal(timer);
   expect(f.runtime.apply).toHaveBeenCalledOnce();
 });
+
+it("disposal cancels queued remote, local and signal work but drains the entered effect", async () => {
+  const f = fixture();
+  let finish!: (value: RuntimeResult) => void;
+  f.runtime.apply = vi.fn(() => new Promise<RuntimeResult>(resolve => { finish = resolve; }));
+  const entered = f.coordinator.execute({ type: "pause" }, { hostEpoch: "host" });
+  await Promise.resolve();
+  const remote = f.coordinator.execute({ type: "resume" }, { hostEpoch: "host" });
+  let localRan = false;
+  const local = f.coordinator.executeLocal(async () => { localRan = true; return ok; });
+  const signal = f.coordinator.enqueueSignal({ kind: "completion", output: { kind: "pc" }, ownershipGeneration: 1, transitionGeneration: 1 });
+  let drained = false;
+  const disposing = f.coordinator.dispose().then(() => { drained = true; });
+  expect(drained).toBe(false);
+  finish(ok);
+  expect(await entered).toMatchObject({ status: "applied" });
+  // A queued resume would hang on the deliberately unresolved second runtime call.
+  f.runtime.apply = vi.fn(async () => ok);
+  expect(await remote).toMatchObject({ status: "failed", error: { code: "host_not_ready" } });
+  expect(await local).toMatchObject({ status: "failed", error: { code: "host_not_ready" } });
+  await signal; await disposing;
+  expect(localRan).toBe(false);
+  expect(f.runtime.applySignal).not.toHaveBeenCalled();
+  expect(drained).toBe(true);
+});

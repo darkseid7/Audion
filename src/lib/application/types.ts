@@ -147,3 +147,7 @@ export interface ApplicationPort {
   subscribe(listener: (update: ApplicationUpdate) => void): () => void;
   resolveArtwork(reference: ArtworkReference, signal?: AbortSignal): Promise<ArtworkHandle>;
 }
+
+export type HostUpdate = { type: "projection"; snapshot: HostSnapshot };
+export interface EventCursor { hostEpoch: string; revision: number }
+export interface EventBatch { hostEpoch: string; revision: number; events: HostEvent[] }

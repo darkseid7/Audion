@@ -1,5 +1,9 @@
 vi.mock("./adapter", () => ({ createDesktopAdapter: () => ({
   port: { execute: async () => ({ status: "applied", revision: 1 }) },
+  coordinator: {
+    captureSnapshot: () => ({ hostId: "host", hostEpoch: "epoch", revision: 0, revisions: { queueRevision: 0, outputRevision: 0, libraryRevision: 0, settingsRevision: 0 }, playback: { status: "stopped", track: null, context: null, position: 0, duration: null, volume: 0.5, shuffle: false, repeat: "none" }, queue: { count: 0, currentEntryId: null }, output: { kind: "pc" }, outputs: [], capabilities: { queries: ["snapshot"], intents: [] }, settings: {}, jobs: [] }),
+    subscribeSnapshot: () => { state.bridgeSteps.push("subscribe"); return () => { state.bridgeSteps.push("unsubscribe"); }; },
+  },
   attachAuthority: async () => {},
   pauseForTimer: async () => {}, dispose: async () => { state.bridgeSteps.push("adapter-dispose"); },
 }) }));
@@ -43,7 +47,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async (command: string, args: { request: { phase?: string } }) => {
   if (command === "control_host_enable") return { enabled: state.hostEnabled };
   state.bridgeSteps.push(args.request.phase!);
-  return { hostId: "host", lease: { hostEpoch: "epoch", leaseId: "lease" } };
+  return { hostId: "host", lease: { hostEpoch: "epoch", leaseId: "lease" }, ...(args.request.phase === "publish" ? { revision: 0 } : {}) };
 } }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ listen: async () => () => { state.bridgeSteps.push("unlisten"); } }) }));
 
@@ -68,9 +72,9 @@ describe("real desktop resource ownership", () => {
     const first = await bootstrapDesktop();
     const second = await bootstrapDesktop();
     await first.dispose();
-    expect(state.bridgeSteps).toEqual(["prepare", "ready"]);
+    expect(state.bridgeSteps).toEqual(["prepare", "subscribe", "publish", "ready"]);
     await second.dispose();
-    expect(state.bridgeSteps).toEqual(["prepare", "ready", "release", "unlisten", "adapter-dispose"]);
+    expect(state.bridgeSteps).toEqual(["prepare", "subscribe", "publish", "ready", "unsubscribe", "release", "unlisten", "adapter-dispose"]);
   });
   it("reserves the pending owner before the previous owner can tear down resources", async () => {
     const { bootstrapDesktop } = await import("./bootstrap");

@@ -1,11 +1,12 @@
 import type { Track } from "$lib/api/tauri";
 import type { PlaybackContext } from "$lib/stores/playback-state";
-import type { ApplicationIntent, CommandPreconditions, ControlError, DomainRevisions, ExecutionResult, OutputRef, SnapshotOutputRef } from "../types";
+import type { HostSnapshot, ApplicationIntent, CommandPreconditions, ControlError, DomainRevisions, ExecutionResult, OutputRef, SnapshotOutputRef } from "../types";
 
 export type PlaybackIntent = ApplicationIntent;
 export interface HostQueueEntry { entryId: string; track: Track }
 export interface HostState {
   hostEpoch: string;
+  /** Desktop-local commit counter. Native publication owns the LAN replay revision. */
   revision: number;
   revisions: DomainRevisions;
   selectedOutput: SnapshotOutputRef;
@@ -31,7 +32,10 @@ export interface DesktopPlaybackRuntime {
   apply(intent: PlaybackIntent, resolved?: ResolvedPlayback): Promise<RuntimeResult>;
   applySignal(signal: PlaybackSignal): Promise<RuntimeResult>;
 }
+export interface HostProjectionAccess { read(): HostSnapshot; subscribe(listener: (snapshot: HostSnapshot) => void): () => void }
 export interface PlaybackCoordinator {
+  captureSnapshot(): HostSnapshot;
+  subscribeSnapshot(listener: (snapshot: HostSnapshot) => void): () => void;
   execute(intent: PlaybackIntent, context: CommandPreconditions): Promise<ExecutionResult>;
   enqueueSignal(signal: PlaybackSignal): Promise<void>;
   /** Desktop-only commands use the same lane, never the network protocol. */
@@ -49,7 +53,7 @@ export class PlaybackFailure extends Error {
   constructor(public controlError: ControlError, public status: "failed" | "superseded" = "failed", public partialEffects: string[] = []) { super(controlError.message); }
 }
 /** All preconditions are checked in the lane, not at request arrival. */
-export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state: HostStateAccess): PlaybackCoordinator {
+export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state: HostStateAccess, projection?: HostProjectionAccess): PlaybackCoordinator {
   let tail: Promise<unknown> = Promise.resolve();
   let disposed = false;
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -64,9 +68,18 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
   const attempt = async (operation: () => Promise<RuntimeResult>): Promise<RuntimeResult> => { try { return await operation(); } catch (error) { return runtimeFailure(error); } };
   const advanceGeneration = (manual: boolean) => { const s = state.read(); state.commit({ transitionGeneration: s.transitionGeneration + 1, ...(manual ? { ownershipGeneration: s.ownershipGeneration + 1 } : {}) }); };
   return {
+    captureSnapshot() {
+      if (disposed || !projection) throw new Error("Host projection unavailable");
+      return projection.read();
+    },
+    subscribeSnapshot(listener) {
+      if (disposed || !projection) throw new Error("Host projection unavailable");
+      return projection.subscribe(listener);
+    },
     execute(intent, context) {
       if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
       return enqueue(async () => {
+        if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
         const before = state.read();
         if (context.hostEpoch !== before.hostEpoch) return failed("resync_required", "Host epoch changed", "superseded");
         for (const key of ["queueRevision", "outputRevision", "libraryRevision"] as const) {
@@ -102,6 +115,7 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
     enqueueSignal(signal) {
       if (disposed) return Promise.resolve();
       return enqueue(async () => {
+        if (disposed) return;
         const current = state.read();
         if (!sameOutput(signal.output, current.selectedOutput) || signal.ownershipGeneration !== current.ownershipGeneration || signal.kind !== "timer" && signal.transitionGeneration !== current.transitionGeneration) return;
         const applied = await attempt(() => signal.kind === "timer" ? runtime.apply({ type: "pause" }) : runtime.applySignal(signal));
@@ -115,6 +129,7 @@ export function createPlaybackCoordinator(runtime: DesktopPlaybackRuntime, state
     executeLocal(operation, replacesPlayback = false) {
       if (disposed) return Promise.resolve(failed("host_not_ready", "Playback coordinator disposed"));
       return enqueue(async () => {
+        if (disposed) return failed("host_not_ready", "Playback coordinator disposed");
         const applied = await attempt(operation);
         if (applied.status !== "applied" && applied.partialEffects.length && replacesPlayback) advanceGeneration(true);
         if (applied.status === "applied") { if (replacesPlayback) advanceGeneration(true); else state.commit({}); }

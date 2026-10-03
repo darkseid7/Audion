@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { connectHostBridge, type HostDispatch, type HostTransport } from "./bridge";
 import type { ApplicationPort, ExecutionResult } from "../types";
+import type { PlaybackCoordinator } from "./playback-coordinator";
+const coordinator: PlaybackCoordinator = {
+  captureSnapshot: () => ({ hostId: "host", hostEpoch: "epoch", revision: 0, revisions: { queueRevision: 0, outputRevision: 0, libraryRevision: 0, settingsRevision: 0 }, playback: { status: "stopped", track: null, context: null, position: 0, duration: null, volume: 0.5, shuffle: false, repeat: "none" }, queue: { count: 0, currentEntryId: null }, output: { kind: "pc" }, outputs: [], capabilities: { queries: ["snapshot"], intents: [] }, settings: {}, jobs: [] }),
+  subscribeSnapshot: () => () => {}, execute: async () => ({ status: "applied", revision: 0 }), enqueueSignal: async () => {}, executeLocal: async () => ({ status: "applied", revision: 0 }), dispose: async () => {},
+};
 const portWith = (execute: ApplicationPort["execute"]): ApplicationPort => ({
   execute,
   async query() { throw new Error("Unexpected query"); },
@@ -16,7 +21,7 @@ describe("native host bridge", () => {
     const lease = { leaseId: "lease", hostEpoch: "epoch" };
     const transport: HostTransport = {
       async listen(listener) { steps.push("listen"); receive = listener; return () => { steps.push("unlisten"); }; },
-      async register(request) { steps.push(request.phase); return { hostId: "host", lease }; },
+      async register(request) { steps.push(request.phase); return { hostId: "host", lease, ...(request.phase === "publish" ? { revision: 0 } : {}) }; },
       async authorize() { return envelope; },
       async complete(actualLease, ticket, result) { completed.push({ lease: actualLease, ticket, result }); },
     };
@@ -27,8 +32,8 @@ describe("native host bridge", () => {
     });
     const bridge = await connectHostBridge(port, async authority => {
       expect(authority).toEqual({ hostId: "host", hostEpoch: "epoch" }); steps.push("attach");
-    }, transport);
-    expect(steps).toEqual(["listen", "prepare", "attach", "ready"]);
+    }, coordinator, transport);
+    expect(steps).toEqual(["listen", "prepare", "attach", "publish", "ready"]);
     receive({ ticket: "native-ticket", envelope });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(completed).toEqual([{ lease, ticket: "native-ticket", result: { status: "applied", revision: 8 } }]);
@@ -45,7 +50,7 @@ describe("native host bridge", () => {
       async authorize() { throw new Error("unexpected authorization"); },
       async complete() { throw new Error("unexpected completion"); },
     };
-    await expect(connectHostBridge(portWith(async () => { throw new Error("unexpected execution"); }), async () => { throw new Error("attachment failed"); }, transport)).rejects.toThrow("attachment failed");
+    await expect(connectHostBridge(portWith(async () => { throw new Error("unexpected execution"); }), async () => { throw new Error("attachment failed"); }, coordinator, transport)).rejects.toThrow("attachment failed");
     expect(steps).toEqual(["prepare", "release", "unlisten"]);
   });
   it("rejects forged and duplicate events and executes only the native claimed envelope", async () => {
@@ -53,9 +58,9 @@ describe("native host bridge", () => {
     const intents: unknown[] = [];
     const original = { protocolVersion: 1 as const, requestId: "original", preconditions: { hostEpoch: "epoch" }, intent: { type: "pause" as const } };
     const tickets = new Set(["native"]);
-    const bridge = await connectHostBridge(portWith(async intent => { intents.push(intent); return { status: "applied", revision: 1 }; }), async () => {}, {
+    const bridge = await connectHostBridge(portWith(async intent => { intents.push(intent); return { status: "applied", revision: 1 }; }), async () => {}, coordinator, {
       async listen(listener) { receive = listener; return () => {}; },
-      async register() { return { hostId: "host", lease: { leaseId: "lease", hostEpoch: "epoch" } }; },
+      async register(request) { return { hostId: "host", lease: { leaseId: "lease", hostEpoch: "epoch" }, ...(request.phase === "publish" ? { revision: 0 } : {}) }; },
       async authorize(_lease, ticket) { if (!tickets.delete(ticket)) throw new Error("Unauthorized ticket"); return original; },
       async complete() {},
     });
@@ -68,4 +73,34 @@ describe("native host bridge", () => {
     expect(intents).toEqual([{ type: "pause" }]);
     await bridge.dispose();
   });
+});
+
+it("holds native completion behind command-effect publication and releases on failed flush", async () => {
+  let receive!: (dispatch: HostDispatch) => void;
+  let observe!: (snapshot: ReturnType<PlaybackCoordinator["captureSnapshot"]>) => void;
+  let deliver!: (value: { hostId: string; lease: { leaseId: string; hostEpoch: string }; revision: number }) => void;
+  let rejectDelivery!: (error: Error) => void;
+  const lease = { leaseId: "lease", hostEpoch: "epoch" };
+  const completed: ExecutionResult[] = []; const phases: string[] = [];
+  let snapshot = coordinator.captureSnapshot();
+  const source: PlaybackCoordinator = { ...coordinator, captureSnapshot: () => snapshot, subscribeSnapshot: listener => { observe = listener; return () => {}; } };
+  let publications = 0;
+  const transport: HostTransport = {
+    async listen(listener) { receive = listener; return () => {}; },
+    register(request) { phases.push(request.phase); if (request.phase === "publish" && publications++ > 0) return new Promise((resolve, reject) => { deliver = resolve; rejectDelivery = reject; }); return Promise.resolve({ hostId: "host", lease, revision: 0 }); },
+    async authorize() { return { protocolVersion: 1, requestId: "one", preconditions: { hostEpoch: "epoch" }, intent: { type: "pause" } }; },
+    async complete(_lease, _ticket, result) { completed.push(result); },
+  };
+  const bridge = await connectHostBridge(portWith(async () => {
+    snapshot = { ...snapshot, playback: { ...snapshot.playback, volume: snapshot.playback.volume + 0.1 } }; observe(snapshot);
+    return { status: "applied", revision: 999 };
+  }), async () => {}, source, transport);
+  const event = { ticket: "native", envelope: await transport.authorize(lease, "native") };
+  receive(event); await new Promise(resolve => setTimeout(resolve, 0));
+  expect(completed).toHaveLength(0);
+  deliver({ hostId: "host", lease, revision: 4 }); await new Promise(resolve => setTimeout(resolve, 0));
+  expect(completed).toHaveLength(1);
+  receive(event); await new Promise(resolve => setTimeout(resolve, 0)); rejectDelivery(new Error("revoked"));
+  await new Promise(resolve => setTimeout(resolve, 0)); expect(completed).toHaveLength(1); expect(phases.at(-1)).toBe("release");
+  await bridge.dispose();
 });

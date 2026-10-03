@@ -175,4 +175,5 @@ windows = { version = "0.61.3", features = [
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+tokio = { version = "1.49.0", features = ["test-util"] }
 tauri = { version = "~2.11.0", features = ["test"] }

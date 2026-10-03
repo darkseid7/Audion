@@ -14,3 +14,6 @@ pub mod identity;
 pub mod pairing;
 #[cfg(desktop)]
 pub mod secrets;
+
+#[cfg(desktop)]
+pub mod events;

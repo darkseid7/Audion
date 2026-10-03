@@ -39,6 +39,7 @@ fn authorize(window: &tauri::WebviewWindow, app: &tauri::AppHandle) -> Result<()
 #[cfg(desktop)]
 mod desktop {
     use super::*;
+    use crate::controller::protocol::HostUpdate;
     use crate::controller::{
         commands::{AuthoritativeWindow, CoordinatorLease, ExecutionTicket},
         host::{start_host, HostDependencies, HostHandle, LanConfig},
@@ -47,34 +48,67 @@ mod desktop {
         secrets::NativeSecretStore,
     };
     use std::{
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, OnceLock,
+        },
         time::SystemTime,
     };
     use tauri::{Emitter, Manager};
     use uuid::Uuid;
     #[derive(Default)]
     pub struct NativeHostState {
-        dependencies: Mutex<Option<Arc<HostDependencies>>>,
+        dependencies: OnceLock<Arc<HostDependencies>>,
+        initialization: Mutex<()>,
+        stopping: AtomicBool,
         listener: tokio::sync::Mutex<Option<HostHandle>>,
     }
     impl NativeHostState {
+        pub fn stop(&self) {
+            self.stopping.store(true, Ordering::Release);
+            if let Some(deps) = self.dependencies.get() {
+                deps.commands.stop();
+            }
+        }
         fn dependencies(&self) -> Result<Arc<HostDependencies>, ControlError> {
-            let mut deps = self
-                .dependencies
-                .lock()
-                .map_err(|_| rejected(ControlErrorCode::HostNotReady))?;
-            if deps.is_none() {
+            self.dependencies_with(|| {
                 let store = Arc::new(NativeSecretStore);
                 let identity = load_or_create_identity(store.as_ref())?;
-                *deps = Some(Arc::new(HostDependencies::new(identity, store)?));
+                Ok(Arc::new(HostDependencies::new(identity, store)?))
+            })
+        }
+        fn dependencies_with(
+            &self,
+            initialize: impl FnOnce() -> Result<Arc<HostDependencies>, ControlError>,
+        ) -> Result<Arc<HostDependencies>, ControlError> {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
             }
-            Ok(deps.as_ref().unwrap().clone())
+            let _initialization = self
+                .initialization
+                .lock()
+                .map_err(|_| rejected(ControlErrorCode::HostNotReady))?;
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            if self.dependencies.get().is_none() {
+                let deps = initialize()?;
+                let _ = self.dependencies.set(deps);
+            }
+            let deps = self.dependencies.get().unwrap();
+            // Covers stop racing a still-running protected-storage initialization.
+            if self.stopping.load(Ordering::Acquire) {
+                deps.commands.stop();
+                return Err(rejected(ControlErrorCode::HostNotReady));
+            }
+            Ok(deps.clone())
         }
         pub fn invalidate_window(&self, label: &str) {
-            if let Ok(deps) = self.dependencies.lock() {
-                if let Some(deps) = deps.as_ref() {
-                    deps.commands.invalidate_window(label);
-                }
+            if self.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            if let Some(deps) = self.dependencies.get() {
+                deps.commands.invalidate_window(label);
             }
         }
     }
@@ -82,14 +116,24 @@ mod desktop {
     #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
     pub enum Registration {
         Prepare {},
-        Ready { lease: CoordinatorLease },
-        Release { lease: CoordinatorLease },
+        Ready {
+            lease: CoordinatorLease,
+        },
+        Release {
+            lease: CoordinatorLease,
+        },
+        Publish {
+            lease: CoordinatorLease,
+            update: HostUpdate,
+        },
     }
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Registered {
         host_id: String,
         lease: CoordinatorLease,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
     }
     #[tauri::command]
     pub fn control_host_register(
@@ -100,6 +144,7 @@ mod desktop {
         authorize(&window, &app)?;
         let state = app.state::<NativeHostState>();
         let deps = state.dependencies()?;
+        let mut revision = None;
         let lease = match request {
             Registration::Prepare {} => {
                 let target = window.clone();
@@ -119,6 +164,10 @@ mod desktop {
                         }),
                     ))?
             }
+            Registration::Publish { lease, update } => {
+                revision = Some(deps.commands.publish(window.label(), &lease, update)?);
+                lease
+            }
             Registration::Ready { lease } => {
                 deps.commands.ready(window.label(), &lease)?;
                 lease
@@ -131,6 +180,7 @@ mod desktop {
         Ok(Registered {
             host_id: deps.identity.id().into(),
             lease,
+            revision,
         })
     }
     #[derive(Deserialize)]
@@ -202,11 +252,7 @@ mod desktop {
     impl NativeHostState {
         fn inspect(&self, listener: Option<&HostHandle>) -> Result<HostStatus, ControlError> {
             let enabled = listener.is_some_and(|host| host.running());
-            let deps = self
-                .dependencies
-                .lock()
-                .map_err(|_| rejected(ControlErrorCode::HostNotReady))?;
-            let (ready, pending, paired) = if let Some(deps) = deps.as_ref() {
+            let (ready, pending, paired) = if let Some(deps) = self.dependencies.get() {
                 let pending = deps
                     .pairing
                     .pending_pairings()?
@@ -264,11 +310,7 @@ mod desktop {
             HostToggle::Disable {} => {
                 state.invalidate_window(window.label());
                 listener.take();
-                let deps = state
-                    .dependencies
-                    .lock()
-                    .map_err(|_| rejected(ControlErrorCode::HostNotReady))?
-                    .clone();
+                let deps = state.dependencies.get().cloned();
                 if let Some(deps) = deps {
                     deps.invalidate_pairing()?;
                 }
@@ -342,6 +384,62 @@ mod desktop {
         use super::*;
         use crate::controller::secrets::tests::MemoryStore;
         #[test]
+        fn exit_does_not_wait_for_host_initialization_lock() {
+            let state = Arc::new(NativeHostState::default());
+            let held = state.initialization.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = state.clone();
+            let thread = std::thread::spawn(move || {
+                worker.stop();
+                tx.send(()).unwrap();
+            });
+            let returned = rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_ok();
+            drop(held);
+            thread.join().unwrap();
+            assert!(returned, "Exit waited for host initialization");
+        }
+        #[test]
+        fn initialization_finishing_after_exit_cannot_resurrect_host() {
+            let state = Arc::new(NativeHostState::default());
+            let store = Arc::new(MemoryStore::default());
+            let deps = Arc::new(
+                HostDependencies::new(load_or_create_identity(store.as_ref()).unwrap(), store)
+                    .unwrap(),
+            );
+            let worker = state.clone();
+            let worker_deps = deps.clone();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                worker.dependencies_with(|| {
+                    entered_tx.send(()).unwrap();
+                    finish_rx
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .unwrap();
+                    Ok(worker_deps)
+                })
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+            state.stop();
+            finish_tx.send(()).unwrap();
+            assert!(thread.join().unwrap().is_err());
+            assert!(state
+                .dependencies_with(|| panic!("stopped initialization restarted"))
+                .is_err());
+            assert!(deps
+                .commands
+                .register_coordinator(AuthoritativeWindow::new(
+                    "main".into(),
+                    Arc::new(|_| Ok(()))
+                ))
+                .is_err());
+            assert!(deps.commands.capture_snapshot().is_err());
+        }
+        #[test]
         fn inspection_is_side_effect_free_and_contains_only_device_metadata() {
             let state = NativeHostState::default();
             let off = serde_json::to_value(state.inspect(None).unwrap()).unwrap();
@@ -349,7 +447,7 @@ mod desktop {
                 off,
                 serde_json::json!({"enabled":false,"ready":false,"endpoint":null,"pending":null,"paired":null})
             );
-            assert!(state.dependencies.lock().unwrap().is_none());
+            assert!(state.dependencies.get().is_none());
             let store = Arc::new(MemoryStore::default());
             let deps = Arc::new(
                 HostDependencies::new(load_or_create_identity(store.as_ref()).unwrap(), store)
@@ -376,7 +474,7 @@ mod desktop {
                     },
                 )
                 .unwrap();
-            *state.dependencies.lock().unwrap() = Some(deps);
+            assert!(state.dependencies.set(deps).is_ok());
             let result = serde_json::to_value(state.inspect(None).unwrap()).unwrap();
             assert_eq!(
                 result["paired"],
@@ -385,6 +483,20 @@ mod desktop {
             assert_eq!(result["pending"], serde_json::json!([]));
             assert_eq!(result["enabled"], false);
             assert_eq!(result.as_object().unwrap().len(), 5);
+        }
+        #[test]
+        fn publication_registration_is_closed_and_decodes_the_projection() {
+            let lease = CoordinatorLease {
+                lease_id: Uuid::new_v4(),
+                host_epoch: Uuid::new_v4(),
+            };
+            let snapshot =
+                crate::controller::events::tests::projection(&lease.host_epoch.to_string());
+            let mut request = serde_json::json!({"phase":"publish","lease":lease,"update":{"type":"projection","snapshot":snapshot}});
+            assert!(serde_json::from_value::<Registration>(request.clone()).is_ok());
+            request["update"]["snapshot"]["playback"]["track"] =
+                serde_json::json!({"path":"C:/secret.mp3"});
+            assert!(serde_json::from_value::<Registration>(request).is_err());
         }
         #[test]
         fn registration_and_inspection_reject_caller_authority_and_extra_fields() {
