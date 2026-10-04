@@ -84,7 +84,7 @@ export type ApplicationQuery =
   | ({ type: "artist_tracks"; artistName: string } & Pagination)
   | ({ type: "liked_tracks" } & Pagination)
   | ({ type: "albums"; sort?: AlbumSort; likedOnly?: boolean; text?: string } & Pagination)
-  | ({ type: "album_tracks"; albumId: number } & Pagination)
+  | ({ type: "album_tracks"; albumId: number; likedOnly?: boolean } & Pagination)
   | ({ type: "tracks" } & Pagination)
   | ({ type: "artists" } & Pagination)
   | ({ type: "artist_albums"; artistName: string } & Pagination)

@@ -691,6 +691,39 @@ pub async fn disconnect_player(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn failed_seek_transport_retires_held_prefetch_before_stop_or_flush() {
+        for failure_at in [1, 2] {
+            let players = new_player_map();
+            let mac = MacAddress([1, 2, 3, 4, 5, 6]);
+            let mut player = SqueezePlayer::new_cometd(mac, "fixture".into(), "fixture".into());
+            let track = crate::squeeze::queue::QueueTrack { id: 7, path: "fixture.flac".into(), title: "Fixture".into(), artist: String::new(), album: String::new(), duration: 100.0, format: "flac".into() };
+            player.queue.set_tracks(vec![track.clone(), track], 0);
+            player.retain_audible_occurrence();
+            player.queue.next();
+            let old_generation = player.advance_stream_generation();
+            player.seek_test_send_failure = Some(failure_at);
+            players.lock().await.insert(mac, player);
+            let mut held = players.lock().await;
+            let continuation = finish_prefetch(&mac, &players, None, old_generation);
+            tokio::pin!(continuation);
+            assert!(futures::poll!(&mut continuation).is_pending());
+            let player = held.get_mut(&mac).unwrap();
+            let plan = player.seek_plan(17.0).unwrap();
+            let error = player.stop_for_seek(&plan).await.unwrap_err();
+            assert_eq!(error.contains("SQUEEZE_SEEK_PARTIAL"), failure_at == 2);
+            assert_ne!(player.generation, old_generation);
+            assert_eq!(player.queue.current_track_index(), Some(0));
+            assert_eq!(player.seek_test_send_count, failure_at);
+            drop(held);
+            assert!(!continuation.await);
+            let held = players.lock().await;
+            let player = held.get(&mac).unwrap();
+            assert_eq!(player.seek_offset_ms, 17000);
+            assert_eq!(player.seek_test_send_count, failure_at, "obsolete start must not send");
+        }
+    }
+
+    #[tokio::test]
     async fn held_prefetch_continuation_cannot_restart_a_newer_seek_generation() {
         for replace in [false,true] {
             let players=new_player_map(); let mac=MacAddress([1,2,3,4,5,6]);

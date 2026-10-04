@@ -523,3 +523,15 @@ it("reports a confirmed Squeeze seek stop without pretending restart succeeded",
  commitSqueezeTarget("A");state.duration.set(100);const adapter=createDesktopAdapter();
  expect(await adapter.port.execute({type:"seek",seconds:25},{hostEpoch:adapter.state.read().hostEpoch,...adapter.state.read().revisions})).toMatchObject({status:"failed",partialEffects:["Previous output stopped"]});await adapter.dispose();
 });
+
+it("host shuffle chooses a nonzero initial member while explicit start wins",async()=>{
+ const random=vi.spyOn(Math,"random").mockReturnValue(.9);
+ api.tracks.mockResolvedValue([7,8,9].map(id=>({id,duration:100,cover_url:"fixture"})));
+ commitSqueezeTarget("A");state.shuffle.set(true);const adapter=createDesktopAdapter();
+ try {
+  await adapter.port.execute({type:"play_album",albumId:42,playMode:"all"},{hostEpoch:adapter.state.read().hostEpoch});
+  expect(api.play).toHaveBeenLastCalledWith("A",[7,8,9],2);
+  await adapter.port.execute({type:"play_album",albumId:42,playMode:"all",startTrackId:8},{hostEpoch:adapter.state.read().hostEpoch});
+  expect(api.play).toHaveBeenLastCalledWith("A",[7,8,9],1);
+ } finally { await adapter.dispose();random.mockRestore(); }
+});

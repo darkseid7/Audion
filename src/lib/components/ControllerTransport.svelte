@@ -1,4 +1,5 @@
 <script lang="ts">
+ import ControllerFeedback from "./ControllerFeedback.svelte";
  import { controllerState } from "$lib/application/controller/bootstrap";
  import { canExecute } from "$lib/application/capabilities";
  import type { ApplicationIntent, ExecutionResult } from "$lib/application/types";
@@ -29,6 +30,7 @@
    <div class="progress"><span>{time(playback?.position ?? 0)}</span><input type="range" aria-label="Seek" min="0" max={playback?.duration ?? 0} step="1" value={playback?.position ?? 0} disabled={!canExecute($controllerState,"seek") || !playback?.duration} on:change={seek} /><span>{time(playback?.duration ?? 0)}</span></div>
   </div>
   <div class="extras"><label>Volume <input type="range" aria-label="Volume" min="0" max="1" step="0.01" value={playback?.volume ?? 0} disabled={!canExecute($controllerState,"set_volume")} on:change={volume} /></label><button on:click={() => outputsOpen = true} aria-label="Choose output">Outputs</button><button on:click={toggleQueue} aria-label="Open queue">Queue</button></div>
+  <ControllerFeedback />
   {#if playback?.error}<p role="alert">{playback.error.message}</p>{/if}
  </section>
 {/if}

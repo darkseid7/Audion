@@ -410,10 +410,8 @@ pub async fn squeeze_seek(
         let seconds = plan.elapsed_ms as f64 / 1000.0;
         let byte_offset = ((seconds / plan.track.duration) * file_size as f64) as u64;
         // A failed stop has an unknown outcome and is never followed by a start.
-        player.stop().await?;
+        player.stop_for_seek(&plan).await?;
         let partial = |e| format!("SQUEEZE_SEEK_PARTIAL: output stopped; {e}");
-        player.flush().await.map_err(partial)?;
-        player.begin_seek(&plan).map_err(partial)?;
         server.streaming.queue_file(&mac_addr, path, player.generation, byte_offset).await;
         player.start_stream(HTTP_PORT, 0).await.map_err(partial)?;
         player.elapsed_ms = plan.elapsed_ms;

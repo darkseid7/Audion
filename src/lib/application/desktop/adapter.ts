@@ -106,7 +106,11 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess, pcName
         case "queue_insert": case "queue_append": tracks = await Promise.all(intent.trackIds.map(resolveTrack)); break;
         default: return fail("unsupported", "Intent does not resolve tracks");
       }
-      const startIndex = "startTrackId" in intent && intent.startTrackId !== undefined ? tracks.findIndex(track => track.id === intent.startTrackId) : 0;
+      const hasExplicitStart = "startTrackId" in intent && intent.startTrackId !== undefined;
+      const shuffleEntity = ["play_album", "play_playlist", "play_artist", "play_liked"].includes(intent.type) && get(player.shuffle);
+      const startIndex = hasExplicitStart
+        ? tracks.findIndex(track => track.id === intent.startTrackId)
+        : shuffleEntity ? Math.floor(Math.random() * tracks.length) : 0;
       if (!tracks.length || startIndex < 0) fail("not_found", "Requested playback is unavailable");
       return { tracks, startIndex, context };
     },

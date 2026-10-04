@@ -24,7 +24,9 @@
       "sort": "year-desc",
       "likedOnly": true,
       "text": "Album"
-    }
+    },
+    {"type": "album_tracks", "albumId": 1, "likedOnly": false},
+    {"type": "album_tracks", "albumId": 1, "likedOnly": true}
   ],
   "invalid": [
     {
@@ -55,6 +57,10 @@
       "type": "album_detail",
       "albumId": 1,
       "limit": 3
-    }
+    },
+    {"type": "album_tracks", "albumId": 1, "likedOnly": null},
+    {"type": "album_tracks", "albumId": 1, "likedOnly": "yes"},
+    {"type": "album_tracks", "albumId": 1, "likedOnly": 1},
+    {"type": "album_tracks", "albumId": 1, "likedOnly": true, "unknown": false}
   ]
 }

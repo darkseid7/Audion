@@ -64,3 +64,26 @@ it("queues an entity once with all three authoritative revisions, never collecti
 it.each([NaN,Infinity,-1])( "rejects invalid view seek %s before calling the port",async value=>{
  const {actions,execute}=setup();expect(await actions.seek(value)).toMatchObject({status:"failed",error:{code:"invalid_request"}});expect(execute).not.toHaveBeenCalled();actions.dispose();
 });
+
+it.each(["execution_failed","outcome_unknown"] as const)("retains earlier %s after a later action finishes",async code=>{
+ const {actions,execute}=setup();let finish!: (result:any)=>void;
+ execute.mockImplementationOnce(()=>new Promise(r=>finish=r));
+ const first=actions.playAlbum(42,"all");await actions.setVolume(.8);
+ expect(get(actions.outcomes).map(x=>x.status)).toEqual(["pending","applied"]);
+ finish({status:"failed",error:{code,message:"Earlier action failed",retryable:false},revision:9,partialEffects:["Output stopped"]});await first;
+ expect(get(actions.outcomes)).toEqual(expect.arrayContaining([expect.objectContaining({status:code==="outcome_unknown"?"unknown":"error",message:expect.stringContaining("Output stopped")}),expect.objectContaining({status:"applied"})]));
+ actions.dispose();
+});
+it("tracks both accepted jobs independently and declines at capacity without IPC",async()=>{
+ const {actions,state,execute}=setup();
+ execute.mockResolvedValueOnce({status:"accepted",jobId:"a",revision:9}).mockResolvedValueOnce({status:"accepted",jobId:"b",revision:9});
+ await actions.playAlbum(1,"all");await actions.setVolume(.2);
+ state.update(s=>({...s,snapshot:{...s.snapshot!,jobs:[{jobId:"b",status:"completed",result:{status:"applied",revision:10}},{jobId:"a",status:"completed",result:{status:"failed",revision:10,error:{code:"outcome_unknown",message:"Unknown first",retryable:false},partialEffects:[]}}]}}));
+ expect(get(actions.outcomes).map(x=>x.status)).toEqual(["unknown","applied"]);
+ execute.mockResolvedValue({status:"accepted",jobId:"held",revision:10});
+ for(let i=0;i<40;i++)await actions.setVolume(.3);
+ expect(execute).toHaveBeenCalledTimes(33);
+ expect(get(actions.outcomes)).toHaveLength(32);expect(get(actions.admissionError)).toContain("Dismiss");
+ expect(get(actions.outcomes)[0].status).toBe("unknown");actions.dismiss(get(actions.outcomes)[0].id);
+ await actions.setVolume(.4);expect(execute).toHaveBeenCalledTimes(34);actions.dispose();
+});

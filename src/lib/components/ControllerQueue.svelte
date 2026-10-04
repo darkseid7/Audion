@@ -1,4 +1,5 @@
 <script lang="ts">
+ import ControllerFeedback from "./ControllerFeedback.svelte";
  import { onDestroy } from "svelte";
  import { controllerState } from "$lib/application/controller/bootstrap";
  import { createControllerPage } from "$lib/application/controller/views";
@@ -17,6 +18,7 @@
 {#if visible}<aside class="queue-panel" aria-label="Queue">
  {#if !hideheader}<header><h2>Queue</h2><button on:click={toggleQueue} aria-label="Close queue">×</button></header>{/if}
  <button disabled={!canExecute($controllerState,"queue_clear_upcoming")} on:click={() => execute({type:"queue_clear_upcoming"})}>Clear upcoming</button>
+ <ControllerFeedback />
  {#each entries as entry, index (entry.entryId)}
   <div class="queue-row" class:current={entry.entryId === $controllerState.snapshot?.queue.currentEntryId}>
    <div class="art"><ControllerArtwork reference={entry.track.artwork} /></div>

@@ -26,3 +26,15 @@ it("loads authoritative album detail at the current library revision",async()=>{
  const page=createControllerPage(()=>({query:async()=>({type:"album_detail",detail,revision:4})} as any),state);
  page.setQuery({type:"album_detail",albumId:42});await vi.waitFor(()=>expect(get(page.state).detail).toEqual(detail));page.dispose();
 });
+
+it("switching album liked filter discards late all-member pages",async()=>{
+ const state=writable({ready:true,snapshot:{hostId:"one",hostEpoch:"epoch",revisions:{libraryRevision:4,queueRevision:2}}} as ControllerState);
+ let finish!: (v:any)=>void;
+ const query=vi.fn().mockImplementationOnce(()=>new Promise(r=>finish=r)).mockResolvedValueOnce({type:"album_tracks",page:{items:[{id:201,liked:true}],nextCursor:null,revision:4}});
+ const page=createControllerPage(()=>({query} as any),state);
+ page.setQuery({type:"album_tracks",albumId:42,likedOnly:false});
+ page.setQuery({type:"album_tracks",albumId:42,likedOnly:true});
+ await vi.waitFor(()=>expect(get(page.state).items).toEqual([{id:201,liked:true}]));
+ finish({type:"album_tracks",page:{items:[{id:1,liked:false}],nextCursor:"all-page",revision:4}});
+ await Promise.resolve();expect(get(page.state).items).toEqual([{id:201,liked:true}]);expect(get(page.state).nextCursor).toBeNull();page.dispose();
+});

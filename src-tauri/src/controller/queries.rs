@@ -640,6 +640,10 @@ impl PageWindow {
         let mut fingerprint =
             serde_json::to_value(query).map_err(|_| error(ControlErrorCode::InvalidRequest))?;
         let object = fingerprint.as_object_mut().unwrap();
+        if matches!(query, ApplicationQuery::AlbumTracks { .. }) {
+            let liked = object.get("likedOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+            object.insert("likedOnly".into(), serde_json::json!(liked));
+        }
         let cursor = object
             .remove("cursor")
             .and_then(|v| v.as_str().map(str::to_owned));
@@ -803,10 +807,10 @@ fn project(
         ApplicationQuery::Tracks { .. } => {
             track_page!(tracks.iter().collect::<Vec<_>>(), Tracks)
         }
-        ApplicationQuery::AlbumTracks { album_id, .. } => {
+        ApplicationQuery::AlbumTracks { album_id, liked_only, .. } => {
             let mut ts = tracks
                 .iter()
-                .filter(|t| t.album_id == Some(album_id as i64))
+                .filter(|t| t.album_id == Some(album_id as i64) && (!liked_only.unwrap_or(false) || liked.contains(&t.id)))
                 .collect::<Vec<_>>();
             ts.sort_by_key(|t| (t.disc_number, t.track_number, &t.title, t.id));
             track_page!(ts, AlbumTracks)
@@ -984,6 +988,42 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::Mutex;
+    #[tokio::test]
+    async fn liked_album_tracks_filter_before_page_and_bind_cursor() {
+        let q = fixture();
+        {
+            let conn = q.db.conn.lock().unwrap();
+            conn.execute_batch("DELETE FROM tracks; DELETE FROM liked_tracks;").unwrap();
+            for id in 1..=205 {
+                conn.execute("INSERT INTO tracks(id,path,title,album_id,track_number) VALUES(?1,?2,'Fixture',1,?1)", rusqlite::params![id, format!("fixture-{id}.flac")]).unwrap();
+                if id > 200 { conn.execute("INSERT INTO liked_tracks(track_id) VALUES(?1)", [id]).unwrap(); }
+            }
+        }
+        let c = context(&q);
+        let get = |liked: Option<bool>, cursor: Option<String>| {
+            let mut v = serde_json::json!({"type":"album_tracks","albumId":1,"limit":2});
+            if let Some(liked) = liked { v["likedOnly"] = serde_json::json!(liked); }
+            if let Some(cursor) = cursor { v["cursor"] = serde_json::json!(cursor); }
+            query(v)
+        };
+        let QueryResult::AlbumTracks { page: all } = q.query_library(get(None,None),c.clone()).await.unwrap() else { panic!() };
+        assert_eq!(all.items.iter().map(|t| t.id).collect::<Vec<_>>(),vec![1,2]);
+        let QueryResult::AlbumTracks { page: same } = q.query_library(get(Some(false),all.next_cursor.clone()),c.clone()).await.unwrap() else { panic!() };
+        assert_eq!(same.items[0].id,3);
+        let QueryResult::AlbumTracks { page: first } = q.query_library(get(Some(true),None),c.clone()).await.unwrap() else { panic!() };
+        assert_eq!(first.items.iter().map(|t| t.id).collect::<Vec<_>>(),vec![201,202]);
+        let cursor=first.next_cursor.unwrap();
+        assert_eq!(q.query_library(get(Some(false),Some(cursor.clone())),c.clone()).await.unwrap_err().code,ControlErrorCode::RevisionConflict);
+        let mut changed=c.clone();changed.revision+=1;
+        assert_eq!(q.query_library(get(Some(true),Some(cursor.clone())),changed).await.unwrap_err().code,ControlErrorCode::RevisionConflict);
+        let QueryResult::AlbumTracks { page: second } = q.query_library(get(Some(true),Some(cursor)),c.clone()).await.unwrap() else { panic!() };
+        assert_eq!(second.items.iter().map(|t| t.id).collect::<Vec<_>>(),vec![203,204]);
+        let QueryResult::AlbumTracks { page: last } = q.query_library(get(Some(true),second.next_cursor),c).await.unwrap() else { panic!() };
+        assert_eq!(last.items[0].id,205);assert!(last.next_cursor.is_none());
+        q.db.conn.lock().unwrap().execute("DELETE FROM liked_tracks",[]).unwrap();
+        let QueryResult::AlbumTracks { page: empty } = q.query_library(get(Some(true),None),context(&q)).await.unwrap() else { panic!() };
+        assert!(empty.items.is_empty());assert!(empty.next_cursor.is_none());
+    }
     fn fixture() -> LibraryQueries {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::schema::init_schema(&conn).unwrap();

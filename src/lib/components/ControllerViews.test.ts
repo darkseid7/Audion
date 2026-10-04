@@ -18,9 +18,10 @@ const connection = writable<any>({ ready: true, grants: { control: true }, curre
  playback: { status: "paused", track: null, context: null, position: 0, duration: 200, volume: .5, shuffle: false, repeat: "none" }, queue: { count: 0, currentEntryId: null }, jobs: [], settings: {},
  capabilities: { queries: [], intents: ["play_album", "play_artist", "play_playlist", "play_liked", "play_track", "set_volume", "set_shuffle", "seek", "queue_play", "select_output"] }
 } });
-async function mountEntry(name: string, props: Record<string, unknown> = {}) {
- const execute = vi.fn(async () => ({ status: "applied" as const, revision: 2 }));
+async function mountEntry(name: string, props: Record<string, unknown> = {}, outcome?: any) {
+ const execute = vi.fn(async () => outcome ?? ({ status: "applied" as const, revision: 2 }));
  const actions = createViewActions(() => ({ execute } as any), connection);
+ if (outcome) await actions.execute({type:"seek",seconds:50});
  const mounts: (() => unknown)[] = [], destroys: (() => void)[] = [];
  let child: any;
  const source = readFileSync(new URL(`./${name}.svelte`, import.meta.url), "utf8");
@@ -33,7 +34,13 @@ async function mountEntry(name: string, props: Record<string, unknown> = {}) {
  };
  for (const match of code.matchAll(/require\("([^"]+)"\)/g)) {
   const id = match[1]; if (id in modules) continue;
-  if (id.endsWith(".svelte")) modules[id] = { default: (renderer: any, p: any) => { if (id.startsWith("./Controller")) { child = { ...p }; renderer.push(`<section data-controller="${id}"></section>`); } } };
+  if (id === "./ControllerFeedback.svelte") {
+   const feedbackSource=readFileSync(new URL(id,import.meta.url),"utf8");
+   const feedbackCode=ts.transpileModule(compile(feedbackSource,{filename:id,generate:"server"}).js.code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+   const feedbackExports:any={};runInNewContext(feedbackCode,{exports:feedbackExports,require:(name:string)=>modules[name]});
+   modules[id]={default:(renderer:any,p:any)=>{renderer.push(`<section data-controller="${id}">`);feedbackExports.default(renderer,p);renderer.push("</section>");}};
+  }
+  else if (id.endsWith(".svelte")) modules[id] = { default: (renderer: any, p: any) => { if (id.startsWith("./Controller")) { child = { ...p }; renderer.push(`<section data-controller="${id}"></section>`); } } };
   else if (id.startsWith("$lib/")) {
    const imported=await import(/* @vite-ignore */ resolve("src/lib", id.slice(5))); modules[id]=imported;
    if(id==="$lib/api/tauri") modules[id]={...imported,...Object.fromEntries(["getAlbum","getTracksByAlbum","getAlbumsByArtist","getTracksByArtist","getPlaylistTracks","getLikedTracks","squeezeIsRunning","squeezeStartServer","squeezeStopServer"].map(key=>[key,native]))};
@@ -118,4 +125,28 @@ it("omits an empty album filter instead of sending invalid optional native text"
 it("search album navigation clears the search shell before opening the shared detail",()=>{
  const calls:string[]=[];handler("ControllerBrowse","openAlbum",{onNavigate:()=>calls.push("clear"),goToAlbumDetail:(id:number)=>calls.push(`album:${id}`)})(42);
  expect(calls).toEqual(["clear","album:42"]);
+});
+
+it.each([["ControllerTransport",{variant:"full"}],["ControllerQueue",{}],["ControllerOutputs",{}]])("%s keeps feedback inside its open surface",async(name,props)=>{
+ const mounted=await mountEntry(name as string,{...props as object,execute:async()=>({status:"applied",revision:1})});
+ expect(mounted.html).toContain('data-controller="./ControllerFeedback.svelte"');mounted.dispose();
+});
+
+it("liked album browse requests PC-filtered membership rather than filtering a partial page",()=>{
+ expect(handler("ControllerBrowse","filteredQuery",{})({type:"album_tracks",albumId:42},"year-desc","",true)).toEqual({type:"album_tracks",albumId:42,likedOnly:true});
+});
+
+it.each(["ControllerTransport","ControllerQueue","ControllerOutputs"])("%s displays actual shared outcomes while remaining open",async name=>{
+ for(const outcome of [
+  {status:"accepted",jobId:"pending",revision:1},
+  {status:"failed",revision:1,error:{code:"execution_failed",message:"PC refused",retryable:false},partialEffects:[]},
+  {status:"failed",revision:1,error:{code:"execution_failed",message:"Restart failed",retryable:false},partialEffects:["Output stopped"]},
+  {status:"failed",revision:1,error:{code:"outcome_unknown",message:"Unknown outcome; not replayed",retryable:false},partialEffects:[]}
+ ]) {
+  const mounted=await mountEntry(name,{variant:"full",execute:async()=>outcome},outcome);
+  expect(mounted.html).toContain(outcome.status==="accepted"?"Waiting for the PC to finish":outcome.error!.message);
+  if(outcome.partialEffects?.length)expect(mounted.html).toContain("Output stopped");
+  expect(mounted.html).toContain(name==="ControllerTransport"?"Now playing":name==="ControllerQueue"?"Close queue":"Close outputs");
+  mounted.dispose();
+ }
 });

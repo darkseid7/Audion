@@ -769,6 +769,8 @@ pub enum ApplicationQuery {
     AlbumTracks {
         #[serde(deserialize_with = "entity_id")]
         album_id: u64,
+        #[serde(default, deserialize_with = "optional_value", skip_serializing_if = "Option::is_none")]
+        liked_only: Option<bool>,
         #[serde(
             default,
             deserialize_with = "optional_limit",

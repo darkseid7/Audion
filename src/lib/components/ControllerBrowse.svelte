@@ -24,6 +24,7 @@
  const page = query.type === "search" ? createControllerSearchPage() : createControllerLibraryPage(), state=page.state;
  let sort: AlbumSort="artist-asc", text="", likedOnly=false;
   function filteredQuery(query: ApplicationQuery, sort: AlbumSort, text: string, likedOnly: boolean): ApplicationQuery {
+  if (query.type === "album_tracks") return { ...query, likedOnly };
   return query.type === "albums" ? { ...query, sort, likedOnly, ...(text.trim() ? {text:text.trim()} : {}) } : query;
  }
  $: request=filteredQuery(query,sort,text,likedOnly);
@@ -74,7 +75,7 @@
  {:else if query.type==="artists"}<div class="entity-list">{#each artists as artist}<button on:click={()=>openArtist(artist.name)}><strong>{artist.name}</strong><small>{artist.albumCount} albums · {artist.trackCount} tracks</small></button>{/each}</div>
  {:else if query.type==="playlists"}<div class="entity-list">{#each playlists as playlist}<button on:click={()=>openPlaylist(playlist.id,playlist.name)}><strong>{playlist.name}</strong><small>{playlist.trackCount} tracks</small></button>{/each}</div>
  {:else if query.type==="search"}<div class="entity-list">{#each matches as match}{#if match.type==="album"}<button on:click={()=>openAlbum(match.album.id)}>{match.album.name}<small>Album · {match.album.artist}</small></button>{:else if match.type==="artist"}<button on:click={()=>openArtist(match.artist.name)}>{match.artist.name}<small>Artist</small></button>{:else}<button disabled={!canExecute($controllerState,"play_track")} on:click={()=>execute({type:"play_track",trackId:match.track.id})}>{trackTitle(match.track)}<small>{match.track.artist}</small></button>{/if}{/each}</div>
- {:else}<div class="track-list">{#each tracks.filter(t=>context?.type!=="album" || !likedOnly || t.liked) as track, trackIndex (trackIndex)}
+ {:else}<div class="track-list">{#each tracks as track, trackIndex (trackIndex)}
   <div class="track-row"><div class="art"><ControllerArtwork reference={track.artwork} /></div><button class="track-title" disabled={!canExecute($controllerState,context?.type==="album"?"play_album":context?.type==="artist"?"play_artist":context?.type==="playlist"?"play_playlist":context?.type==="liked"?"play_liked":"play_track")} on:click={()=>play(track.id)}><strong>{trackTitle(track)}</strong><small>{track.artist} · {track.album}</small></button><span class="quality">{track.quality.badges.join(" · ")}</span><button aria-label={`Play ${trackTitle(track)} next`} disabled={!canExecute($controllerState,"queue_insert")} on:click={()=>execute({type:"queue_insert",trackIds:[track.id],placement:"next"})}>Next</button><button aria-label={`Add ${trackTitle(track)} to queue`} disabled={!canExecute($controllerState,"queue_insert")} on:click={()=>execute({type:"queue_insert",trackIds:[track.id],placement:"after_user_queue"})}>+</button><button aria-label={`Append ${trackTitle(track)} to queue`} disabled={!canExecute($controllerState,"queue_append")} on:click={()=>execute({type:"queue_append",trackIds:[track.id]})}>End</button></div>
  {/each}</div>{/if}
  {#if $state.error}<p role="alert">{$state.error}</p><button on:click={page.refresh}>Refresh</button>{/if}

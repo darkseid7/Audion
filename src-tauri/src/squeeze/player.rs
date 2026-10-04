@@ -55,6 +55,10 @@ pub struct SqueezePlayer {
     pub name: String,
     pub capabilities: String,
     writer: Option<OwnedWriteHalf>,
+    #[cfg(test)]
+    pub(crate) seek_test_send_failure: Option<usize>,
+    #[cfg(test)]
+    pub(crate) seek_test_send_count: usize,
     tcp_session_id: Option<u64>,
     pub state: PlayerState,
     pub queue: PlayQueue,
@@ -108,6 +112,10 @@ impl SqueezePlayer {
             name: display_name,
             capabilities,
             writer: Some(writer),
+            #[cfg(test)]
+            seek_test_send_failure: None,
+            #[cfg(test)]
+            seek_test_send_count: 0,
             tcp_session_id: Some(NEXT_TCP_SESSION.fetch_add(1, Ordering::Relaxed)),
             state: PlayerState::Stopped,
             queue: PlayQueue::new(),
@@ -136,6 +144,10 @@ impl SqueezePlayer {
             name: display_name,
             capabilities: format!("cometd,uuid={}", uuid),
             writer: None,
+            #[cfg(test)]
+            seek_test_send_failure: None,
+            #[cfg(test)]
+            seek_test_send_count: 0,
             tcp_session_id: None,
             state: PlayerState::Stopped,
             queue: PlayQueue::new(),
@@ -206,6 +218,13 @@ impl SqueezePlayer {
 
     /// Send raw bytes to the player (SlimProto only).
     pub async fn send(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
+        #[cfg(test)]
+        {
+            self.seek_test_send_count += 1;
+            if self.seek_test_send_failure == Some(self.seek_test_send_count) {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "synthetic seek write failure"));
+            }
+        }
         if let Some(ref mut writer) = self.writer {
             writer.write_all(data).await?;
             writer.flush().await?;
@@ -467,6 +486,15 @@ impl SqueezePlayer {
         self.advance_stream_generation();
         Ok(())
     }
+    /// Stop/flush phase of the command; caller retains the player lock through restart.
+    pub async fn stop_for_seek(&mut self, plan: &SeekPlan) -> Result<(), String> {
+        // Validation and ownership retirement must precede even a failed stop.
+        // Never restore the obsolete generation on any transport error exit.
+        self.begin_seek(plan)?;
+        self.stop().await?;
+        self.flush().await.map_err(|e| format!("SQUEEZE_SEEK_PARTIAL: output stopped; {e}"))
+    }
+
     /// Capture the audible occurrence before the queue cursor advances for prefetch.
     pub fn retain_audible_occurrence(&mut self) {
         self.display_track = self.queue.current().cloned();

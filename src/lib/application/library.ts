@@ -21,7 +21,7 @@ export function parseLibraryQuery(value: unknown): LibraryQuery {
   const invalid = (): never => { throw new Error("Invalid library query"); };
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const q = value as Record<string, unknown>;
-  const keys: Record<string, string[]> = { albums: ["sort", "likedOnly", "text"], album_detail: ["albumId"], album_tracks: ["albumId"], tracks: [], artists: [], artist_albums: ["artistName"], artist_tracks: ["artistName"], search: ["text"], queue: [], playlists: [], playlist_tracks: ["playlistId"], liked_tracks: [] };
+  const keys: Record<string, string[]> = { albums: ["sort", "likedOnly", "text"], album_detail: ["albumId"], album_tracks: ["albumId", "likedOnly"], tracks: [], artists: [], artist_albums: ["artistName"], artist_tracks: ["artistName"], search: ["text"], queue: [], playlists: [], playlist_tracks: ["playlistId"], liked_tracks: [] };
   if (typeof q.type !== "string" || !Object.hasOwn(keys, q.type)) return invalid();
   if (Reflect.ownKeys(q).some(k => typeof k !== "string" || !["type", ...keys[q.type as string], ...(q.type === "album_detail" ? [] : ["cursor", "limit"])].includes(k))) return invalid();
   const text = (v: unknown, max: number) => { if (typeof v !== "string" || !v.length || new TextEncoder().encode(v).length > max || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(v)) invalid(); };

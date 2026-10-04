@@ -1,4 +1,5 @@
 <script lang="ts">
+ import ControllerFeedback from "./ControllerFeedback.svelte";
  import { controllerState } from "$lib/application/controller/bootstrap";
  import { canExecute, sameOutput } from "$lib/application/capabilities";
  import type { ApplicationIntent, ExecutionResult, OutputRef } from "$lib/application/types";
@@ -17,6 +18,7 @@
     <span>{item.name}<small>{item.output.kind === "pc" ? "PC output" : "Squeeze Connect"}{!item.available ? " · Unavailable" : ""}</small></span>
    </button>
   {/each}
+  <ControllerFeedback />
   <p class="unavailable" aria-disabled="true">Cloud playback is unavailable on this controller.</p>
  </section>
 </div>

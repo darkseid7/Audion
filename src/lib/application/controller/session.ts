@@ -260,11 +260,22 @@ export function createControllerSession(native: ControllerNativeBridge, options:
                     if (["unauthorized", "permission_required"].includes((error as ControlError)?.code)) disconnected(error, g);
                     throw error;
                 }
-                const result = await native.commandStatus(f, envelope.requestId);
-                current(g, snapshot.hostEpoch);
-                if (result.status === "pending")
-                    throw failure("outcome_unknown", "The PC has not confirmed this command. It was not replayed.");
-                return result;
+                try {
+                    const result = await native.commandStatus(f, envelope.requestId);
+                    current(g, snapshot.hostEpoch);
+                    if (result.status === "pending")
+                        throw failure("outcome_unknown", "The PC has not confirmed this command. It was not replayed.");
+                    if ((result.status === "failed" || result.status === "superseded") && ["unauthorized", "permission_required"].includes(result.error.code)) {
+                        disconnected(result.error, g);
+                    }
+                    return result;
+                } catch (statusError) {
+                    current(g, snapshot.hostEpoch);
+                    if (["unauthorized", "permission_required"].includes((statusError as ControlError)?.code)) {
+                        disconnected(statusError, g);
+                    }
+                    throw statusError;
+                }
             }
         },
         subscribe(listener) {

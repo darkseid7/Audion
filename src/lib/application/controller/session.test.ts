@@ -248,3 +248,30 @@ it("rejects missing grant receipts instead of treating readiness as permission",
     expect(get(s.state)).toMatchObject({ ready: false, grants: null, status: "protocol_error" });
     s.suspendController();
 });
+
+it.each(["unauthorized", "permission_required"] as const)("clears permission on rejected or failed status %s with poll held", async code => {
+ for (const rejection of [true, false]) {
+  const n=bridge(), s=createControllerSession(n);
+  n.command.mockRejectedValue({code:"outcome_unknown"});
+  const error={code,message:"Permission changed",retryable:false};
+  if(rejection)n.commandStatus.mockRejectedValue(error);
+  else n.commandStatus.mockResolvedValue({status:"failed",error,revision:1,partialEffects:[]});
+  await s.connectController("one");
+  await s.port.execute({type:"pause"},{hostEpoch:"epoch",outputRevision:3}).catch(()=>{});
+  expect(get(s.state)).toMatchObject({ready:false,grants:null,snapshot:null});
+  expect(n.command).toHaveBeenCalledOnce();s.suspendController();
+ }
+});
+it.each([true,false])("late status receipt rejection=%s cannot invalidate replacement connection", async rejection=>{
+ const n=bridge(),s=createControllerSession(n),status=deferred<any>();
+ n.command.mockRejectedValue({code:"outcome_unknown"});n.commandStatus.mockReturnValue(status.promise);
+ await s.connectController("one");
+ const pending=s.port.execute({type:"pause"},{hostEpoch:"epoch",outputRevision:3});
+ const checked=expect(pending).rejects.toMatchObject({code:"resync_required"});
+ await vi.waitFor(()=>expect(n.commandStatus).toHaveBeenCalledOnce());
+ await s.connectController("two");
+ if(rejection)status.reject({code:"unauthorized"});
+ else status.resolve({status:"failed",revision:1,partialEffects:[],error:{code:"permission_required",message:"Permission changed",retryable:false}});
+ await checked;
+ expect(get(s.state)).toMatchObject({ready:true,currentHostId:"two",grants:{control:true}});s.suspendController();
+});
