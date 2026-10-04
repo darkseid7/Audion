@@ -562,3 +562,94 @@ it("publishes negative provider metadata through the real host bridge without lo
     expect(update).toEqual(JSON.parse(readFileSync(path, "utf8")));
   } finally { await bridge.dispose(); await adapter.dispose(); }
 });
+it("publishes the native album artwork reference for the current playback track", async () => {
+  const reference = { resourceId: "native-cover", revision: 4 };
+  const query = vi.fn(async () => ({ type: "album_detail" as const, revision: 4, detail: { album: { id: 5, artwork: reference }, originalYear: null, trackCount: 1, liked: false } }));
+  const adapter = createDesktopAdapter({ revision: async () => 4, query: query as any, artwork: vi.fn() });
+  await adapter.attachAuthority({ hostId: "host", hostEpoch: "epoch", library: { revision: async () => 4, query: query as any, artwork: vi.fn() } });
+  state.currentTrack.set({ id: 7, album_id: 5, title: "Playing" } as any);
+  await vi.waitFor(async () => expect(await adapter.port.query({ type: "snapshot" })).toMatchObject({ snapshot: { playback: { track: { artwork: reference } } } }));
+  expect(query).toHaveBeenCalledWith({ type: "album_detail", albumId: 5 }, expect.any(AbortSignal));
+  const count = query.mock.calls.length;
+  state.currentTime.set(5);
+  await Promise.resolve();
+  expect(query).toHaveBeenCalledTimes(count);
+  await adapter.dispose();
+});
+
+it("does not publish late artwork onto another playback track", async () => {
+  let finish!: (result: any) => void;
+  const query = vi.fn(() => new Promise<any>(resolve => { finish = resolve; }));
+  const adapter = createDesktopAdapter({ revision: async () => 0, query, artwork: vi.fn() });
+  state.currentTrack.set({ id: 7, album_id: 5 } as any);
+  await vi.waitFor(() => expect(query).toHaveBeenCalled());
+  state.currentTrack.set({ id: 8, album_id: null } as any);
+  finish({ type: "album_detail", revision: 0, detail: { album: { id: 5, artwork: { resourceId: "old-cover", revision: 0 } } } });
+  await Promise.resolve(); await Promise.resolve();
+  expect(await adapter.port.query({ type: "snapshot" })).toMatchObject({ snapshot: { playback: { track: { id: 8 } } } });
+  const result = await adapter.port.query({ type: "snapshot" });
+  if (result.type === "snapshot") expect(result.snapshot.playback.track?.artwork).toBeUndefined();
+  await adapter.dispose();
+});
+it("rejects artwork from a different library revision", async () => {
+  const query = vi.fn(async () => ({ type: "album_detail" as const, revision: 1, detail: { album: { id: 5, artwork: { resourceId: "stale", revision: 1 } } } }));
+  const adapter = createDesktopAdapter({ revision: async () => 0, query: query as any, artwork: vi.fn() });
+  state.currentTrack.set({ id: 7, album_id: 5 } as any);
+  await vi.waitFor(() => expect(query).toHaveBeenCalled());
+  const result = await adapter.port.query({ type: "snapshot" });
+  if (result.type === "snapshot") expect(result.snapshot.playback.track?.artwork).toBeUndefined();
+  await adapter.dispose();
+});
+it("recovers playback artwork after a retryable native Busy reply", async () => {
+  const reference = { resourceId: "recovered-cover", revision: 0 };
+  const query = vi.fn().mockRejectedValueOnce({ code: "busy", retryable: true }).mockResolvedValue({ type: "album_detail", revision: 0, detail: { album: { id: 5, artwork: reference } } });
+  const adapter = createDesktopAdapter({ revision: async () => 0, query, artwork: vi.fn() });
+  try {
+    state.currentTrack.set({ id: 7, album_id: 5 } as any);
+    await vi.waitFor(async () => expect(await adapter.port.query({ type: "snapshot" })).toMatchObject({ snapshot: { playback: { track: { artwork: reference } } } }));
+    expect(query).toHaveBeenCalledTimes(2);
+  } finally { await adapter.dispose(); }
+});
+
+it("does not retry a playback artwork read after changing tracks", async () => {
+  const query = vi.fn().mockRejectedValue({ code: "busy", retryable: true });
+  const adapter = createDesktopAdapter({ revision: async () => 0, query, artwork: vi.fn() });
+  try {
+    state.currentTrack.set({ id: 7, album_id: 5 } as any);
+    await vi.waitFor(() => expect(query).toHaveBeenCalledTimes(1));
+    state.currentTrack.set({ id: 8, album_id: null } as any);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(query).toHaveBeenCalledTimes(1);
+  } finally { await adapter.dispose(); }
+});
+it("bounds playback artwork Busy retries and cancels recovery on disposal", async () => {
+  vi.useFakeTimers();
+  const query = vi.fn().mockRejectedValue({ code: "busy", retryable: true });
+  const adapter = createDesktopAdapter({ revision: async () => 0, query, artwork: vi.fn() });
+  try {
+    state.currentTrack.set({ id: 7, album_id: 5 } as any);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(query).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(query).toHaveBeenCalledTimes(4);
+    state.currentTrack.set({ id: 8, album_id: 6 } as any);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query).toHaveBeenCalledTimes(5);
+    await adapter.dispose();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(query).toHaveBeenCalledTimes(5);
+  } finally { await adapter.dispose(); vi.useRealTimers(); }
+});
+it("can retry the same track after recovery was cancelled by an empty playback state", async () => {
+  const reference = { resourceId: "returned-cover", revision: 0 };
+  const query = vi.fn().mockRejectedValueOnce({ code: "busy", retryable: true }).mockResolvedValue({ type: "album_detail", revision: 0, detail: { album: { id: 5, artwork: reference } } });
+  const adapter = createDesktopAdapter({ revision: async () => 0, query, artwork: vi.fn() });
+  try {
+    state.currentTrack.set({ id: 7, album_id: 5 } as any);
+    await vi.waitFor(() => expect(query).toHaveBeenCalledTimes(1));
+    state.currentTrack.set(null);
+    await adapter.port.query({ type: "snapshot" });
+    state.currentTrack.set({ id: 7, album_id: 5 } as any);
+    await vi.waitFor(async () => expect(await adapter.port.query({ type: "snapshot" })).toMatchObject({ snapshot: { playback: { track: { artwork: reference } } } }));
+  } finally { await adapter.dispose(); }
+});

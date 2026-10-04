@@ -2,6 +2,7 @@
     import { applicationMode } from "$lib/application/bootstrap";
     import { viewActions } from "$lib/application/view-actions";
     import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import EntityDetail from "./presentation/EntityDetail.svelte";
     import ControllerBrowse from "./ControllerBrowse.svelte";
     function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
     function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
@@ -502,12 +503,7 @@
             <span>{$_('album.loading')}</span>
         </div>
     {:else if album && shouldShowAlbum}
-        <header
-            class="album-header"
-            on:contextmenu={handleContextMenu}
-            role="banner"
-            aria-label="Album Header"
-        >
+        <EntityDetail kind="album" onContextMenu={handleContextMenu} role="banner" ariaLabel="Album Header">
             <button
                 class="back-btn"
                 on:click={goBack}
@@ -697,7 +693,7 @@
                     {/if}
                 </div>
             </div>
-        </header>
+        </EntityDetail>
 
         <!-- MusicBrainz release info bar -->
         {#if mbReleaseLoading}
@@ -859,55 +855,17 @@
         }
     }
 
-    .album-header {
-        display: flex;
-        gap: var(--spacing-lg);
-        padding: var(--spacing-lg);
-        background: linear-gradient(
-            180deg,
-            var(--bg-surface) 0%,
-            var(--bg-base) 100%
-        );
-    }
 
-    .back-btn {
-        position: absolute;
-        top: var(--spacing-md);
-        left: var(--spacing-md);
-        width: 32px;
-        height: 32px;
-        border-radius: var(--radius-full);
-        background-color: rgba(0, 0, 0, 0.5);
-        color: var(--text-primary);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: all var(--transition-fast);
-    }
 
-    .back-btn:hover {
-        background-color: rgba(0, 0, 0, 0.7);
-        transform: scale(1.1);
-    }
 
-    .album-cover {
-        width: 232px;
-        height: 232px;
-        border-radius: var(--radius-sm);
-        overflow: hidden;
-        flex-shrink: 0;
-        box-shadow: var(--shadow-lg);
-    }
 
-    .album-cover img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-    }
 
-    .album-cover img.clickable {
-        cursor: pointer;
-    }
+
+
+
+
+
+
 
     .art-popup-overlay {
         position: fixed;
@@ -956,183 +914,49 @@
         to { opacity: 1; }
     }
 
-    .album-cover-placeholder {
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: linear-gradient(
-            135deg,
-            var(--bg-surface) 0%,
-            var(--bg-highlight) 100%
-        );
-        color: var(--text-subdued);
-    }
 
-    .album-info {
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        min-width: 0;
-    }
 
-    .album-type {
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        color: var(--text-primary);
-    }
 
-    .album-title {
-        font-size: 3rem;
-        font-weight: 700;
-        line-height: 1.1;
-        margin: var(--spacing-sm) 0;
-        color: var(--text-primary);
-    }
 
-    .album-meta {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        font-size: 0.875rem;
-        color: var(--text-secondary);
-        margin-bottom: var(--spacing-lg);
-    }
 
-    .album-audio-meta {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        flex-wrap: wrap;
-    }
 
-    .album-audio-chip {
-        display: inline-flex;
-        align-items: center;
-        padding: 2px 8px;
-        border-radius: var(--radius-full);
-        border: 1px solid var(--border-color);
-        background: var(--bg-highlight);
-        color: var(--text-secondary);
-        font-size: 0.72rem;
-        font-weight: 700;
-        line-height: 1;
-        white-space: nowrap;
-    }
 
-    .album-audio-chip.format-chip {
-        color: var(--accent-primary);
-        border-color: color-mix(in srgb, var(--accent-primary), transparent 65%);
-        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
-    }
 
-    .album-artist {
-        font-weight: 600;
-        color: var(--text-primary);
-        background: none;
-        border: none;
-        padding: 0;
-        cursor: pointer;
-    }
 
-    .album-artist:hover {
-        text-decoration: underline;
-    }
 
-    .separator {
-        color: var(--text-subdued);
-    }
 
-    .album-edition-display {
-        color: var(--text-subdued);
-        font-size: 0.85em;
-        margin-left: 4px;
-    }
 
-    .album-actions {
-        display: flex;
-        gap: var(--spacing-md);
-        align-items: center;
-    }
 
-    .btn-info {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        background: var(--bg-surface, #282828);
-        color: var(--text-secondary, #b3b3b3);
-        border: 0;
-        cursor: pointer;
-        transition: background 0.15s, color 0.15s, transform 0.1s;
-        flex-shrink: 0;
-    }
-    .btn-info:hover {
-        background: var(--bg-highlight, #3e3e3e);
-        color: var(--accent-primary, #1DB954);
-    }
-    .btn-info:active { transform: scale(0.92); }
 
-    .btn-like-album {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        border: 1px solid var(--border-color);
-        background: transparent;
-        color: var(--text-subdued);
-        cursor: pointer;
-        transition: all var(--transition-fast);
-    }
 
-    .btn-like-album:hover {
-        color: var(--accent-primary);
-        border-color: var(--accent-primary);
-    }
 
-    .btn-like-album.liked {
-        color: var(--accent-primary);
-        border-color: var(--accent-primary);
-    }
 
-    .btn-filter-liked {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-        height: 36px;
-        padding: 0 12px;
-        border-radius: var(--radius-full);
-        border: 1px solid var(--border-color);
-        background: transparent;
-        color: var(--text-subdued);
-        cursor: pointer;
-        font-size: 0.8rem;
-        font-weight: 600;
-        transition: all var(--transition-fast);
-    }
 
-    .btn-filter-liked:hover {
-        color: var(--accent-primary);
-        border-color: var(--accent-primary);
-    }
 
-    .btn-filter-liked.active {
-        color: var(--accent-primary);
-        border-color: var(--accent-primary);
-        background: color-mix(in srgb, var(--accent-primary), transparent 88%);
-    }
 
-    .play-all-btn {
-        font-size: 1rem;
-        padding: var(--spacing-sm) var(--spacing-xl);
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     .track-list-section {
         flex: 1;
@@ -1140,49 +964,17 @@
         min-height: 0;
     }
 
-    .btn-secondary {
-        background-color: transparent;
-        border: 1px solid var(--border-color);
-        color: var(--text-primary);
-        font-weight: 600;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        transition: all var(--transition-fast);
-        padding: var(--spacing-sm) var(--spacing-xl);
-        border-radius: var(--radius-full);
-        font-size: 1rem;
-    }
 
-    .btn-secondary:hover:not(:disabled) {
-        border-color: var(--text-primary);
-        transform: scale(1.05);
-    }
 
-    .btn-secondary.downloaded {
-        border-color: var(--accent-primary);
-        color: var(--accent-primary);
-        cursor: default;
-    }
 
-    .btn-secondary.downloaded:hover {
-        transform: none;
-    }
 
-    .btn-secondary:disabled {
-        opacity: 0.7;
-        cursor: not-allowed;
-    }
 
-    .spinner-sm {
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--bg-highlight);
-        border-top-color: var(--text-primary);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
+
+
+
+
+
+
 
     .disc-group {
         margin-bottom: var(--spacing-lg);
@@ -1285,51 +1077,21 @@
 
     /* ── Mobile ── */
     @media (max-width: 768px) {
-        .album-header {
-            flex-direction: column;
-            align-items: center;
-            text-align: center;
-            padding: calc(var(--safe-area-top) + var(--spacing-md))
-                var(--spacing-md) var(--spacing-md);
-            gap: var(--spacing-md);
-        }
 
-        .back-btn {
-            top: calc(var(--safe-area-top) + var(--spacing-sm));
-            left: var(--spacing-sm);
-        }
 
-        .album-cover {
-            width: 160px;
-            height: 160px;
-        }
 
-        .album-info {
-            align-items: center;
-        }
 
-        .album-title {
-            font-size: 1.5rem;
-            word-break: break-word;
-        }
 
-        .album-meta {
-            flex-wrap: wrap;
-            justify-content: center;
-            margin-bottom: var(--spacing-md);
-        }
 
-        .album-actions {
-            flex-wrap: wrap;
-            justify-content: center;
-        }
 
-        .play-all-btn,
-        .btn-secondary {
-            padding: var(--spacing-sm) var(--spacing-lg);
-            font-size: 0.875rem;
-            min-height: 44px;
-        }
+
+
+
+
+
+
+
+
 
         .track-list-section {
             padding-bottom: calc(

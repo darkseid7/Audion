@@ -10,7 +10,7 @@
   import { getTracksByArtist } from "$lib/api/tauri";
   import { contextMenu } from "$lib/stores/ui";
   import VirtualizedGrid from "./Virtualizedgrid.svelte";
-  import MediaCard from "./MediaCard.svelte";
+  import EntityGrid from "./presentation/EntityGrid.svelte";
   import { onDestroy } from "svelte";
   import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
   import { confirm, prompt } from "$lib/stores/dialogs";
@@ -233,7 +233,7 @@
   {@const isNowPlaying = playingArtistName === artist.name && playing}
   {@const isPaused = pausedArtistName === artist.name}
 
-  <MediaCard
+  <EntityGrid
     {isNowPlaying}
     {isPaused}
     isPinned={isPinned("artist", artist.name, $pinnedItems)}
@@ -263,7 +263,7 @@
         </span>
       {/if}
     </svelte:fragment>
-  </MediaCard>
+  </EntityGrid>
 </VirtualizedGrid>
 
 <style>

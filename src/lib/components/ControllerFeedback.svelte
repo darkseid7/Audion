@@ -3,10 +3,11 @@
  export let actions = viewActions;
  $: outcomes = actions.outcomes;
  $: admissionError = actions.admissionError;
+ $: visibleOutcomes = $outcomes.filter(outcome => outcome.status === "error" || outcome.status === "unknown");
 </script>
-{#if $outcomes.length || $admissionError}
+{#if visibleOutcomes.length || $admissionError}
  <section class="action-feedback" aria-label="PC action outcomes" aria-live="polite">
-  {#each $outcomes as outcome (outcome.id)}
+  {#each visibleOutcomes as outcome (outcome.id)}
    <div class:error={outcome.status === "error" || outcome.status === "unknown"}>
     <p role={outcome.status === "error" || outcome.status === "unknown" ? "alert" : "status"}>
      <strong>{outcome.action}</strong> — {outcome.message}

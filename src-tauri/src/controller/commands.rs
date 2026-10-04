@@ -1268,6 +1268,14 @@ impl CommandService {
         }
         Ok(result)
     }
+    pub async fn query_browse_metadata(&self, request: super::protocol::BrowseMetadataRequest) -> Result<super::protocol::BrowseMetadataResult, ControlError> {
+        let context = self.library_context_async(None).await?;
+        let library = self.library.get().ok_or_else(||error(ControlErrorCode::Unsupported))?;
+        let result = library.query_browse_metadata(request, context.clone()).await?;
+        let current = self.library_context_async(None).await?;
+        if current.host_epoch != context.host_epoch || current.revision != context.revision || current.stamp != context.stamp { return Err(error(ControlErrorCode::ResyncRequired)); }
+        Ok(result)
+    }
     pub async fn read_resource(
         &self,
         device: &AuthenticatedDevice,

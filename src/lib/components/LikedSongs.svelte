@@ -9,6 +9,7 @@
     import { getLikedTracks, type Track } from "$lib/api/tauri";
     import { likedTrackIds } from "$lib/stores/liked";
     import { playTracks, setShuffle } from "$lib/stores/player";
+    import EntityDetail from "./presentation/EntityDetail.svelte";
     import TrackList from "./TrackList.svelte";
 
     let tracks: Track[] = [];
@@ -58,12 +59,7 @@
 
 <div class="liked-songs-view">
     <!-- Header -->
-    <div
-        class="liked-header"
-        class:is-small={isHeaderSmall}
-        style:opacity={headerOpacity}
-        style:transform="translateY({headerTranslateY}px) scale({headerScale})"
-    >
+    <EntityDetail kind="liked" className={isHeaderSmall ? "is-small" : ""} style="opacity:{headerOpacity}; transform:translateY({headerTranslateY}px) scale({headerScale})">
         <div class="liked-gradient-bg">
             <svg viewBox="0 0 24 24" width="64" height="64" fill="currentColor">
                 <path
@@ -78,10 +74,7 @@
                 <span class="liked-count">{tracks.length} songs</span>
             </div>
         </div>
-    </div>
-
-    <!-- Controls -->
-    <div class="liked-controls">
+    <svelte:fragment slot="controls"><div class="liked-controls">
         <div class="controls-wrapper">
             <button
                 class="play-all-btn"
@@ -121,7 +114,10 @@
                 <span>Shuffle</span>
             </button>
         </div>
-    </div>
+    </div></svelte:fragment></EntityDetail>
+
+    <!-- Controls -->
+
 
     <!-- Track List -->
     <div class="liked-body" on:scroll={handleScroll}>
@@ -168,185 +164,46 @@
     }
 
     /* Header */
-    .liked-header {
-        display: flex;
-        flex-direction: column; /* Center alignment stack */
-        align-items: center;
-        text-align: center;
-        gap: var(--spacing-md);
-        padding: 30px var(--spacing-xl) 15px;
-        background: linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--accent-primary) 20%, transparent) 0%,
-            color-mix(in srgb, var(--accent-primary) 5%, transparent) 50%,
-            var(--bg-base) 100%
-        );
-        flex-shrink: 0;
-        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        transform-origin: center top;
-        z-index: 10;
-        pointer-events: none;
-    }
 
-    .liked-header.is-small {
-        padding-top: 15px;
-        padding-bottom: 5px;
-        pointer-events: none;
-    }
 
-    .liked-gradient-bg {
-        width: 130px;
-        height: 130px;
-        background: linear-gradient(135deg, #450af5, #c4efd9);
-        border-radius: var(--radius-md);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-        color: white;
-        transition: transform var(--transition-normal);
-    }
+
+
+
 
     .liked-songs-view:hover .liked-gradient-bg {
         transform: scale(1.02);
     }
 
-    .liked-header-info {
-        display: flex;
-        flex-direction: column;
-        align-items: center; /* CENTERED */
-        gap: var(--spacing-xs);
-        padding-bottom: var(--spacing-sm);
-    }
 
-    .liked-label {
-        font-size: 0.75rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: var(--text-secondary);
-    }
 
-    .liked-title {
-        font-size: 2.8rem;
-        font-weight: 900;
-        color: var(--text-primary);
-        margin: 0;
-        line-height: 1;
-        letter-spacing: -0.02em;
-    }
 
-    .liked-count-container {
-        display: flex;
-        justify-content: center;
-        width: 100%;
-    }
 
-    .liked-count {
-        font-size: 0.9rem;
-        font-weight: 500;
-        color: var(--text-primary);
-        margin-top: var(--spacing-sm);
-        display: flex;
-        align-items: center;
-        gap: 4px;
-    }
 
-    .liked-count::before {
-        content: "•";
-        color: var(--text-secondary);
-    }
+
+
+
+
+
+
 
     /* Controls */
-    .liked-controls {
-        padding: var(--spacing-lg) var(--spacing-xl);
-        background-color: var(--bg-base);
-        flex-shrink: 0;
-        display: flex;
-        justify-content: center; /* CENTERED */
-    }
 
-    .controls-wrapper {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-lg);
-        width: 100%;
-        max-width: 1200px;
-        justify-content: center;
-    }
 
-    .play-all-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: var(--spacing-md);
-        height: 56px;
-        min-width: 170px;
-        padding: 0 32px 0 8px;
-        background-color: var(--accent-primary);
-        color: white;
-        font-weight: 700;
-        border: none;
-        border-radius: var(--radius-full);
-        font-size: 1.05rem;
-        cursor: pointer;
-        transition: all var(--transition-normal);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    }
 
-    .btn-icon {
-        width: 42px;
-        height: 42px;
-        border-radius: 50%;
-        background: rgba(255, 255, 255, 0.1);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: transform var(--transition-fast);
-    }
 
-    .play-all-btn:hover:not(:disabled) {
-        background-color: var(--accent-hover);
-        transform: scale(1.05);
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
-    }
 
-    .play-all-btn:hover .btn-icon {
-        transform: scale(1.1);
-        background: rgba(255, 255, 255, 0.2);
-    }
 
-    .shuffle-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: var(--spacing-sm);
-        height: 56px;
-        min-width: 140px;
-        padding: 0 28px;
-        background-color: transparent;
-        color: var(--text-primary);
-        font-weight: 600;
-        border: 1px solid var(--border-subtle);
-        border-radius: var(--radius-full);
-        font-size: 1rem;
-        cursor: pointer;
-        transition: all var(--transition-normal);
-    }
 
-    .shuffle-btn:hover:not(:disabled) {
-        border-color: var(--text-primary);
-        background: rgba(255, 255, 255, 0.05);
-        transform: translateY(-1px);
-    }
 
-    .play-all-btn:disabled,
-    .shuffle-btn:disabled {
-        opacity: 0.3;
-        cursor: not-allowed;
-        filter: grayscale(1);
-    }
+
+
+
+
+
+
+
+
+
 
     /* Body - fills remaining space */
     .liked-body {
@@ -380,22 +237,11 @@
     }
 
     @media (max-width: 768px) {
-        .liked-header {
-            flex-direction: column;
-            align-items: center;
-            text-align: center;
-            padding: calc(var(--safe-area-top) + var(--spacing-md))
-                var(--spacing-md) var(--spacing-md);
-        }
 
-        .liked-gradient-bg {
-            width: 120px;
-            height: 120px;
-        }
 
-        .liked-title {
-            font-size: 2rem;
-        }
+
+
+
 
         .liked-body {
             padding-bottom: calc(

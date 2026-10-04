@@ -5,8 +5,9 @@
  * compliance (all 45 text-on-background pairs ≥ 4.5:1), accent-primary
  * matches fixed spec, and zero hex reuse from existing 22 themes.
  */
-import { describe, it, expect } from 'vitest';
-import { themePresets, themeDefinitions } from './theme';
+import { describe, it, expect, vi } from 'vitest';
+import { get } from 'svelte/store';
+import { theme, themePresets, themeDefinitions } from './theme';
 
 // ── Constants ───────────────────────────────────────────────────────────
 
@@ -210,5 +211,43 @@ describe('Zero hex overlap with existing themes', () => {
     // Sanity: we should have found at least 5×9 = 45 solid hexes
     // (5 themes × 9 solid tokens; accent-subtle and border-color are rgba)
     expect(newHexEntries.length).toBeGreaterThanOrEqual(45);
+  });
+});
+
+
+describe('shared appearance retains device-local persistence', () => {
+  it('theme changes remain in the selected WebView storage and preserve custom accents', () => {
+    const first = new Map<string, string>();
+    const second = new Map<string, string>();
+    let storage = first;
+    const attributes = new Map<string, string>();
+    const properties = new Map<string, string>();
+    const styles = new Map<string, any>();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) });
+    vi.stubGlobal('document', {
+      documentElement: { style: { setProperty: (key: string, value: string) => properties.set(key, value) }, setAttribute: (key: string, value: string) => attributes.set(key, value) },
+      getElementById: (id: string) => styles.get(id),
+      createElement: () => { const node: any = { id: '', textContent: '', remove() { styles.delete(node.id); } }; return node; },
+      head: { appendChild: (node: any) => styles.set(node.id, node) },
+    });
+    try {
+      theme.initialize();
+      theme.setMode('light'); theme.addCustomColor('#123456'); theme.setAccentColor('#123456');
+      const firstValue = first.get('rlist_theme');
+      expect(JSON.parse(firstValue!)).toEqual({ mode: 'light', accentColor: '#123456', customAccentColors: ['#123456'] });
+      expect(attributes.get('data-theme')).toBe('light'); expect(properties.get('--accent-primary')).toBe('#123456');
+      storage = second; theme.initialize();
+      expect(get(theme).mode).toBe('dark'); expect(get(theme).customAccentColors).toEqual([]);
+      for (const preset of themePresets) {
+        theme.setMode(preset.id);
+        expect(attributes.get('data-theme')).toBe(preset.id);
+        expect(properties.get('--bg-base')).toBe(themeDefinitions[preset.id].vars['--bg-base']);
+      }
+      expect(first.get('rlist_theme')).toBe(firstValue);
+      storage = first; theme.initialize();
+      expect(get(theme)).toEqual({ mode: 'light', accentColor: '#123456', customAccentColors: ['#123456'] });
+      expect(attributes.get('data-theme')).toBe('light');
+    } finally { vi.unstubAllGlobals(); theme.initialize(); }
   });
 });

@@ -32,7 +32,7 @@
         isPinned,
     } from "$lib/stores/pinned";
     import VirtualizedGrid from "./Virtualizedgrid.svelte";
-    import MediaCard from "./MediaCard.svelte";
+    import EntityGrid from "./presentation/EntityGrid.svelte";
     import { onDestroy } from "svelte";
     import { saveScroll, getScroll } from "$lib/stores/scrollMemory";
     import { progressiveScan } from "$lib/stores/progressiveScan"
@@ -381,7 +381,7 @@
     };
 </script>
 
-<div class="playlist-view">
+<EntityGrid page={true}>
     <header class="view-header">
         <h1>Playlists</h1>
         <div class="header-actions">
@@ -486,7 +486,7 @@
         {@const isNowPlaying = playingPlaylistId === playlist.id && playing}
         {@const isPaused = pausedPlaylistId === playlist.id}
 
-        <MediaCard
+        <EntityGrid
             {isNowPlaying}
             {isPaused}
             isPinned={isPinned("playlist", playlist.id, $pinnedItems)}
@@ -508,79 +508,6 @@
                     on:error={(e) => handleImageError(e, playlist)}
                 />
             </svelte:fragment>
-        </MediaCard>
+        </EntityGrid>
     </VirtualizedGrid>
-</div>
-
-<style>
-    .playlist-view {
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-        padding: var(--spacing-md);
-        padding-bottom: 0;
-    }
-
-    .view-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: var(--spacing-lg);
-        flex-shrink: 0;
-    }
-
-    .view-header h1 {
-        font-size: 2rem;
-        font-weight: 700;
-    }
-
-    .header-actions {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-    }
-
-    .create-form {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        margin-bottom: var(--spacing-lg);
-        padding: var(--spacing-md);
-        background-color: var(--bg-elevated);
-        border-radius: var(--radius-md);
-        flex-shrink: 0;
-    }
-
-    .create-form input {
-        flex: 1;
-        padding: var(--spacing-sm) var(--spacing-md);
-        background-color: var(--bg-surface);
-        border-radius: var(--radius-sm);
-        border: 1px solid var(--border-color);
-        color: var(--text-primary);
-    }
-
-    .create-form input:focus {
-        outline: none;
-        border-color: var(--accent-primary);
-    }
-
-    .rename-label {
-        font-size: 0.875rem;
-        color: var(--text-secondary);
-        white-space: nowrap;
-        flex-shrink: 0;
-    }
-
-    @media (max-width: 768px) {
-        .playlist-view {
-            padding-bottom: calc(
-                var(--mobile-bottom-inset) + var(--spacing-md)
-            );
-        }
-
-        .rename-label {
-            display: none;
-        }
-    }
-</style>
+</EntityGrid>

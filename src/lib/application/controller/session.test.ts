@@ -18,6 +18,7 @@ function deferred<T>() {
 }
 function bridge() {
     return {
+        browseMetadata: vi.fn(),
         updateEndpoint: vi.fn<ControllerNativeBridge["updateEndpoint"]>(),
         beginScope: vi.fn<ControllerNativeBridge["beginScope"]>(async () => "scope"), connect: vi.fn<ControllerNativeBridge["connect"]>(async (hostId: string) => ({ snapshot: snapshot(hostId), grants: { control: true } })), suspend: vi.fn<ControllerNativeBridge["suspend"]>(async () => {
         }), forget: vi.fn<ControllerNativeBridge["forget"]>(async () => {
@@ -28,6 +29,99 @@ function bridge() {
 afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+});
+it("reads fresh browse metadata at the same Library revision without revoking artwork", async () => {
+    const n = bridge(), s = createControllerSession(n);
+    await s.connectController("one");
+    const reply = (count: number) => ({ metadataVersion: 1, hostEpoch: "epoch", libraryRevision: 1, tracks: [{ trackId: 42, playCount: count }] });
+    n.browseMetadata.mockResolvedValueOnce(reply(0)).mockResolvedValueOnce(reply(1));
+    n.media.mockResolvedValue({ mime: "image/png", bytes: [1, 2] });
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    const handle = await s.port.resolveArtwork({ resourceId: "cover", revision: 1 });
+    expect((await s.port.queryBrowseMetadata!({ trackIds: [42] })).tracks[0].playCount).toBe(0);
+    expect((await s.port.queryBrowseMetadata!({ trackIds: [42] })).tracks[0].playCount).toBe(1);
+    expect(n.browseMetadata).toHaveBeenCalledTimes(2);
+    expect(n.browseMetadata).toHaveBeenLastCalledWith({ scopeId: "scope", generation: 1 }, { metadataVersion: 1, hostEpoch: "epoch", libraryRevision: 1, trackIds: [42] });
+    expect(revoke).not.toHaveBeenCalled();
+    expect(get(s.state).ready).toBe(true);
+    handle.dispose(); s.suspendController();
+});
+it("metadata failure and missing route do not disconnect playback", async () => {
+    const n = bridge(), s = createControllerSession(n); await s.connectController("one");
+    n.browseMetadata.mockRejectedValue({ code: "not_found", message: "Update PC and APK", retryable: false });
+    await expect(s.port.queryBrowseMetadata!({ trackIds: [42] })).rejects.toMatchObject({ code: "not_found" });
+    expect(get(s.state).ready).toBe(true); s.suspendController();
+});
+it("late metadata after suspension is rejected and cannot revive session", async () => {
+    const n=bridge(),s=createControllerSession(n);await s.connectController("one");
+    const held=deferred<import("../types").BrowseMetadataResult>();n.browseMetadata.mockImplementation(()=>held.promise);
+    const outcome=s.port.queryBrowseMetadata!({trackIds:[42]}).catch(e=>e);
+    for(let i=0;i<20;i++)await Promise.resolve();s.suspendController();
+    held.resolve({metadataVersion:1,hostEpoch:"epoch",libraryRevision:1,tracks:[{trackId:42,playCount:12}]});
+    expect(await outcome).toMatchObject({code:"resync_required"});
+    expect(get(s.state).ready).toBe(false);
+});
+it("reuses confirmed library pages on navigation without exposing mutable cached results", async () => {
+    const n = bridge(), s = createControllerSession(n);
+    n.query.mockResolvedValue({ type: "tracks", page: { items: [{ id: 8 }], nextCursor: null, revision: 1 } } as QueryResult);
+    await s.connectController("one");
+    const first = await s.port.query({ type: "tracks" });
+    if ("page" in first) first.page.items.splice(0);
+    expect(await s.port.query({ type: "tracks" })).toMatchObject({ page: { items: [{ id: 8 }] } });
+    expect(n.query).toHaveBeenCalledOnce();
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(s.port.query({ type: "tracks" }, cancelled.signal)).rejects.toMatchObject({ code: "resync_required" });
+    await s.connectController("two"); await s.port.query({ type: "tracks" }); expect(n.query).toHaveBeenCalledTimes(2);
+    s.suspendController();
+});
+it("reuses artwork bytes but allocates separately disposable handles and clears cache on reconnect", async () => {
+    const n = bridge(), s = createControllerSession(n), revoke = vi.spyOn(URL, "revokeObjectURL");
+    n.media.mockResolvedValue({ mime: "image/png", bytes: [137, 80, 78, 71] }); await s.connectController("one");
+    const reference = { resourceId: "cover", revision: 1 }, first = await s.port.resolveArtwork(reference); first.dispose();
+    const second = await s.port.resolveArtwork(reference); expect(second.src).not.toBe(first.src); expect(n.media).toHaveBeenCalledOnce();
+    expect(revoke).toHaveBeenCalledWith(first.src); second.dispose();
+    await s.connectController("one"); const third = await s.port.resolveArtwork(reference); expect(n.media).toHaveBeenCalledTimes(2); third.dispose(); s.suspendController();
+});
+it("never sends presentation-only artwork identity to the native capability protocol", async () => {
+    const n = bridge(), s = createControllerSession(n); n.media.mockResolvedValue({ mime: "image/png", bytes: [137, 80, 78, 71] });
+    await s.connectController("one");
+    const art = await s.port.resolveArtwork({ resourceId: "opaque", revision: 1, presentationKey: "album:8" } as any);
+    expect(n.media.mock.calls[0][1]).toEqual({ resourceId: "opaque", revision: 1 }); art.dispose(); s.suspendController();
+});
+it("library changes invalidate cached pages and artwork bytes", async () => {
+    const n = bridge(), batch = deferred<EventBatch>(); n.poll.mockReturnValueOnce(batch.promise);
+    n.media.mockResolvedValue({ mime: "image/png", bytes: [137, 80, 78, 71] }); const s = createControllerSession(n); await s.connectController("one");
+    await s.port.query({ type: "tracks" }); (await s.port.resolveArtwork({ resourceId: "cover", revision: 1 })).dispose();
+    batch.resolve({ hostEpoch: "epoch", revision: 1, events: [{ type: "library", revision: 1, libraryRevision: 2 }] });
+    await vi.waitFor(() => expect(get(s.state).snapshot?.revisions.libraryRevision).toBe(2));
+    n.query.mockResolvedValue({ type: "tracks", page: { items: [], nextCursor: null, revision: 2 } });
+    await s.port.query({ type: "tracks" }); const art = await s.port.resolveArtwork({ resourceId: "cover", revision: 2 });
+    expect(n.query).toHaveBeenCalledTimes(2); expect(n.media).toHaveBeenCalledTimes(2); art.dispose(); s.suspendController();
+});
+it("bounds navigation caches and never caches unconfirmed library revisions", async () => {
+    const n = bridge(), s = createControllerSession(n); await s.connectController("one");
+    for (let i = 0; i < 9; i++) await s.port.query({ type: "tracks", cursor: String(i) });
+    await s.port.query({ type: "tracks", cursor: "8" }); expect(n.query).toHaveBeenCalledTimes(9);
+    await s.port.query({ type: "tracks", cursor: "0" }); expect(n.query).toHaveBeenCalledTimes(10);
+    n.query.mockResolvedValue({ type: "tracks", page: { items: [], nextCursor: null, revision: 99 } });
+    await s.port.query({ type: "tracks", cursor: "unconfirmed" }); await s.port.query({ type: "tracks", cursor: "unconfirmed" }); expect(n.query).toHaveBeenCalledTimes(12);
+    n.media.mockResolvedValue({ mime: "image/png", bytes: [137, 80, 78, 71] });
+    for (let i = 0; i < 193; i++) (await s.port.resolveArtwork({ resourceId: String(i), revision: 1 })).dispose();
+    (await s.port.resolveArtwork({ resourceId: "192", revision: 1 })).dispose(); expect(n.media).toHaveBeenCalledTimes(193);
+    (await s.port.resolveArtwork({ resourceId: "0", revision: 1 })).dispose(); expect(n.media).toHaveBeenCalledTimes(194); s.suspendController();
+});
+it("oversized manual refresh removes the previous cached page instead of resurrecting it", async () => {
+    const n = bridge(), s = createControllerSession(n); await s.connectController("one"); await s.port.query({ type: "tracks" });
+    n.query.mockResolvedValue({ type: "tracks", page: { items: [{ id: 9, title: "x".repeat(1024 * 1024) }], nextCursor: null, revision: 1 } } as QueryResult);
+    await s.port.query({ type: "tracks" }, undefined, { refresh: true }); await s.port.query({ type: "tracks" });
+    expect(n.query).toHaveBeenCalledTimes(3); s.suspendController();
+});
+it("artwork cache evicts by byte budget even before the entry count limit", async () => {
+    const n = bridge(), s = createControllerSession(n); await s.connectController("one");
+    n.media.mockResolvedValue({ mime: "image/png", bytes: new Uint8Array(4 * 1024 * 1024) });
+    for (let i = 0; i < 6; i++) (await s.port.resolveArtwork({ resourceId: String(i), revision: 1 })).dispose();
+    (await s.port.resolveArtwork({ resourceId: "5", revision: 1 })).dispose(); expect(n.media).toHaveBeenCalledTimes(6);
+    (await s.port.resolveArtwork({ resourceId: "0", revision: 1 })).dispose(); expect(n.media).toHaveBeenCalledTimes(7); s.suspendController();
 });
 it("offline_mutations_are_not_queued", async () => {
     const n = bridge(), s = createControllerSession(n);

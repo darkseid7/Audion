@@ -1,4 +1,6 @@
 pub mod protocol;
+#[cfg(desktop)]
+pub mod browse_metadata;
 
 pub mod bootstrap;
 pub mod client;

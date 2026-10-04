@@ -2,6 +2,7 @@
   import { desktopEffectsEnabled } from "$lib/application/bootstrap";
   import { onMount, tick } from "svelte";
   import "../app.css";
+  import AppShell from "$lib/components/presentation/AppShell.svelte";
   import ControllerShell from "$lib/components/ControllerShell.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import MainView from "$lib/components/MainView.svelte";
@@ -114,16 +115,13 @@
       <MiniPlayer />
     {:else}
       <!-- Responsive presentation keeps browse/player instances stable on resize. -->
-      <div class="app-layout" class:compact={$isMobile}>
-        <div class="desktop-sidebar"><Sidebar /></div>
+      <AppShell layout={$isMobile ? "compact" : "expanded"}>
+        <Sidebar slot="sidebar" />
         <MainView />
-        <LyricsPanel />
-        <QueuePanel />
-        <FullScreenPlayer />
-        <ContextMenu />
-      </div>
-      <PlayerBar />
-      {#if $isMobile}<MobileBottomNav />{/if}
+        <svelte:fragment slot="panels"><LyricsPanel /><QueuePanel /><FullScreenPlayer /><ContextMenu /></svelte:fragment>
+        <PlayerBar slot="player" />
+        <svelte:fragment slot="bottom-navigation">{#if $isMobile}<MobileBottomNav />{/if}</svelte:fragment>
+      </AppShell>
       <KeyboardShortcuts />
       <KeyboardShortcutsHelp />
     {/if}
@@ -199,13 +197,4 @@
     font-size: 0.875rem;
   }
 
-  .app-layout {
-    flex: 1;
-    display: flex;
-    overflow: hidden;
-  }
-
-  .app-layout { min-height:0; min-width:0; }
-  .desktop-sidebar { display:flex; }
-  .compact .desktop-sidebar { display:none; }
 </style>

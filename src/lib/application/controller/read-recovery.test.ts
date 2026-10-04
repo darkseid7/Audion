@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { get, writable } from "svelte/store";
 import { createControllerSession, type ControllerNativeBridge, type ControllerState } from "./session";
 import { createControllerPage } from "./views";
+import { createReadAdmission } from "./read-recovery";
 import type { ApplicationQuery, EventBatch, HostSnapshot, QueryResult, DisplayAlbum } from "../types";
 const busy = { code: "busy", message: "PC is busy", retryable: true };
 const album: DisplayAlbum = { id: 42, name: "PC album", artist: "Ada", year: 2020, qualityBadges: [], sortSummary: { artist: "Ada", year: 2020, dateAdded: null, name: "PC album" } };
@@ -12,13 +13,27 @@ function snapshot(hostId = "pc", hostEpoch = "epoch"): HostSnapshot {
 function deferred<T>() { let resolve!: (v: T) => void, reject!: (e: unknown) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 const pageResult = (): QueryResult => ({ type: "albums", page: { items: [album], nextCursor: "next", revision: 1 } });
 function bridge() {
-    return { beginScope: vi.fn(async () => "scope"), connect: vi.fn(async (id: string) => ({ snapshot: snapshot(id), grants: { control: true } })), updateEndpoint: vi.fn(), suspend: vi.fn(async () => { }), forget: vi.fn(async () => { }), scan: vi.fn(), pair: vi.fn(), query: vi.fn<ControllerNativeBridge["query"]>(async () => pageResult()), media: vi.fn<ControllerNativeBridge["media"]>(async () => image), poll: vi.fn<ControllerNativeBridge["poll"]>(() => new Promise(() => { })), command: vi.fn<ControllerNativeBridge["command"]>(async () => ({ status: "applied", revision: 1 })), commandStatus: vi.fn<ControllerNativeBridge["commandStatus"]>() } satisfies ControllerNativeBridge;
+    return { browseMetadata: vi.fn<ControllerNativeBridge["browseMetadata"]>(), beginScope: vi.fn(async () => "scope"), connect: vi.fn(async (id: string) => ({ snapshot: snapshot(id), grants: { control: true } })), updateEndpoint: vi.fn(), suspend: vi.fn(async () => { }), forget: vi.fn(async () => { }), scan: vi.fn(), pair: vi.fn(), query: vi.fn<ControllerNativeBridge["query"]>(async () => pageResult()), media: vi.fn<ControllerNativeBridge["media"]>(async () => image), poll: vi.fn<ControllerNativeBridge["poll"]>(() => new Promise(() => { })), command: vi.fn<ControllerNativeBridge["command"]>(async () => ({ status: "applied", revision: 1 })), commandStatus: vi.fn<ControllerNativeBridge["commandStatus"]>() } satisfies ControllerNativeBridge;
 }
 const cleanup: (() => void)[] = [];
 afterEach(() => { cleanup.splice(0).reverse().forEach(fn => fn()); vi.useRealTimers(); vi.restoreAllMocks(); });
 async function settle() { for (let i = 0; i < 30; i++)
     await Promise.resolve(); }
 async function setup() { vi.useFakeTimers(); const native = bridge(), session = createControllerSession(native); cleanup.push(() => session.suspendController()); await session.connectController("pc"); return { native, session }; }
+it("optional metadata cannot queue behind two foreground leases", async () => {
+    const admit = createReadAdmission(), signal = new AbortController().signal;
+    const a = deferred<void>(), b = deferred<void>(), c = deferred<void>();
+    const first = admit(signal, () => a.promise), second = admit(signal, () => b.promise);
+    await settle();
+    const optional = vi.fn(async () => 42);
+    await expect(admit.tryRun(signal, optional)).rejects.toMatchObject({ code: "busy", retryable: false });
+    expect(optional).not.toHaveBeenCalled();
+    const foreground = admit(signal, () => c.promise);
+    a.resolve(); await first; await settle();
+    await expect(admit.tryRun(signal, optional)).rejects.toMatchObject({ code: "busy" });
+    b.resolve(); await second; expect(await admit.tryRun(signal, optional)).toBe(42);
+    c.resolve(); await foreground;
+});
 // Removing the session retry or changing its schedule breaks these real-port outcomes.
 it.each(["query", "media"] as const)("%s recovers structured Busy at 200/500/1000ms without disconnect", async (kind) => {
     const { native, session } = await setup();
@@ -235,7 +250,8 @@ it.each(["albums", "album_detail"] as const)("unchanged %s refresh retains valid
     const before = get(page.state);
     native.query.mockRejectedValue(busy);
     page.refresh();
-    expect(get(page.state)).toMatchObject({ items: before.items, loading: true });
+    // An already visible page must not show the initial-loading layout again.
+    expect(get(page.state)).toMatchObject({ items: before.items, loading: false });
     expect(get(page.state).detail).toEqual(before.detail);
     page.refresh();
     await settle();
@@ -261,7 +277,7 @@ it("refresh replaces the first page and cursor atomically without mixing old pag
     await settle();
     expect(get(page.state)).toMatchObject({ items: [{ ...album, id: 43 }], nextCursor: "replacement" });
 });
-it.each(["query", "host", "epoch", "library", "disconnect", "dispose", "queue"] as const)("page clears old data on changed %s and drops superseded refresh", async (change) => {
+it.each(["query", "host", "epoch", "library", "disconnect", "dispose", "queue"] as const)("page drops superseded refresh on %s, retaining presentation only for compatible library changes", async (change) => {
     vi.useFakeTimers();
     const initial = { ready: true, status: "connected", currentHostId: "pc", snapshot: snapshot() } as ControllerState, connection = writable(initial), held = deferred<QueryResult>();
     const q: ApplicationQuery = change === "queue" ? { type: "queue" } : { type: "albums" };
@@ -281,11 +297,11 @@ it.each(["query", "host", "epoch", "library", "disconnect", "dispose", "queue"] 
         page.dispose();
     else
         connection.set(change === "disconnect" ? { ...initial, ready: false, snapshot: null } : { ...initial, snapshot: { ...initial.snapshot!, hostId: change === "host" ? "two" : "pc", hostEpoch: change === "epoch" ? "new" : "epoch", revisions: { ...initial.snapshot!.revisions, libraryRevision: change === "library" ? 2 : 1, queueRevision: change === "queue" ? 3 : 2 } } });
-    expect(get(page.state).items).toEqual([]);
+    expect(get(page.state).items).toEqual(change === "library" ? [album] : []);
     held.resolve(initialResult);
     await settle();
     if (change !== "query" && change !== "host" && change !== "epoch")
-        expect(get(page.state).items).toEqual([]);
+        expect(get(page.state).items).toEqual(change === "library" ? [album] : []);
 });
 it("disposes artwork cancelled during Blob handoff before consumer ownership", async () => {
     const { native, session } = await setup(), signal = new AbortController();
@@ -364,6 +380,14 @@ it("unchanged page refresh retains data on display-only error, then replaces on 
     page.refresh();
     await settle();
     expect(get(page.state)).toMatchObject({ items: [{ ...album, id: 99 }], error: "", nextCursor: null });
+});
+it("returning to the same library view reuses confirmed session data, but explicit refresh rereads the PC", async () => {
+    const { native, session } = await setup();
+    const first = createControllerPage(() => session.port, session.state);
+    first.setQuery({ type: "albums" }); await settle(); expect(get(first.state).items).toEqual([album]); first.dispose();
+    const returned = createControllerPage(() => session.port, session.state); cleanup.push(returned.dispose);
+    returned.setQuery({ type: "albums" }); await settle(); expect(get(returned.state).items).toEqual([album]); expect(native.query).toHaveBeenCalledOnce();
+    returned.refresh(); await settle(); expect(native.query).toHaveBeenCalledTimes(2);
 });
 it("sort change aborts retained refresh, clears immediately, and ignores old completion", async () => {
     const { native, session } = await setup(), old = deferred<QueryResult>(), replacement = deferred<QueryResult>();

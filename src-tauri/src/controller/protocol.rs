@@ -1686,3 +1686,243 @@ pub struct HostPresentation {
     pub queue: Vec<QueueEntry>,
     pub pinned_album_ids: Vec<u64>,
 }
+
+#[cfg(test)]
+mod browse_metadata_contract_tests {
+    use super::*;
+    #[test]
+    fn browse_metadata_strict_contract() {
+        let valid = serde_json::json!({"metadataVersion":1,"hostEpoch":"epoch","libraryRevision":7,"trackIds":[42,42,43],"albumId":8});
+        let request: BrowseMetadataRequest = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(request.track_ids, vec![42, 43]);
+        for patch in [
+            serde_json::json!({"metadataVersion":2}),
+            serde_json::json!({"trackIds":[]}),
+            serde_json::json!({"trackIds":[-1]}),
+            serde_json::json!({"trackIds":vec![42;1001]}),
+            serde_json::json!({"extra":true}),
+        ] {
+            let mut bad = valid.clone();
+            bad.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            if patch.get("trackIds") == Some(&serde_json::json!([])) {
+                bad.as_object_mut().unwrap().remove("albumId");
+            }
+            assert!(serde_json::from_value::<BrowseMetadataRequest>(bad).is_err());
+        }
+        let reply = serde_json::json!({"metadataVersion":1,"hostEpoch":"epoch","libraryRevision":7,"tracks":[{"trackId":42,"playCount":0},{"trackId":43,"playCount":null}],"album":{"albumId":8,"totalDurationSeconds":202}});
+        let result: BrowseMetadataResult = serde_json::from_value(reply.clone()).unwrap();
+        assert!(result.matches(&request));
+        assert_eq!(result.tracks[0].play_count, Some(0));
+        assert_eq!(result.tracks[1].play_count, None);
+        for patch in [
+            serde_json::json!({"tracks":[{"trackId":42,"playCount":0},{"trackId":42,"playCount":0}]}),
+            serde_json::json!({"tracks":[{"trackId":42,"playCount":0}]}),
+            serde_json::json!({"hostEpoch":"other"}),
+            serde_json::json!({"libraryRevision":8}),
+            serde_json::json!({"album":{"albumId":9,"totalDurationSeconds":0}}),
+        ] {
+            let mut bad = reply.clone();
+            bad.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(!serde_json::from_value::<BrowseMetadataResult>(bad)
+                .unwrap()
+                .matches(&request));
+        }
+        for patch in [
+            serde_json::json!({"metadataVersion":2}),
+            serde_json::json!({"tracks":[{"trackId":42,"playCount":-1}]}),
+            serde_json::json!({"tracks":[{"trackId":42}]}),
+            serde_json::json!({"album":null}),
+            serde_json::json!({"extra":true}),
+        ] {
+            let mut bad = reply.clone();
+            bad.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<BrowseMetadataResult>(bad).is_err());
+        }
+    }
+}
+
+// Metrics are a separate read: they never carry resources or advance Library.
+fn metadata_version<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    let v = u8::deserialize(d)?;
+    if v != 1 {
+        return Err(D::Error::custom("invalid metadata version"));
+    }
+    Ok(v)
+}
+fn metadata_ids<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    let values = Vec::<serde_json::Number>::deserialize(d)?;
+    if values.len() > 1000 {
+        return Err(D::Error::custom("too many metadata IDs"));
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for n in values {
+        let id = safe_number(&n)
+            .filter(|v| *v > 0)
+            .ok_or_else(|| D::Error::custom("invalid metadata ID"))?;
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+fn nullable_metric<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Option::<serde_json::Number>::deserialize(d)?
+        .map(|n| safe_number(&n).ok_or_else(|| D::Error::custom("invalid metric")))
+        .transpose()
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowseMetadataQuery {
+    #[serde(deserialize_with = "metadata_ids")]
+    pub track_ids: Vec<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_id"
+    )]
+    pub album_id: Option<u64>,
+}
+impl BrowseMetadataQuery {
+    pub fn valid(&self) -> bool {
+        self.track_ids.len() <= 1000
+            && (!self.track_ids.is_empty() || self.album_id.is_some())
+            && self
+                .track_ids
+                .iter()
+                .all(|v| *v > 0 && *v <= MAX_SAFE_INTEGER)
+            && self.album_id.is_none_or(|v| v > 0 && v <= MAX_SAFE_INTEGER)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "MetadataRequestWire", into = "MetadataRequestWire")]
+pub struct BrowseMetadataRequest {
+    pub metadata_version: u8,
+    pub host_epoch: String,
+    pub library_revision: u64,
+    pub track_ids: Vec<u64>,
+    pub album_id: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataRequestWire {
+    #[serde(deserialize_with = "metadata_version")]
+    metadata_version: u8,
+    #[serde(deserialize_with = "identifier")]
+    host_epoch: String,
+    #[serde(deserialize_with = "safe_revision")]
+    library_revision: u64,
+    #[serde(deserialize_with = "metadata_ids")]
+    track_ids: Vec<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_id"
+    )]
+    album_id: Option<u64>,
+}
+impl TryFrom<MetadataRequestWire> for BrowseMetadataRequest {
+    type Error = &'static str;
+    fn try_from(v: MetadataRequestWire) -> Result<Self, Self::Error> {
+        if v.track_ids.is_empty() && v.album_id.is_none() {
+            return Err("empty metadata query");
+        }
+        Ok(Self {
+            metadata_version: v.metadata_version,
+            host_epoch: v.host_epoch,
+            library_revision: v.library_revision,
+            track_ids: v.track_ids,
+            album_id: v.album_id,
+        })
+    }
+}
+impl From<BrowseMetadataRequest> for MetadataRequestWire {
+    fn from(v: BrowseMetadataRequest) -> Self {
+        Self {
+            metadata_version: v.metadata_version,
+            host_epoch: v.host_epoch,
+            library_revision: v.library_revision,
+            track_ids: v.track_ids,
+            album_id: v.album_id,
+        }
+    }
+}
+impl BrowseMetadataRequest {
+    pub fn query(&self) -> BrowseMetadataQuery {
+        BrowseMetadataQuery {
+            track_ids: self.track_ids.clone(),
+            album_id: self.album_id,
+        }
+    }
+    pub fn valid(&self) -> bool {
+        self.metadata_version == 1
+            && !self.host_epoch.is_empty()
+            && self.host_epoch.len() <= MAX_IDENTIFIER_BYTES
+            && self.library_revision <= MAX_SAFE_INTEGER
+            && self.query().valid()
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrackPlayCount {
+    #[serde(deserialize_with = "entity_id")]
+    pub track_id: u64,
+    #[serde(deserialize_with = "nullable_metric")]
+    pub play_count: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlbumDuration {
+    #[serde(deserialize_with = "entity_id")]
+    pub album_id: u64,
+    #[serde(deserialize_with = "nullable_metric")]
+    pub total_duration_seconds: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowseMetadataResult {
+    #[serde(deserialize_with = "metadata_version")]
+    pub metadata_version: u8,
+    #[serde(deserialize_with = "identifier")]
+    pub host_epoch: String,
+    #[serde(deserialize_with = "safe_revision")]
+    pub library_revision: u64,
+    pub tracks: Vec<TrackPlayCount>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "metadata_album"
+    )]
+    pub album: Option<AlbumDuration>,
+}
+fn metadata_album<'de, D: Deserializer<'de>>(d: D) -> Result<Option<AlbumDuration>, D::Error> {
+    AlbumDuration::deserialize(d).map(Some)
+}
+impl BrowseMetadataResult {
+    pub fn matches(&self, r: &BrowseMetadataRequest) -> bool {
+        let requested: std::collections::HashSet<_> = r.track_ids.iter().copied().collect();
+        let returned: std::collections::HashSet<_> =
+            self.tracks.iter().map(|t| t.track_id).collect();
+        r.valid()
+            && self.metadata_version == 1
+            && self.host_epoch == r.host_epoch
+            && self.library_revision == r.library_revision
+            && self.tracks.len() == requested.len()
+            && requested == returned
+            && self
+                .tracks
+                .iter()
+                .all(|t| t.play_count.is_none_or(|v| v <= MAX_SAFE_INTEGER))
+            && self.album.as_ref().map(|a| a.album_id) == r.album_id
+            && self.album.as_ref().is_none_or(|a| {
+                a.total_duration_seconds
+                    .is_none_or(|v| v <= MAX_SAFE_INTEGER)
+            })
+    }
+}

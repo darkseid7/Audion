@@ -183,6 +183,33 @@ impl LibraryQueries {
         .await
         .map_err(|_| error(ControlErrorCode::HostNotReady))?
     }
+    pub async fn query_browse_metadata(&self, request: BrowseMetadataRequest, context: QueryContext) -> Result<BrowseMetadataResult, ControlError> {
+        if !request.valid() { return Err(error(ControlErrorCode::InvalidRequest)); }
+        if request.host_epoch != context.host_epoch || request.library_revision != context.revision { return Err(error(ControlErrorCode::ResyncRequired)); }
+        let permit = self.work.clone().try_acquire_owned().map_err(|_|error(ControlErrorCode::Busy))?;
+        let db = self.db.clone();
+        #[cfg(test)]
+        let probe = self.projection_probe.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let captured = {
+                let conn = db.conn.try_lock().map_err(|_|error(ControlErrorCode::Busy))?;
+                if db::controller_library_stamp(&conn).map_err(db_error)? != context.stamp { return Err(error(ControlErrorCode::ResyncRequired)); }
+                super::browse_metadata::capture_browse_metadata(&conn, &request.query())?
+            };
+            #[cfg(test)]
+            if let Some(p) = &probe { p("metadata_captured", captured.tracks.len()); }
+            let conn = db.conn.try_lock().map_err(|_|error(ControlErrorCode::Busy))?;
+            if db::controller_library_stamp(&conn).map_err(db_error)? != context.stamp { return Err(error(ControlErrorCode::ResyncRequired)); }
+            let result = BrowseMetadataResult { metadata_version:1,host_epoch:context.host_epoch,library_revision:context.revision,tracks:captured.tracks,album:captured.album };
+            if !result.matches(&request) { return Err(error(ControlErrorCode::InvalidRequest)); }
+            Ok(result)
+        }).await.map_err(|_|error(ControlErrorCode::HostNotReady))?
+    }
+    #[cfg(test)]
+    pub(crate) fn metadata_probe(&mut self, probe: Arc<dyn Fn() + Send + Sync>) {
+        self.projection_probe = Some(Arc::new(move |stage, _| { if stage == "metadata_captured" { probe(); } }));
+    }
     pub async fn query_library(
         &self,
         query: ApplicationQuery,

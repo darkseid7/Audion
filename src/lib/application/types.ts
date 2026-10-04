@@ -44,7 +44,12 @@ export type ExecutionResult =
   | { status: "applied"; revision: number }
   | { status: "accepted"; jobId: string; revision: number }
   | { status: "failed" | "superseded"; error: ControlError; revision: number; partialEffects: string[] };
-export interface ArtworkReference { resourceId: string; revision: number }
+export interface ArtworkReference {
+  resourceId: string;
+  revision: number;
+  /** Local entity identity for presentation continuity; never a media capability or wire field. */
+  presentationKey?: string;
+}
 export interface ArtworkHandle { src: string; dispose(): void }
 export interface QualitySummary { format: string | null; bitrate: number | null; badges: string[] }
 export interface DisplayTrack {
@@ -155,7 +160,8 @@ export type QueryResult =
   | { type: "queue"; page: Page<QueueEntry> }
   | { type: "outputs"; outputs: AvailableOutput[]; revision: number };
 export interface ApplicationPort {
-  query(query: ApplicationQuery, signal?: AbortSignal): Promise<QueryResult>;
+  queryBrowseMetadata?(query: BrowseMetadataQuery, signal?: AbortSignal): Promise<BrowseMetadataResult>;
+  query(query: ApplicationQuery, signal?: AbortSignal, options?: { refresh?: boolean }): Promise<QueryResult>;
   execute(intent: ApplicationIntent, preconditions: CommandPreconditions): Promise<ExecutionResult>;
   subscribe(listener: (update: ApplicationUpdate) => void): () => void;
   resolveArtwork(reference: ArtworkReference, signal?: AbortSignal): Promise<ArtworkHandle>;
@@ -165,3 +171,8 @@ export interface HostPresentation { queue: QueueEntry[]; pinnedAlbumIds: number[
 export type HostUpdate = { type: "projection"; snapshot: HostSnapshot; presentation?: HostPresentation };
 export interface EventCursor { hostEpoch: string; revision: number }
 export interface EventBatch { hostEpoch: string; revision: number; events: HostEvent[] }
+export interface BrowseMetadataQuery { trackIds: number[]; albumId?: number }
+export interface BrowseMetadataRequest extends BrowseMetadataQuery { metadataVersion: 1; hostEpoch: string; libraryRevision: number }
+export interface TrackPlayCount { trackId: number; playCount: number | null }
+export interface AlbumDuration { albumId: number; totalDurationSeconds: number | null }
+export interface BrowseMetadataResult { metadataVersion: 1; hostEpoch: string; libraryRevision: number; tracks: TrackPlayCount[]; album?: AlbumDuration }

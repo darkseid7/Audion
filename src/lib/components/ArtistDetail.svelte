@@ -2,6 +2,7 @@
     import { applicationMode } from "$lib/application/bootstrap";
     import { viewActions } from "$lib/application/view-actions";
     import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import EntityDetail from "./presentation/EntityDetail.svelte";
     import ControllerBrowse from "./ControllerBrowse.svelte";
     function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
     function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
@@ -380,11 +381,7 @@
             <span>{$_('artist.loading')}</span>
         </div>
     {:else}
-        <header
-            class="artist-header"
-            on:contextmenu={handleContextMenu}
-            role="banner"
-        >
+        <EntityDetail kind="artist" onContextMenu={handleContextMenu} role="banner" >
             <button
                 class="back-btn"
                 on:click={goToArtists}
@@ -467,7 +464,7 @@
                     {/if}
                 </div>
             </div>
-        </header>
+        </EntityDetail>
 
         <div class="tabs">
             <button
@@ -785,111 +782,31 @@
         }
     }
 
-    .artist-header {
-        display: flex;
-        gap: var(--spacing-lg);
-        padding: var(--spacing-lg);
-        background: linear-gradient(
-            180deg,
-            var(--bg-surface) 0%,
-            var(--bg-base) 100%
-        );
-        position: relative;
-    }
 
-    .back-btn {
-        position: absolute;
-        top: var(--spacing-md);
-        left: var(--spacing-md);
-        width: 32px;
-        height: 32px;
-        border-radius: var(--radius-full);
-        background-color: rgba(0, 0, 0, 0.5);
-        color: var(--text-primary);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: all var(--transition-fast);
-    }
 
-    .back-btn:hover {
-        background-color: rgba(0, 0, 0, 0.7);
-        transform: scale(1.1);
-    }
 
-    .artist-avatar {
-        width: 200px;
-        height: 200px;
-        border-radius: var(--radius-full);
-        background: linear-gradient(
-            135deg,
-            var(--accent-primary) 0%,
-            #1a1a1a 100%
-        );
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        box-shadow: var(--shadow-lg);
-    }
 
-    .artist-initial {
-        font-size: 4rem;
-        font-weight: 700;
-        color: var(--text-primary);
-    }
 
-    .artist-picture {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        border-radius: var(--radius-full);
-    }
 
-    .artist-info {
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        min-width: 0;
-    }
 
-    .artist-type {
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        color: var(--text-primary);
-    }
 
-    .artist-name {
-        font-size: 3rem;
-        font-weight: 700;
-        line-height: 1.1;
-        margin: var(--spacing-sm) 0;
-        color: var(--text-primary);
-    }
 
-    .artist-meta {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        font-size: 0.875rem;
-        color: var(--text-secondary);
-        margin-bottom: var(--spacing-lg);
-    }
 
-    .separator {
-        color: var(--text-subdued);
-    }
 
-    .artist-actions {
-        display: flex;
-        gap: var(--spacing-md);
-    }
 
-    .play-all-btn {
-        font-size: 1rem;
-        padding: var(--spacing-sm) var(--spacing-xl);
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     .tabs {
         display: flex;
@@ -922,39 +839,13 @@
         overflow-y: auto;
     }
 
-    .btn-secondary {
-        background-color: transparent;
-        border: 1px solid var(--border-color);
-        color: var(--text-primary);
-        font-weight: 600;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        transition: all var(--transition-fast);
-        padding: var(--spacing-sm) var(--spacing-xl);
-        border-radius: var(--radius-full);
-        font-size: 1rem;
-    }
 
-    .btn-secondary:hover:not(:disabled) {
-        border-color: var(--text-primary);
-        transform: scale(1.05);
-    }
 
-    .btn-secondary:disabled {
-        opacity: 0.7;
-        cursor: not-allowed;
-    }
 
-    .spinner-sm {
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--bg-highlight);
-        border-top-color: var(--text-primary);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
+
+
+
+
 
     /* ── About / MusicBrainz panel ── */
     .about-panel {
@@ -1185,55 +1076,23 @@
 
     /* ── Mobile ── */
     @media (max-width: 768px) {
-        .artist-header {
-            flex-direction: column;
-            align-items: center;
-            text-align: center;
-            padding: calc(var(--safe-area-top) + var(--spacing-md))
-                var(--spacing-md) var(--spacing-md);
-            gap: var(--spacing-md);
-        }
 
-        .back-btn {
-            top: calc(var(--safe-area-top) + var(--spacing-sm));
-            left: var(--spacing-sm);
-        }
 
-        .artist-avatar {
-            width: 120px;
-            height: 120px;
-        }
 
-        .artist-initial {
-            font-size: 2.5rem;
-        }
 
-        .artist-info {
-            align-items: center;
-        }
 
-        .artist-name {
-            font-size: 1.5rem;
-            word-break: break-word;
-        }
 
-        .artist-meta {
-            flex-wrap: wrap;
-            justify-content: center;
-            margin-bottom: var(--spacing-md);
-        }
 
-        .artist-actions {
-            flex-wrap: wrap;
-            justify-content: center;
-        }
 
-        .play-all-btn,
-        .btn-secondary {
-            padding: var(--spacing-sm) var(--spacing-lg);
-            font-size: 0.875rem;
-            min-height: 44px;
-        }
+
+
+
+
+
+
+
+
+
 
         .tabs {
             overflow-x: auto;

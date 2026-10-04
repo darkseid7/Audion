@@ -5,14 +5,27 @@
  import type { ArtworkReference, ArtworkHandle } from "$lib/application/types";
  export let reference: ArtworkReference | undefined = undefined;
  export let alt = "";
- let src = "", key = "", generation = 0, handle: ArtworkHandle | undefined, abort: AbortController | undefined;
- $: identity = $controllerState.ready && reference ? `${$controllerState.currentHostId}/${$controllerState.snapshot?.hostEpoch}/${$controllerState.snapshot?.revisions.libraryRevision}/${reference.resourceId}/${reference.revision}` : "";
+ let src = "", key = "", displayScope = "", generation = 0, handle: ArtworkHandle | undefined, abort: AbortController | undefined;
+ $: identity = $controllerState.ready && $controllerState.snapshot && reference ? JSON.stringify([$controllerState.currentHostId, $controllerState.snapshot.hostId, $controllerState.snapshot.hostEpoch, $controllerState.grants?.control, $controllerState.snapshot.revisions.libraryRevision, reference.resourceId, reference.revision, reference.presentationKey]) : "";
  $: if (identity !== key) { key = identity; void load(reference, identity); }
  async function load(ref: ArtworkReference | undefined, identity: string) {
-  const ticket = ++generation; abort?.abort(); abort = undefined; handle?.dispose(); handle = undefined; src = "";
+  const ticket = ++generation; abort?.abort(); abort = undefined; handle?.dispose(); handle = undefined;
+  const snapshot = $controllerState.snapshot;
+  const scope = identity && ref && snapshot ? JSON.stringify([$controllerState.currentHostId, snapshot.hostId, snapshot.hostEpoch, $controllerState.grants?.control, ref.presentationKey ?? ref.resourceId]) : "";
+  // Keep already-decoded pixels, never the old media capability, during replacement.
+  if (!scope || scope !== displayScope) src = "";
+  displayScope = scope;
   if (!identity || !ref) return;
+  if (ref.revision !== snapshot?.revisions.libraryRevision) return;
   abort = new AbortController();
-  try { const result = await getApplicationPort().resolveArtwork(ref, abort.signal); if (ticket !== generation) result.dispose(); else { handle = result; src = result.src; } } catch { /* Missing artwork is a display-only failure. */ }
+  try {
+   const result = await getApplicationPort().resolveArtwork(ref, abort.signal);
+   if (ticket !== generation) { result.dispose(); return; }
+   handle = result;
+   // A resolved Blob is not yet a decoded image. Stage it before replacing visible pixels.
+   const image = new Image(); image.src = result.src; await image.decode();
+   if (ticket !== generation) result.dispose(); else src = result.src;
+  } catch { if (ticket === generation) { handle?.dispose(); handle = undefined; src = ""; } /* Missing artwork is a display-only failure. */ }
  }
  onDestroy(() => { generation++; abort?.abort(); handle?.dispose(); src = ""; });
 </script>

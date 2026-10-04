@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { writable, readonly } from "svelte/store";
 import type { ApplicationHandle } from "../bootstrap";
-import type { HostSnapshot, QueryResult, ExecutionResult, EventBatch } from "../types";
+import type { HostSnapshot, QueryResult, ExecutionResult, EventBatch, BrowseMetadataResult } from "../types";
 import { controllerSession, type ControllerNativeBridge, type ControllerState, type NativeControllerFence } from "./session";
 import { createControllerAdapter } from "./adapter";
 import type { NativeImage } from "./media";
@@ -41,6 +41,7 @@ function nativeBridge(): ControllerNativeBridge {
         suspend: fence => invoke("controller_suspend", { fence }), forget: (hostId, fence) => invoke("controller_forget", { hostId, fence }),
         scan: fence => invoke("controller_scan_pair", { fence, invitation: null }), pair: (fence, deviceName) => invoke("controller_pair", { fence, deviceName }),
         query: (fence, query) => request<QueryResult>(fence, { type: "query", query }, "query", "result"),
+        browseMetadata: (fence, input) => request<BrowseMetadataResult>(fence, { type: "browse_metadata", request: input }, "browse_metadata", "result"),
         command: (fence, envelope) => request<ExecutionResult>(fence, { type: "command", envelope }, "command", "result"),
         commandStatus: (fence, requestId) => request<ExecutionResult | {
             status: "pending";

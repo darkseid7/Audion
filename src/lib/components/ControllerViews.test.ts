@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { compile } from "svelte/compiler";
 import * as svelte from "svelte";
 import { render } from "svelte/server";
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
+import { canExecute } from "../application/capabilities";
+import { playAlbumGesture } from "../application/presentation/browse";
 import ts from "typescript";
 import { it, expect, vi } from "vitest";
 import { createViewActions } from "../application/view-actions";
@@ -86,6 +88,12 @@ function handler(component: string,name:string,scope:Record<string,unknown>) {
  const ast=ts.createSourceFile(component,script,ts.ScriptTarget.Latest,true);
  const fn=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name)!;
  const code=ts.transpileModule(fn.getText(ast),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ if(component === "ControllerBrowse" && ["play", "shufflePlay", "playAlbumCard"].includes(name)) {
+  const confirmed=get(connection),provided=scope.$controllerState as any;
+  const state={...confirmed,...provided,snapshot:{...confirmed.snapshot,...provided?.snapshot,capabilities:{...confirmed.snapshot.capabilities,intents:[...confirmed.snapshot.capabilities.intents,"pause","resume"]}}};
+  const dependencies={...scope,$controllerState:state,canExecute};
+  scope={...dependencies,dispatch:handler(component,"dispatch",dependencies),availability:handler(component,"availability",dependencies),playAlbumGesture};
+ }
  return runInNewContext(`${code};${name}`,scope);
 }
 it.each([
@@ -115,7 +123,7 @@ it("disposes artwork returned after a shared artwork view is torn down",async()=
  const {installApplicationPort}=await import("../application/port");let resolve!: (value:any)=>void;
  const dispose=vi.fn(),resolveArtwork=vi.fn(()=>new Promise(r=>resolve=r));
  const uninstall=installApplicationPort({resolveArtwork} as any);
- try { const mounted=await mountEntry("ControllerArtwork",{reference:{resourceId:"safe-art",revision:1}});expect(resolveArtwork).toHaveBeenCalledOnce();mounted.dispose();resolve({src:"blob:fixture",dispose});await Promise.resolve();await Promise.resolve();expect(dispose).toHaveBeenCalledOnce(); } finally {uninstall();}
+ try { const mounted=await mountEntry("ControllerArtwork",{reference:{resourceId:"safe-art",revision:get(connection).snapshot.revisions.libraryRevision}});expect(resolveArtwork).toHaveBeenCalledOnce();mounted.dispose();resolve({src:"blob:fixture",dispose});await Promise.resolve();await Promise.resolve();expect(dispose).toHaveBeenCalledOnce(); } finally {uninstall();}
 });
 
 it("omits an empty album filter instead of sending invalid optional native text",()=>{
@@ -139,14 +147,93 @@ it("liked album browse requests PC-filtered membership rather than filtering a p
 it.each(["ControllerTransport","ControllerQueue","ControllerOutputs"])("%s displays actual shared outcomes while remaining open",async name=>{
  for(const outcome of [
   {status:"accepted",jobId:"pending",revision:1},
+  {status:"applied",revision:1},
   {status:"failed",revision:1,error:{code:"execution_failed",message:"PC refused",retryable:false},partialEffects:[]},
   {status:"failed",revision:1,error:{code:"execution_failed",message:"Restart failed",retryable:false},partialEffects:["Output stopped"]},
   {status:"failed",revision:1,error:{code:"outcome_unknown",message:"Unknown outcome; not replayed",retryable:false},partialEffects:[]}
  ]) {
   const mounted=await mountEntry(name,{variant:"full",execute:async()=>outcome},outcome);
-  expect(mounted.html).toContain(outcome.status==="accepted"?"Waiting for the PC to finish":outcome.error!.message);
+  if(outcome.status === "accepted" || outcome.status === "applied") {
+   expect(mounted.html).not.toContain('aria-label="PC action outcomes"');
+   expect(mounted.html).not.toContain("Waiting for the PC to finish");
+  } else expect(mounted.html).toContain(outcome.error!.message);
   if(outcome.partialEffects?.length)expect(mounted.html).toContain("Output stopped");
   expect(mounted.html).toContain(name==="ControllerTransport"?"Now playing":name==="ControllerQueue"?"Close queue":"Close outputs");
   mounted.dispose();
  }
+});
+it.each(['play','shufflePlay','playAlbumCard'])('browse %s honors disabled capability through its real dispatch dependency',async name=>{
+ const execute=vi.fn(async()=>({status:'applied',revision:1})),play=vi.fn();
+ await handler('ControllerBrowse',name,{execute,play,entityContext:{type:'album',albumId:42,playMode:'all'},$controllerState:{ready:false,snapshot:{playback:{status:'paused',context:{type:'album',albumId:42}}}}})(name==='shufflePlay'?undefined:42);
+ expect(execute).not.toHaveBeenCalled();expect(play).not.toHaveBeenCalled();
+});
+it('browse back control clears the search shell before moving through existing view history',()=>{
+ const calls:string[]=[];handler('ControllerBrowse','navigateBack',{onNavigate:()=>calls.push('clear'),goBack:()=>calls.push('back')})();
+ expect(calls).toEqual(['clear','back']);
+});
+it('artwork fixture respects the real current revision guard for stale metadata',async()=>{
+ const {installApplicationPort}=await import('../application/port');const resolveArtwork=vi.fn();
+ const uninstall=installApplicationPort({resolveArtwork} as any);
+ try {const mounted=await mountEntry('ControllerArtwork',{reference:{resourceId:'stale-art',revision:get(connection).snapshot.revisions.libraryRevision-1}});expect(resolveArtwork).not.toHaveBeenCalled();mounted.dispose();}finally{uninstall();}
+});
+
+it('controller transport uses desktop output/queue SVGs without losing accessible names', async () => {
+ const mounted=await mountEntry('ControllerTransport',{execute:async()=>({status:'applied',revision:2})});
+ const output=mounted.html.match(/<button[^>]*aria-label="Choose output"[^>]*>([\s\S]*?)<\/button>/)![1];
+ const queue=mounted.html.match(/<button[^>]*aria-label="Open queue"[^>]*>([\s\S]*?)<\/button>/)![1];
+ expect(output).toContain('<svg');expect(queue).toContain('<svg');
+ expect(output).not.toContain('Outputs');expect(queue).not.toContain('Queue');
+ expect(mounted.html).toContain('title="Outputs"');expect(mounted.html).toContain('title="Queue"');
+ expect(native).not.toHaveBeenCalled();mounted.dispose();
+});
+
+it('controller volume uses a speaker and slim themed range while retaining confirmed value and capability guard', async () => {
+ const mounted=await mountEntry('ControllerTransport',{execute:async()=>({status:'applied',revision:2})});
+ const label=mounted.html.match(/<label[^>]*class="volume-control[^>]*>([\s\S]*?)<\/label>/)![1];
+ expect(label).toContain('<svg');expect(label).toContain('aria-label="Volume"');
+ expect(label).toContain('value="0.5"');expect(label).not.toContain('>Volume');
+ const source=readFileSync(new URL('./ControllerTransport.svelte',import.meta.url),'utf8');
+ expect(source).toContain('height: 4px');expect(source).toContain('min-height: 44px');
+ expect(source).toContain('disabled={!canExecute($controllerState,"set_volume")}');
+ mounted.dispose();
+});
+
+it('expanded controller player has an opaque theme backing beneath theme gradients', async () => {
+ const mounted=await mountEntry('ControllerTransport',{variant:'full',execute:async()=>({status:'applied',revision:2})});
+ expect(mounted.html).toContain('aria-label="Now playing"');
+ expect(mounted.html).toContain('aria-modal="true"');
+ const source=readFileSync(new URL('./ControllerTransport.svelte',import.meta.url),'utf8');
+ expect(source).toMatch(/\.player-bar\.full\s*\{[^}]*background-color:\s*var\(--bg-base\)\s*!important/);
+ expect(native).not.toHaveBeenCalled();mounted.dispose();
+});
+
+it('expanded player has a visible SVG close cross and accessible close name', async () => {
+ const mounted=await mountEntry('ControllerTransport',{variant:'full',execute:async()=>({status:'applied',revision:2})});
+ const close=mounted.html.match(/<button[^>]*aria-label="Close now playing"[^>]*>([\s\S]*?)<\/button>/)![1];
+ expect(close).toContain('<svg');expect(close).toContain('M6 6l12 12M18 6L6 18');
+ expect(close).not.toContain('⌄');mounted.dispose();
+});
+
+it('expanded volume aligns speaker and range on the same centered row',()=>{
+ const source=readFileSync(new URL('./ControllerTransport.svelte',import.meta.url),'utf8');
+ expect(source).toMatch(/\.player-bar\.full \.volume-control\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center/);
+});
+
+it('expanded player uses a reduced-motion-aware local enter/exit transition without animating the bar',()=>{
+ const source=readFileSync(new URL('./ControllerTransport.svelte',import.meta.url),'utf8');
+ expect(source).toContain('transition:expandedTransition');
+ expect(source).toContain('prefers-reduced-motion: reduce');
+ expect(source).toContain('variant !== "full"');
+ expect(source).toContain('duration: 320');
+ for(const generate of ['server','client'] as const)expect(()=>compile(source,{filename:'ControllerTransport.svelte',generate})).not.toThrow();
+});
+
+it('player metadata navigation uses host album ID and artist without playback commands',()=>{
+ const album=vi.fn(),artist=vi.fn(),close=vi.fn(),execute=vi.fn();
+ const playback={track:{albumId:7,artist:'Arctic Monkeys'}};
+ handler('ControllerTransport','openTrackAlbum',{playback,$isFullScreen:true,toggleFullScreen:close,goToAlbumDetail:album,execute})();
+ handler('ControllerTransport','openTrackArtist',{playback,$isFullScreen:false,toggleFullScreen:close,goToArtistDetail:artist,execute})();
+ expect(album).toHaveBeenCalledWith(7);expect(artist).toHaveBeenCalledWith('Arctic Monkeys');expect(close).toHaveBeenCalledOnce();expect(execute).not.toHaveBeenCalled();
+ handler('ControllerTransport','openTrackAlbum',{playback:{track:{albumId:-1}},$isFullScreen:false,goToAlbumDetail:album})();
+ expect(album).toHaveBeenCalledOnce();
 });

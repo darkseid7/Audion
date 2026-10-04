@@ -84,7 +84,7 @@ export function createReadAdmission() {
             drain();
         });
     }
-    return async <T>(signal: AbortSignal, attempt: () => Promise<T>): Promise<T> => {
+    const run = async <T>(signal: AbortSignal, attempt: () => Promise<T>): Promise<T> => {
         const release = await acquire(signal);
         try {
             if (signal.aborted)
@@ -95,4 +95,11 @@ export function createReadAdmission() {
             release();
         }
     };
+    return Object.assign(run, { async tryRun<T>(signal: AbortSignal, attempt: () => Promise<T>): Promise<T> {
+        if (signal.aborted) throw cancelled();
+        if (active >= 2 || queue.length) throw { code: "busy", message: "Foreground reads have priority.", retryable: false } satisfies ControlError;
+        active++;
+        try { return await attempt(); }
+        finally { active--; drain(); }
+    } });
 }

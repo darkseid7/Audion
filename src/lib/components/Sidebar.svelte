@@ -1,4 +1,6 @@
 <script lang="ts">
+    import Navigation from "./presentation/Navigation.svelte";
+    import type { NavigationRow, NavigationSection } from "$lib/application/presentation/types";
     import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount, createEventDispatcher } from "svelte";
     import {
@@ -400,15 +402,26 @@
             uiSlotManager.unregisterContainer("sidebar:bottom");
         };
     });
+
+    function navigationRow(id: string, label: string, count?: number): NavigationRow {
+        return { id, label, icon: id as NavigationRow["icon"], active: isActive(id), ...(count === undefined ? {} : { count }), availability: { enabled: true } };
+    }
+    let navigationSections: NavigationSection[];
+ $: { void $currentView; navigationSections = [
+        { id: "library", label: $_('sidebar.library', { default: 'Library' }), rows: [navigationRow("home", $_('sidebar.home', { default: "Home" })),navigationRow("albums", $_('sidebar.albums', { default: "Albums" }), $albumCount),navigationRow("liked-songs", $_('sidebar.likedSongs', { default: "Liked Songs" }), $likedCount),navigationRow("listen-later", $_('sidebar.listenLater', { default: "Escuchar más tarde" }), $listenLaterCount),navigationRow("recently-played", $_('sidebar.thisWeek', { default: "This Week" })),navigationRow("discover", $_('sidebar.discover', { default: "Discover" })), ...($appSettings.listenBrainzEnabled && $appSettings.listenBrainzTokenSet ? [{ id: "listenbrainz", label: $_('sidebar.recommendations', { default: 'Recommendations' }), icon: "listenbrainz" as const, active: isActive("listenbrainz"), availability: { enabled: true as const } }] : []), navigationRow("tracks", $_('sidebar.allTracks', { default: "All Tracks" }), $trackCount), navigationRow("artists", $_('sidebar.artists', { default: "Artists" }), $artistCount)] },
+        { id: "playlists", label: $_('sidebar.playlists', { default: 'Playlists' }), rows: [navigationRow("playlists", $_('sidebar.allPlaylists', { default: "All Playlists" }), $playlists.length)] },
+        { id: "settings", label: $_('sidebar.settings', { default: 'Settings' }), rows: [navigationRow("plugins", $_('sidebar.plugins', { default: "Plugins" })), navigationRow("settings", $_('sidebar.settings', { default: "Settings" }))] }
+    ]; }
+    function navigateShared(id: string): void {
+        if (!$desktopEffectsEnabled) return;
+        const actions: Record<string, () => void> = { home: goToHome, albums: goToAlbums, "liked-songs": goToLikedSongs, "listen-later": goToListenLater, "recently-played": goToRecentlyPlayed, discover: goToDiscover, listenbrainz: goToListenBrainz, tracks: goToTracks, artists: goToArtists, playlists: goToPlaylists, plugins: goToPlugins, settings: goToSettings };
+        if (actions[id]) navigateAndClose(actions[id]);
+    }
 </script>
 {#if $desktopEffectsEnabled}
 
-<aside class="sidebar">
-    <div class="sidebar-header">
-        <div class="logo">
-            <img src="/logo.png" alt="Audion Logo" width="32" height="32" />
-            <span class="logo-text">Audion</span>
-            <SyncStatus />
+<Navigation sections={navigationSections} onNavigate={navigateShared}>
+    <svelte:fragment slot="header">            <SyncStatus />
             {#if $updates.hasUpdate}
                 <div
                     class="update-badge"
@@ -422,225 +435,9 @@
                     Update
                 </div>
             {/if}
-        </div>
-    </div>
-
-    <nav class="sidebar-nav">
-        <!-- Plugin slot: Top -->
-        <div class="plugin-slot" bind:this={slotTop}></div>
-
-        <section class="nav-section">
-            <h3 class="nav-section-title">{$_('sidebar.library', { default: 'Library' })}</h3>
-            <ul class="nav-list">
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("home")}
-                        on:click={() => navigateAndClose(goToHome)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" />
-                        </svg>
-                        <span>{$_('sidebar.home', { default: 'Home' })}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("albums")}
-                        on:click={() => navigateAndClose(goToAlbums)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.albums', { default: 'Albums' })}</span>
-                        <span class="nav-count">{$albumCount}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("liked-songs")}
-                        on:click={() => navigateAndClose(goToLikedSongs)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.likedSongs', { default: 'Liked Songs' })}</span>
-                        <span class="nav-count">{$likedCount}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("listen-later")}
-                        on:click={() => navigateAndClose(goToListenLater)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 1.75A10.25 10.25 0 1 0 22.25 12 10.26 10.26 0 0 0 12 1.75zm0 18.5A8.25 8.25 0 1 1 20.25 12 8.26 8.26 0 0 1 12 20.25zm.75-13.25h-1.5v6l5 3 .75-1.23-4.25-2.52z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.listenLater', { default: 'Escuchar más tarde' })}</span>
-                        <span class="nav-count">{$listenLaterCount}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("recently-played")}
-                        on:click={() => navigateAndClose(goToRecentlyPlayed)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.thisWeek', { default: 'This Week' })}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("discover")}
-                        on:click={() => navigateAndClose(goToDiscover)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.discover', { default: 'Discover' })}</span>
-                    </button>
-                </li>
-                {#if $appSettings.listenBrainzEnabled && $appSettings.listenBrainzTokenSet}
-                    <li>
-                        <button
-                            class="nav-item"
-                            class:active={isActive("listenbrainz")}
-                            on:click={() => navigateAndClose(goToListenBrainz)}
-                        >
-                            <svg
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                stroke-width="2"
-                                width="24"
-                                height="24"
-                            >
-                                <circle cx="11" cy="11" r="8"></circle>
-                                <line x1="21" y1="21" x2="16.65" y2="16.65"
-                                ></line>
-                                <line x1="11" y1="8" x2="11" y2="14"></line>
-                                <line x1="8" y1="11" x2="14" y2="11"></line>
-                            </svg>
-                            <span>{$_('sidebar.recommendations', { default: 'Recommendations' })}</span>
-                        </button>
-                    </li>
-                {/if}
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("tracks")}
-                        on:click={() => navigateAndClose(goToTracks)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.allTracks', { default: 'All Tracks' })}</span>
-                        <span class="nav-count">{$trackCount}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("artists")}
-                        on:click={() => navigateAndClose(goToArtists)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.artists', { default: 'Artists' })}</span>
-                        <span class="nav-count">{$artistCount}</span>
-                    </button>
-                </li>
-            </ul>
-        </section>
-
-        <section class="nav-section">
-            <div class="nav-section-header">
-                <h3 class="nav-section-title">{$_('sidebar.playlists', { default: 'Playlists' })}</h3>
-            </div>
-            <ul class="nav-list">
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("playlists")}
-                        on:click={() => navigateAndClose(goToPlaylists)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M19 9H5V7h14v2zm0 4H5v-2h14v2zm-8 4H5v-2h6v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.allPlaylists', { default: 'All Playlists' })}</span>
-                        <span class="nav-count">{$playlists.length}</span>
-                    </button>
-                </li>
-                {#each sortedPlaylists as playlist (playlist.id)}
+</svelte:fragment>
+    <div slot="top" class="plugin-slot" bind:this={slotTop}></div>
+    <svelte:fragment slot="playlists">                {#each sortedPlaylists as playlist (playlist.id)}
                     <li>
                         <button
                             class="nav-item playlist-item"
@@ -728,55 +525,8 @@
                             {/if}
                         </button>
                     </li>
-                {/each}
-            </ul>
-        </section>
-
-        <section class="nav-section">
-            <h3 class="nav-section-title">{$_('sidebar.settings', { default: 'Settings' })}</h3>
-            <ul class="nav-list">
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("plugins")}
-                        on:click={() => navigateAndClose(goToPlugins)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.plugins', { default: 'Plugins' })}</span>
-                    </button>
-                </li>
-                <li>
-                    <button
-                        class="nav-item"
-                        class:active={isActive("settings")}
-                        on:click={() => navigateAndClose(goToSettings)}
-                    >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="currentColor"
-                            width="24"
-                            height="24"
-                        >
-                            <path
-                                d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"
-                            />
-                        </svg>
-                        <span>{$_('sidebar.settings', { default: 'Settings' })}</span>
-                    </button>
-                </li>
-            </ul>
-        </section>
-
-        <section class="nav-section">
+                {/each}</svelte:fragment>
+    <svelte:fragment slot="community">        <section class="nav-section">
             <h3 class="nav-section-title">{$_('sidebar.community', { default: 'Community' })}</h3>
             <ul class="nav-list">
                 {#if $appSettings.showDiscord}
@@ -814,9 +564,8 @@
                 {/if}
             </ul>
         </section>
-    </nav>
-
-    <div class="sidebar-footer">
+</svelte:fragment>
+    <svelte:fragment slot="footer">
         <!-- Plugin slot: Bottom -->
         <div class="plugin-slot" bind:this={slotBottom}></div>
 
@@ -863,8 +612,8 @@
         {#if scanError}
             <p class="scan-error">{scanError}</p>
         {/if}
-    </div>
-</aside>
+</svelte:fragment>
+</Navigation>
 
 {#if showUpdatePopup && $updates.latestRelease}
     <UpdatePopup
@@ -874,310 +623,3 @@
 {/if}
 
 {/if}
-<style>
-    .sidebar {
-        width: var(--sidebar-width);
-        height: 100%;
-        background-color: var(--bg-base);
-        display: flex;
-        flex-direction: column;
-        border-right: 1px solid var(--border-color);
-    }
-
-    .sidebar-header {
-        padding: var(--spacing-md);
-        padding-top: var(--spacing-lg);
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-    }
-
-    .logo {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        color: var(--accent-primary);
-    }
-
-    .logo-text {
-        font-size: 1.5rem;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-    }
-
-    .update-badge {
-        font-size: 0.6rem;
-        font-weight: 800;
-        color: var(--accent-primary);
-        background-color: var(--accent-subtle);
-        border: 1px solid var(--accent-primary);
-        padding: 1px 8px;
-        border-radius: 12px;
-        margin-left: var(--spacing-sm);
-        cursor: pointer;
-        user-select: none;
-        white-space: nowrap;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-top: 2px;
-        transition: all 0.2s ease;
-        animation: glow 3s infinite ease-in-out;
-    }
-
-    .update-badge:hover {
-        background-color: var(--accent-primary);
-        color: var(--bg-base);
-        transform: translateY(-1px);
-        box-shadow: 0 2px 8px var(--accent-subtle);
-    }
-
-    @keyframes glow {
-        0%,
-        100% {
-            box-shadow: 0 0 2px transparent;
-        }
-        50% {
-            box-shadow: 0 0 8px var(--accent-subtle);
-        }
-    }
-
-    .sidebar-nav {
-        flex: 1;
-        overflow-y: auto;
-        overscroll-behavior-y: contain;
-        padding: var(--spacing-md);
-    }
-
-    .nav-section {
-        margin-bottom: var(--spacing-xl);
-    }
-
-    .nav-section-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-
-    .nav-section-title {
-        font-size: 0.6875rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        color: var(--text-subdued);
-        margin-bottom: var(--spacing-md);
-        padding-left: var(--spacing-md);
-    }
-
-    .nav-list {
-        list-style: none;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-    }
-
-    .nav-item {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-md);
-        width: 100%;
-        padding: 12px var(--spacing-md);
-        border-radius: var(--radius-md);
-        color: var(--text-secondary);
-        transition: all var(--transition-fast);
-        text-align: left;
-        font-size: 0.9375rem;
-        position: relative;
-    }
-
-    .nav-item:hover {
-        color: var(--text-primary);
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .nav-item.active {
-        color: var(--text-primary);
-        background-color: var(--bg-surface);
-        font-weight: 500;
-    }
-
-    .nav-item.playing {
-        background-color: var(--accent-subtle);
-        color: var(--text-primary);
-    }
-
-    .nav-item svg,
-    .nav-item img {
-        flex-shrink: 0;
-        opacity: 0.7;
-    }
-
-    .resonate-icon {
-        width: 24px;
-        height: 24px;
-        object-fit: contain;
-    }
-
-    .nav-item.active svg {
-        opacity: 1;
-        color: var(--accent-primary);
-    }
-
-    .nav-count {
-        margin-left: auto;
-        font-size: 0.75rem;
-        color: var(--text-subdued);
-    }
-
-    .playlist-item {
-        padding-left: var(--spacing-md);
-    }
-
-    .playing-indicator {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 2px;
-        width: 24px;
-        height: 24px;
-        flex-shrink: 0;
-    }
-
-    .playing-indicator .bar {
-        width: 3px;
-        height: 12px;
-        background-color: var(--accent-primary);
-        animation: equalizer 0.8s ease-in-out infinite;
-    }
-
-    .playing-indicator .bar:nth-child(2) {
-        animation-delay: 0.2s;
-    }
-
-    .playing-indicator .bar:nth-child(3) {
-        animation-delay: 0.4s;
-    }
-
-    @keyframes equalizer {
-        0%,
-        100% {
-            height: 4px;
-        }
-        50% {
-            height: 14px;
-        }
-    }
-
-    .nav-item.playing .nav-count {
-        color: var(--accent-primary);
-        font-weight: 600;
-    }
-
-    .sidebar-footer {
-        padding: var(--spacing-md);
-        border-top: 1px solid var(--border-color);
-    }
-
-    .add-folder-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: var(--spacing-sm);
-        width: 100%;
-        padding: var(--spacing-sm) var(--spacing-md);
-        background-color: var(--bg-surface);
-        color: var(--text-primary);
-        border-radius: var(--radius-md);
-        font-weight: 500;
-        transition: all var(--transition-fast);
-    }
-
-    .add-folder-btn:hover:not(:disabled) {
-        background-color: var(--bg-highlight);
-    }
-
-    .add-folder-btn:disabled {
-        opacity: 0.7;
-        cursor: wait;
-    }
-
-    .scan-error {
-        margin-top: var(--spacing-sm);
-        font-size: 0.75rem;
-        color: var(--error-color);
-        text-align: center;
-    }
-
-    .plugin-slot {
-        display: flex;
-        flex-direction: column;
-        gap: var(--spacing-sm);
-        margin-bottom: var(--spacing-md);
-    }
-
-    .animate-spin {
-        animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-        from {
-            transform: rotate(0deg);
-        }
-        to {
-            transform: rotate(360deg);
-        }
-    }
-
-    .playlist-name {
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 0.8125rem;
-    }
-
-    .pinned-indicator-sidebar {
-        color: var(--accent-primary);
-        display: flex;
-        align-items: center;
-        margin-left: var(--spacing-xs);
-        opacity: 0.8;
-    }
-
-    .playlist-item:hover .pinned-indicator-sidebar {
-        opacity: 1;
-    }
-
-    /* Mobile: sidebar fills its container (the drawer) */
-    @media (max-width: 768px) {
-        .sidebar {
-            width: 100%;
-            border-right: none;
-            height: 100%;
-        }
-
-        .sidebar-header {
-            padding-top: var(--spacing-md);
-        }
-
-        .nav-item {
-            padding: 14px var(--spacing-md);
-            min-height: 48px;
-        }
-    }
-    .playlist-icon-container {
-        width: 24px;
-        height: 24px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        overflow: hidden;
-        border-radius: 4px;
-    }
-
-    .sidebar-playlist-art {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-    }
-</style>

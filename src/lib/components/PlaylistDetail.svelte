@@ -2,6 +2,7 @@
     import { applicationMode } from "$lib/application/bootstrap";
     import { viewActions } from "$lib/application/view-actions";
     import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import EntityDetail from "./presentation/EntityDetail.svelte";
     import ControllerBrowse from "./ControllerBrowse.svelte";
     function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
     function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
@@ -90,14 +91,14 @@
     $: coverSrc = (() => {
         if ($applicationMode === "controller") return "";
         if (!playlist) return generateSvgCover("Playlist");
-        
+
         // 1. Check local session/custom cover overrides
         const custom = $playlistCovers && $playlistCovers[playlist.id];
         if (custom) return custom;
-        
+
         // 2. Check database cover URL
         if (playlist.cover_url) return playlist.cover_url;
-        
+
         // 3. Fallback to generated SVG
         return generateSvgCover(playlist.name || "Playlist");
     })();
@@ -383,12 +384,7 @@
             <span>Loading playlist...</span>
         </div>
     {:else if playlist}
-        <header
-            class="playlist-header"
-            on:contextmenu={handleHeaderContextMenu}
-            role="region"
-            aria-label="Playlist header"
-        >
+        <EntityDetail kind="playlist" onContextMenu={handleHeaderContextMenu} role="region" ariaLabel="Playlist header">
             <button class="back-btn" on:click={goToPlaylists} title="Close">
                 <svg
                     viewBox="0 0 24 24"
@@ -595,7 +591,7 @@
                     </button>
                 </div>
             </div>
-        </header>
+        </EntityDetail>
 
         <div class="playlist-tracks">
             {#if tracks.length > 0}
@@ -671,117 +667,25 @@
         }
     }
 
-    .playlist-header {
-        display: flex;
-        gap: var(--spacing-lg);
-        padding: var(--spacing-lg);
-        background: linear-gradient(
-            180deg,
-            var(--bg-surface) 0%,
-            var(--bg-base) 100%
-        );
-        position: relative;
-    }
 
-    .back-btn {
-        position: absolute;
-        top: var(--spacing-md);
-        right: var(--spacing-md);
-        width: 40px;
-        height: 40px;
-        border-radius: var(--radius-full);
-        background-color: rgba(0, 0, 0, 0.5);
-        backdrop-filter: blur(8px);
-        color: var(--text-primary);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: all var(--transition-fast);
-        z-index: 10;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
 
-    .back-btn::after {
-        content: attr(title);
-        position: absolute;
-        bottom: 100%;
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 6px 12px;
-        background-color: var(--bg-surface);
-        color: var(--text-primary);
-        font-size: 0.75rem;
-        border-radius: var(--radius-sm);
-        white-space: nowrap;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity var(--transition-fast);
-        margin-bottom: 8px;
-        box-shadow: var(--shadow-md);
-    }
 
-    .back-btn:hover::after {
-        opacity: 1;
-    }
 
-    .back-btn:hover {
-        background-color: rgba(220, 38, 38, 0.9);
-        border-color: rgba(220, 38, 38, 0.4);
-        transform: scale(1.05);
-    }
 
-    .back-btn:active {
-        transform: scale(0.95);
-    }
 
-    .playlist-cover {
-        width: 232px;
-        height: 232px;
-        border-radius: var(--radius-sm);
-        background: linear-gradient(
-            135deg,
-            var(--bg-highlight) 0%,
-            var(--bg-surface) 100%
-        );
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        color: var(--text-subdued);
-        box-shadow: var(--shadow-lg);
-        position: relative;
-        overflow: hidden;
-        cursor: pointer;
-    }
 
-    .cover-image {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-        transition: transform 0.3s ease;
-    }
 
-    .playlist-cover:hover .cover-image {
-        transform: scale(1.05);
-    }
 
-    .cover-overlay {
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(
-            to top,
-            rgba(0, 0, 0, 0.7) 0%,
-            rgba(0, 0, 0, 0.3) 50%,
-            rgba(0, 0, 0, 0) 100%
-        );
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        padding: var(--spacing-sm);
-        opacity: 0;
-        animation: fadeIn 0.2s ease forwards;
-    }
+
+
+
+
+
+
+
+
+
+
 
     @keyframes fadeIn {
         to {
@@ -789,94 +693,29 @@
         }
     }
 
-    .cover-overlay-btn {
-        width: 36px;
-        height: 36px;
-        border-radius: var(--radius-full);
-        background-color: rgba(0, 0, 0, 0.6);
-        backdrop-filter: blur(8px);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        transition: all var(--transition-fast);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
 
-    .cover-overlay-btn:hover {
-        background-color: rgba(0, 0, 0, 0.8);
-        transform: scale(1.1);
-        border-color: rgba(255, 255, 255, 0.2);
-    }
 
-    .cover-delete-btn:hover {
-        background-color: rgba(241, 94, 108, 0.8);
-        border-color: rgba(241, 94, 108, 0.4);
-    }
 
-    .cover-add-btn:hover {
-        background-color: var(--accent-primary);
-        border-color: var(--accent-primary);
-    }
 
-    .playlist-info {
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        min-width: 0;
-    }
 
-    .playlist-type {
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        color: var(--text-primary);
-    }
 
-    .playlist-title {
-        font-size: 3rem;
-        font-weight: 700;
-        line-height: 1.1;
-        margin: var(--spacing-sm) 0;
-        color: var(--text-primary);
-        cursor: text;
-    }
 
-    .edit-input {
-        font-size: 3rem;
-        font-weight: 700;
-        background-color: var(--bg-surface);
-        border: 2px solid var(--accent-primary);
-        border-radius: var(--radius-sm);
-        padding: var(--spacing-xs) var(--spacing-sm);
-        margin: var(--spacing-sm) 0;
-        width: 100%;
-    }
 
-    .playlist-meta {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-        font-size: 0.875rem;
-        color: var(--text-secondary);
-        margin-bottom: var(--spacing-lg);
-    }
 
-    .separator {
-        color: var(--text-subdued);
-    }
 
-    .playlist-actions {
-        display: flex;
-        align-items: center;
-        gap: var(--spacing-sm);
-    }
 
-    .play-all-btn,
-    .add-songs-btn {
-        font-size: 1rem;
-        padding: var(--spacing-sm) var(--spacing-xl);
-    }
+
+
+
+
+
+
+
+
+
+
+
+
 
     .playlist-tracks {
         flex: 1;
@@ -904,83 +743,33 @@
         font-size: 0.875rem;
     }
 
-    .btn-secondary.downloaded {
-        border-color: var(--accent-primary);
-        color: var(--accent-primary);
-        cursor: default;
-    }
 
-    .btn-secondary.downloaded:hover {
-        transform: none;
-    }
 
-    .spinner-sm {
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--bg-highlight);
-        border-top-color: var(--text-primary);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
+
+
+
 
     /* ── Mobile ── */
     @media (max-width: 768px) {
-        .playlist-header {
-            flex-direction: column;
-            align-items: center;
-            text-align: center;
-            padding: calc(var(--safe-area-top) + var(--spacing-md))
-                var(--spacing-md) var(--spacing-md);
-            gap: var(--spacing-md);
-        }
 
-        .back-btn {
-            top: calc(var(--safe-area-top) + var(--spacing-sm));
-            right: var(--spacing-sm);
-        }
 
-        .playlist-cover {
-            width: 160px;
-            height: 160px;
-        }
 
-        .playlist-info {
-            align-items: center;
-        }
 
-        .playlist-title {
-            font-size: 1.5rem;
-            word-break: break-word;
-        }
 
-        .edit-input {
-            font-size: 1.5rem;
-        }
 
-        .playlist-meta {
-            flex-wrap: wrap;
-            justify-content: center;
-            margin-bottom: var(--spacing-md);
-        }
 
-        .playlist-actions {
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: var(--spacing-sm);
-        }
 
-        .play-all-btn,
-        .add-songs-btn,
-        .btn-secondary {
-            padding: var(--spacing-sm) var(--spacing-lg);
-            font-size: 0.875rem;
-            min-height: 44px;
-        }
 
-        .icon-btn {
-            min-width: 44px;
-            min-height: 44px;
-        }
+
+
+
+
+
+
+
+
+
+
 
         .playlist-tracks {
             padding-bottom: calc(

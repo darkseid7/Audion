@@ -1,4 +1,5 @@
-﻿<script lang="ts">
+<script lang="ts">
+    import Player from "./presentation/Player.svelte";
     import { applicationMode } from "$lib/application/bootstrap";
     import { viewActions } from "$lib/application/view-actions";
     import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
@@ -459,7 +460,7 @@
         </div>
     {:else}
         <!-- Track info -->
-        <div class="track-info desktop-track-info">
+        <Player>
             {#if $currentTrack}
                 <div class="album-art" role="button" tabindex="0"
                     on:click|stopPropagation={() => {
@@ -572,7 +573,7 @@
             {/if}
             <!-- Plugin slot: Left -->
             <div class="plugin-slot" bind:this={slotStart}></div>
-        </div>
+        </Player>
 
         <!-- Playback controls -->
         <div class="playback-controls">
@@ -992,139 +993,44 @@
     }
 
     /* Track info */
-    .track-info {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        min-width: 0;
-        overflow: hidden;
-    }
 
-    .desktop-track-info {
-        padding-right: var(--spacing-sm);
-    }
 
-    .album-art {
-        width: 96px;
-        height: 96px;
-        border-radius: var(--radius-md);
-        overflow: hidden;
-        flex-shrink: 0;
-        background-color: var(--bg-surface);
-        transition: transform var(--transition-fast);
-        cursor: pointer;
-    }
 
-    .album-art:hover {
-        transform: scale(1.05);
-    }
 
-    .album-art img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-    }
 
-    .album-art-placeholder {
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--text-subdued);
-    }
 
-    .track-details {
-        display: flex;
-        flex-direction: column;
-        min-width: 0;
-    }
 
-    .track-title {
-        font-size: 1.32rem;
-        font-weight: 500;
-    }
 
-    .track-title:hover {
-        color: var(--text-primary);
-        text-decoration: underline;
-        cursor: pointer;
-    }
 
-    .track-artist {
-        font-size: 1.12rem;
-        color: var(--text-secondary);
-    }
 
-    .track-artist:hover {
-        color: var(--text-primary);
-        text-decoration: underline;
-        cursor: pointer;
-    }
 
-    .track-album-link {
-        color: var(--text-subdued);
-        cursor: pointer;
-    }
 
-    .track-album-link:hover {
-        color: var(--text-primary);
-        text-decoration: underline;
-    }
 
-    .player-audio-chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 3px;
-        margin-top: 4px;
-    }
 
-    .player-audio-chip {
-        display: inline-flex;
-        align-items: center;
-        font-size: 0.6rem;
-        font-weight: 600;
-        line-height: 1;
-        letter-spacing: 0.03em;
-        padding: 2px 6px;
-        border-radius: 999px;
-        background: var(--bg-highlight);
-        color: var(--text-secondary);
-        border: 1px solid var(--border-color);
-        white-space: nowrap;
-    }
 
-    .player-audio-chip.format {
-        background: color-mix(in oklab, var(--accent-primary) 15%, transparent);
-        color: var(--accent-primary);
-        border-color: color-mix(in oklab, var(--accent-primary) 40%, transparent);
-    }
 
-    .no-track {
-        color: var(--text-subdued);
-        font-size: 0.875rem;
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     /* Like button (desktop) */
-    .like-btn {
-        background: none;
-        border: none;
-        color: var(--text-subdued);
-        cursor: pointer;
-        padding: 4px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 50%;
-        transition: all 0.2s ease;
-        flex-shrink: 0;
-        margin-left: 8px;
-    }
 
-    .like-btn:hover {
-        color: var(--text-primary);
-        transform: scale(1.15);
-    }
+
+
 
     .icon-btn.active {
         color: var(--accent-primary, #1db954);
@@ -1160,13 +1066,9 @@
         box-shadow: 0 0 5px var(--accent-primary, #1db954);
     }
 
-    .like-btn.liked {
-        color: var(--accent-primary, #1db954);
-    }
 
-    .like-btn.liked:hover {
-        transform: scale(1.15);
-    }
+
+
 
     /* Like button (mobile mini-player) */
     .mini-like-btn {

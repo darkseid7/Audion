@@ -96,6 +96,9 @@ impl SecretStore for Memory {
     }
 }
 struct Fixture {
+    metadata_missing: AtomicBool,
+    metadata_bad: AtomicBool,
+    metadata_large: AtomicBool,
     host: String,
     epoch: Mutex<String>,
     pairing: PairingService,
@@ -158,7 +161,17 @@ async fn route(State(f): State<Arc<Fixture>>, request: Request) -> Response {
   "/control/v1/pairing"=>{let invite=json["invitation"].as_str().unwrap();match f.pairing.request_wire(invite,"Phone".into()){Ok(p)=>{let credential=f.pairing.approve_pairing(p.id,Grants{control:f.control.load(Ordering::SeqCst),administration:true}).unwrap();*f.issued.lock().unwrap()=Some(credential);axum::Json(serde_json::json!({"status":"pending","pendingId":p.id.to_string()})).into_response()},Err(e)=>(axum::http::StatusCode::UNAUTHORIZED,axum::Json(e)).into_response()}},
   "/control/v1/pairing/status"=>{if f.pair_hold.load(Ordering::SeqCst){f.pair_entered.notify_one();f.pair_release.notified().await;}match f.issued.lock().unwrap().take(){Some(c)=>axum::Json(serde_json::json!({"status":"approved","deviceId":c.device_id().to_string(),"secret":URL_SAFE_NO_PAD.encode(c.secret())})).into_response(),None=>(axum::http::StatusCode::UNAUTHORIZED,axum::Json(transport_error(ControlErrorCode::Unauthorized))).into_response()}},
   "/control/v1/handshake"=>{ let mut response=serde_json::json!({"protocolVersion":1,"hostId":f.host,"hostEpoch":*f.epoch.lock().unwrap(),"capabilities":{"queries":["snapshot","tracks"],"intents":["pause"]},"grants":{"control":f.control.load(Ordering::SeqCst)}}); if f.omit_grants.load(Ordering::SeqCst) { response.as_object_mut().unwrap().remove("grants"); } axum::Json(response).into_response() },
-  "/control/v1/queries"=>{if json["type"]=="snapshot"{let captured=snapshot(&f.host,&f.epoch.lock().unwrap());if f.snapshot_hold.load(Ordering::SeqCst){f.snapshot_entered.notify_one();f.snapshot_release.notified().await;}axum::Json(QueryResult::Snapshot{snapshot:captured}).into_response()}else{if f.query_hold.load(Ordering::SeqCst){f.query_entered.notify_one();f.query_release.notified().await;}axum::Json(serde_json::json!({"type":"tracks","page":{"items":[],"nextCursor":null,"revision":1}})).into_response()}},
+  "/control/v1/browse-metadata"=>{
+    if f.metadata_missing.load(Ordering::SeqCst){return (axum::http::StatusCode::NOT_FOUND,axum::Json(transport_error(ControlErrorCode::NotFound))).into_response();}
+    if f.query_hold.load(Ordering::SeqCst){f.query_entered.notify_one();f.query_release.notified().await;}
+    if f.metadata_large.load(Ordering::SeqCst){return ([("content-type","application/json")]," ".repeat(256*1024+1)).into_response();}
+    let ids=json["trackIds"].as_array().unwrap();
+    let tracks:Vec<_>=ids.iter().map(|id|serde_json::json!({"trackId":id,"playCount":0})).collect();
+    let mut reply=serde_json::json!({"metadataVersion":1,"hostEpoch":json["hostEpoch"],"libraryRevision":json["libraryRevision"],"tracks":tracks});
+    if let Some(id)=json.get("albumId"){reply["album"]=serde_json::json!({"albumId":id,"totalDurationSeconds":202});}
+    if f.metadata_bad.load(Ordering::SeqCst){reply["tracks"][0]["trackId"]=serde_json::json!(999);}
+    axum::Json(reply).into_response()
+  },  "/control/v1/queries"=>{if json["type"]=="snapshot"{let captured=snapshot(&f.host,&f.epoch.lock().unwrap());if f.snapshot_hold.load(Ordering::SeqCst){f.snapshot_entered.notify_one();f.snapshot_release.notified().await;}axum::Json(QueryResult::Snapshot{snapshot:captured}).into_response()}else{if f.query_hold.load(Ordering::SeqCst){f.query_entered.notify_one();f.query_release.notified().await;}axum::Json(serde_json::json!({"type":"tracks","page":{"items":[],"nextCursor":null,"revision":1}})).into_response()}},
   "/control/v1/events"=>{f.poll_entered.notify_one();f.poll_release.notified().await;if f.poll_library.load(Ordering::SeqCst){axum::Json(serde_json::json!({"hostEpoch":*f.epoch.lock().unwrap(),"revision":1,"events":[{"type":"library","revision":1,"libraryRevision":2}]})).into_response()}else{axum::Json(serde_json::json!({"hostEpoch":*f.epoch.lock().unwrap(),"revision":0,"events":[]})).into_response()}},
   "/control/v1/commands"=>(axum::http::StatusCode::GATEWAY_TIMEOUT,axum::Json(transport_error(ControlErrorCode::OutcomeUnknown))).into_response(),
   "/control/v1/commands/status"=>{if f.outcome_expired.load(Ordering::SeqCst){(axum::http::StatusCode::BAD_REQUEST,axum::Json(transport_error(ControlErrorCode::OutcomeUnknown))).into_response()}else{axum::Json(serde_json::json!({"status":"applied","revision":0})).into_response()}},
@@ -217,6 +230,9 @@ async fn server() -> Server {
         .write_to(&mut image, image::ImageFormat::Png)
         .unwrap();
     let fixture = Arc::new(Fixture {
+        metadata_missing: AtomicBool::new(false),
+        metadata_bad: AtomicBool::new(false),
+        metadata_large: AtomicBool::new(false),
         host,
         epoch: Mutex::new("epoch".into()),
         pairing,
@@ -1115,4 +1131,60 @@ async fn endpoint_update_cancels_old_poll_and_does_not_adopt_failed_persistence(
         s.store.load(&s.fixture.host).unwrap().unwrap().as_slice(),
         original
     );
+}
+
+#[tokio::test]
+async fn browse_metadata_native_fences_and_bounds() {
+    let s=server().await;let f=connect(&s).await;
+    let reference=ArtworkReference{resource_id:"opaque-art".into(),revision:1};
+    assert!(matches!(s.session.request(&f,ControllerRequest::Media{reference}).await,Ok(ControllerReply::Media{..})));
+    let art_bytes=s.session.inner.lock().unwrap().cache.bytes;assert!(art_bytes>0);
+    let request=BrowseMetadataRequest{metadata_version:1,host_epoch:"epoch".into(),library_revision:1,track_ids:vec![42],album_id:Some(8)};
+    let reply=s.session.request(&f,ControllerRequest::BrowseMetadata{request:request.clone()}).await.unwrap();
+    let ControllerReply::BrowseMetadata{result}=reply else{panic!()};assert!(result.matches(&request));
+    assert_eq!(s.session.inner.lock().unwrap().cache.bytes,art_bytes);
+    s.fixture.metadata_bad.store(true,Ordering::SeqCst);
+    assert!(s.session.request(&f,ControllerRequest::BrowseMetadata{request:request.clone()}).await.is_err());
+    assert_eq!(s.session.inner.lock().unwrap().cache.bytes,art_bytes);
+    s.fixture.metadata_bad.store(false,Ordering::SeqCst);s.fixture.metadata_large.store(true,Ordering::SeqCst);
+    assert!(matches!(s.session.request(&f,ControllerRequest::BrowseMetadata{request:request.clone()}).await,Err(ControlError{code:ControlErrorCode::TooLarge,..})));
+    s.fixture.metadata_large.store(false,Ordering::SeqCst);
+    s.fixture.query_hold.store(true,Ordering::SeqCst);let session=s.session.clone();let fence=f.clone();
+    let held=tokio::spawn(async move{session.request(&fence,ControllerRequest::BrowseMetadata{request}).await});
+    s.fixture.query_entered.notified().await;s.session.begin_scope().unwrap();
+    assert!(matches!(held.await.unwrap(),Err(ControlError{code:ControlErrorCode::ResyncRequired,..})));
+    s.fixture.query_release.notify_one();
+}
+#[tokio::test]
+async fn browse_metadata_late_reply_discarded_after_suspend_or_host_switch() {
+    for host_switch in [false,true] {
+        let s=server().await;let f=connect(&s).await;
+        s.fixture.query_hold.store(true,Ordering::SeqCst);
+        let session=s.session.clone();let fence=f.clone();
+        let held=tokio::spawn(async move{session.request(&fence,ControllerRequest::BrowseMetadata{request:BrowseMetadataRequest{metadata_version:1,host_epoch:"epoch".into(),library_revision:1,track_ids:vec![42],album_id:None}}).await});
+        tokio::time::timeout(std::time::Duration::from_secs(5),s.fixture.query_entered.notified()).await.unwrap();
+        let next=Fence{scope_id:f.scope_id,generation:f.generation+1};
+        if host_switch {
+            assert!(s.session.connect(s.store.clone(),uuid::Uuid::new_v4().to_string(),next).await.is_err());
+        } else {s.session.suspend(&next).unwrap();}
+        assert!(matches!(held.await.unwrap(),Err(ControlError{code:ControlErrorCode::ResyncRequired,..})));
+        s.fixture.query_release.notify_one();assert!(s.session.inner.lock().unwrap().active.is_none());
+    }
+}
+
+#[tokio::test]
+async fn browse_metadata_missing_route_isolated_and_revocation_is_terminal() {
+    let s=server().await;let f=connect(&s).await;
+    s.session.request(&f,ControllerRequest::Media{reference:ArtworkReference{resource_id:"opaque-art".into(),revision:1}}).await.unwrap();
+    let before=s.session.inner.lock().unwrap().cache.bytes;assert!(before>0);
+    let request=BrowseMetadataRequest{metadata_version:1,host_epoch:"epoch".into(),library_revision:1,track_ids:vec![42],album_id:None};
+    s.fixture.metadata_missing.store(true,Ordering::SeqCst);
+    assert!(matches!(s.session.request(&f,ControllerRequest::BrowseMetadata{request:request.clone()}).await,Err(ControlError{code:ControlErrorCode::NotFound,..})));
+    assert!(s.session.inner.lock().unwrap().active.is_some());assert_eq!(s.session.inner.lock().unwrap().cache.bytes,before);
+    s.fixture.metadata_missing.store(false,Ordering::SeqCst);s.fixture.query_hold.store(true,Ordering::SeqCst);
+    let session=s.session.clone();let fence=f.clone();let held=tokio::spawn(async move{session.request(&fence,ControllerRequest::BrowseMetadata{request}).await});
+    tokio::time::timeout(std::time::Duration::from_secs(5),s.fixture.query_entered.notified()).await.unwrap();
+    s.fixture.revoked.store(true,Ordering::SeqCst);s.fixture.query_release.notify_one();
+    assert!(matches!(held.await.unwrap(),Err(ControlError{code:ControlErrorCode::Unauthorized,..})));
+    assert!(s.session.inner.lock().unwrap().active.is_none());assert_eq!(s.session.inner.lock().unwrap().cache.bytes,0);
 }

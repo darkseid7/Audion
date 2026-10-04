@@ -256,7 +256,7 @@ async fn route_inner(
             &secret,
         )?)
     };
-    let limit = if device.is_none() { 4096 } else { 1024 * 1024 };
+    let limit = if device.is_none() { 4096 } else if path == "/control/v1/browse-metadata" { 64 * 1024 } else { 1024 * 1024 };
     let body = Zeroizing::new(
         to_bytes(request.into_body(), limit)
             .await
@@ -407,6 +407,21 @@ async fn route_inner(
                     .await?,
             )
             .into_response())
+        }
+        "/control/v1/browse-metadata" => {
+            let input: super::protocol::BrowseMetadataRequest = decode(&body)?;
+            let device = device.unwrap();
+            let slot = QuerySlot::acquire(deps.clone(), device.id)?;
+            let bytes = tokio::spawn(async move {
+                let _slot = slot;
+                deps.commands.authenticated_snapshot(&device)?;
+                let result = deps.commands.query_browse_metadata(input).await?;
+                deps.commands.authenticated_snapshot(&device)?;
+                let bytes = serde_json::to_vec(&result).map_err(|_|error(ControlErrorCode::ExecutionFailed))?;
+                if bytes.len() > 256 * 1024 { return Err(error(ControlErrorCode::TooLarge)); }
+                Ok::<_,ControlError>(bytes)
+            }).await.map_err(|_|error(ControlErrorCode::HostNotReady))??;
+            Ok(([("content-type","application/json"),("x-content-type-options","nosniff")], bytes).into_response())
         }
         // Library resources/admin remain explicit later-task seams.
         "/control/v1/admin" => Err(error(ControlErrorCode::PermissionRequired)),
@@ -603,6 +618,55 @@ mod tests {
         Arc::new(
             HostDependencies::new(load_or_create_identity(store.as_ref()).unwrap(), store).unwrap(),
         )
+    }
+    #[tokio::test]
+    async fn browse_metadata_route_auth_limits_and_shared_quota() {
+        use crate::controller::{commands::AuthoritativeWindow, protocol::HostUpdate, queries::LibraryQueries};
+        let deps=fixture();
+        let conn=rusqlite::Connection::open_in_memory().unwrap();crate::db::schema::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO tracks(id,path,play_count) VALUES(42,'private-path',12)",[]).unwrap();
+        let mut library=LibraryQueries::new(crate::db::Database{conn:Arc::new(Mutex::new(conn))});
+        let hold=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered=Arc::new(tokio::sync::Semaphore::new(0));
+        let release=Arc::new((Mutex::new(false),std::sync::Condvar::new()));
+        let (h,e,r)=(hold.clone(),entered.clone(),release.clone());
+        library.metadata_probe(Arc::new(move||{
+            if h.load(std::sync::atomic::Ordering::SeqCst) {
+                e.add_permits(1);let (lock,cv)=&*r;let mut done=lock.lock().unwrap();
+                while !*done {done=cv.wait(done).unwrap();}
+            }
+        }));
+        deps.commands.install_library(Arc::new(library)).unwrap();
+        let invitation=super::super::pairing::create_invitation(&deps.identity,"192.168.1.2:9010".parse().unwrap(),SystemTime::now()).unwrap();
+        deps.pairing.register_invitation(&invitation).unwrap();
+        let pending=deps.pairing.request_pairing(invitation,"Browse only".into()).unwrap();
+        let credential=deps.pairing.approve_pairing(pending.id,Grants{control:false,administration:true}).unwrap();
+        let lease=deps.commands.register_coordinator(AuthoritativeWindow::new("main".into(),Arc::new(|_|Ok(())))).unwrap();
+        let mut snapshot=super::super::events::tests::projection(&lease.host_epoch.to_string());snapshot.host_id=deps.identity.id().into();
+        deps.commands.publish("main",&lease,HostUpdate::Projection{snapshot,presentation:None}).unwrap();deps.commands.ready("main",&lease).unwrap();
+        let context=deps.commands.library_context_async(None).await.unwrap();
+        let body=serde_json::json!({"metadataVersion":1,"hostEpoch":context.host_epoch,"libraryRevision":context.revision,"trackIds":[42]}).to_string();
+        let auth=format!("Bearer {}:{}",credential.device_id(),URL_SAFE_NO_PAD.encode(credential.secret()));
+        let call_metadata=|body:String,authorized:bool|{
+            let mut b=axum::http::Request::builder().method("POST").uri("/control/v1/browse-metadata");if authorized{b=b.header("authorization",&auth);}
+            let mut req=b.body(Body::from(body)).unwrap();req.extensions_mut().insert(ConnectInfo("192.168.1.3:23456".parse::<SocketAddr>().unwrap()));router(deps.clone()).oneshot(req)
+        };
+        assert_eq!(call_metadata(body.clone(),false).await.unwrap().status(),StatusCode::UNAUTHORIZED);
+        let response=call_metadata(body.clone(),true).await.unwrap();assert_eq!(response.status(),StatusCode::OK);
+        let bytes=to_bytes(response.into_body(),256*1024).await.unwrap();let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["tracks"][0]["playCount"],12);assert!(!String::from_utf8_lossy(&bytes).contains("private-path"));
+        assert_eq!(call_metadata(" ".repeat(64*1024+1),true).await.unwrap().status(),StatusCode::PAYLOAD_TOO_LARGE);
+        let mut invalid:serde_json::Value=serde_json::from_str(&body).unwrap();invalid["trackIds"]=serde_json::json!(vec![42;1001]);
+        assert_eq!(call_metadata(invalid.to_string(),true).await.unwrap().status(),StatusCode::BAD_REQUEST);
+        let slots:Vec<_>=(0..4).map(|_|QuerySlot::acquire(deps.clone(),credential.device_id()).unwrap()).collect();
+        assert_eq!(call_metadata(body.clone(),true).await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);drop(slots);
+        hold.store(true,std::sync::atomic::Ordering::SeqCst);
+        let held=tokio::spawn(call_metadata(body.clone(),true));
+        let gate=tokio::time::timeout(Duration::from_secs(5),entered.acquire()).await.unwrap().unwrap();gate.forget();
+        deps.pairing.revoke_device(credential.device_id()).unwrap();
+        *release.0.lock().unwrap()=true;release.1.notify_all();
+        assert_eq!(held.await.unwrap().unwrap().status(),StatusCode::UNAUTHORIZED);
+        assert_eq!(call_metadata(body,true).await.unwrap().status(),StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

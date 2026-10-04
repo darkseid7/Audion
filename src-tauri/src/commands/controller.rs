@@ -809,6 +809,7 @@ pub use desktop::*;
     deny_unknown_fields
 )]
 pub enum ControllerRequest {
+    BrowseMetadata { request: crate::controller::protocol::BrowseMetadataRequest },
     Command {
         envelope: CommandEnvelope,
     },

@@ -1,6 +1,10 @@
 // Database schema initialization
 use rusqlite::{Connection, Result};
 
+#[cfg(test)]
+#[path = "schema_revision_tests.rs"]
+mod revision_tests;
+
 fn normalize_artist_for_album_key(artist: &str) -> Option<String> {
     let trimmed = artist.trim();
     if trimmed.is_empty() {
@@ -514,6 +518,8 @@ fn initialize_controller_revision(conn: &Connection) -> Result<()> {
             .collect::<Result<Vec<_>>>()?;
         let changed = columns
             .iter()
+            // Playback statistics are not part of the controller library projection.
+            .filter(|c| table != "tracks" || c.as_str() != "play_count")
             .map(|c| format!("OLD.\"{c}\" IS NOT NEW.\"{c}\""))
             .collect::<Vec<_>>()
             .join(" OR ");
@@ -523,7 +529,22 @@ fn initialize_controller_revision(conn: &Connection) -> Result<()> {
             } else {
                 String::new()
             };
-            conn.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS controller_revision_{table}_{event} AFTER {event} ON {table}{when} BEGIN UPDATE controller_library_revision SET stamp=stamp+1 WHERE id=1; END;"))?;
+            let create = format!("CREATE TRIGGER IF NOT EXISTS controller_revision_{table}_{event} AFTER {event} ON {table}{when} BEGIN UPDATE controller_library_revision SET stamp=stamp+1 WHERE id=1; END;");
+            if table == "tracks" && event == "UPDATE" {
+                // Replace the old all-column policy on existing installations atomically.
+                // Retain the monotonic stamp and every metadata/artwork column.
+                if let Err(error) = conn.execute_batch(&format!(
+                    "SAVEPOINT controller_revision_policy;
+                     DROP TRIGGER IF EXISTS controller_revision_tracks_UPDATE;
+                     {create}
+                     RELEASE controller_revision_policy;"
+                )) {
+                    conn.execute_batch("ROLLBACK TO controller_revision_policy; RELEASE controller_revision_policy;")?;
+                    return Err(error);
+                }
+            } else {
+                conn.execute_batch(&create)?;
+            }
         }
     }
     Ok(())

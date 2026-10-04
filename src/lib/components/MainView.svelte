@@ -1,4 +1,5 @@
 <script lang="ts">
+    import Navigation from "./presentation/Navigation.svelte";
     import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { albumViewTransitionDuration } from "$lib/stores/album-view";
     import {
@@ -493,6 +494,17 @@
             return next <= 0 ? 0 : next;
         });
     }
+
+    $: librarySections = [{ id: "library", label: "", rows: [
+        { id: "tracks", label: "Songs", icon: "tracks" as const, active: $currentView.type === "tracks", availability: { enabled: true as const } },
+        { id: "albums", label: "Albums", icon: "albums" as const, active: $currentView.type === "albums", availability: { enabled: true as const } },
+        { id: "artists", label: "Artists", icon: "artists" as const, active: $currentView.type === "artists", availability: { enabled: true as const } },
+        { id: "playlists", label: "Playlists", icon: "playlists" as const, active: $currentView.type === "playlists", availability: { enabled: true as const } }
+    ] }];
+    function navigateLibrary(id: string): void {
+        const actions: Record<string, () => void> = { tracks: goToTracks, albums: goToAlbums, artists: goToArtists, playlists: goToPlaylists };
+        actions[id]?.();
+    }
 </script>
 
 <svelte:window
@@ -620,38 +632,7 @@
         </div>
 
         {#if !isSearching}
-            <div class="mobile-library-tabs-wrapper">
-                <div class="mobile-library-tabs">
-                    <button
-                        class="lib-tab"
-                        class:active={$currentView.type === "tracks"}
-                        on:click={goToTracks}
-                    >
-                        Songs
-                    </button>
-                    <button
-                        class="lib-tab"
-                        class:active={$currentView.type === "albums"}
-                        on:click={goToAlbums}
-                    >
-                        Albums
-                    </button>
-                    <button
-                        class="lib-tab"
-                        class:active={$currentView.type === "artists"}
-                        on:click={goToArtists}
-                    >
-                        Artists
-                    </button>
-                    <button
-                        class="lib-tab"
-                        class:active={$currentView.type === "playlists"}
-                        on:click={goToPlaylists}
-                    >
-                        Playlists
-                    </button>
-                </div>
-            </div>
+            <Navigation variant="library" sections={librarySections} onNavigate={navigateLibrary} />
         {/if}
     {/if}
 
@@ -1096,49 +1077,9 @@
         color: var(--text-primary);
     }
 
-    .mobile-library-tabs-wrapper {
-        flex-shrink: 0;
-        padding: var(--spacing-md) var(--spacing-md) 0;
-        background-color: var(--bg-base);
-    }
 
-    .mobile-library-tabs {
-        display: flex;
-        gap: 8px;
-        overflow-x: auto;
-        scrollbar-width: none;
-        -webkit-overflow-scrolling: touch;
-        -webkit-tap-highlight-color: transparent;
-        user-select: none;
-    }
 
-    .mobile-library-tabs::-webkit-scrollbar {
-        display: none;
-    }
 
-    .lib-tab {
-        flex-shrink: 0;
-        padding: 8px 16px;
-        border-radius: var(--radius-full);
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: var(--text-primary);
-        background-color: rgba(255, 255, 255, 0.07);
-        border: none;
-        cursor: pointer;
-        transition: all var(--transition-fast);
-        -webkit-tap-highlight-color: transparent;
-        white-space: nowrap;
-    }
-
-    .lib-tab.active {
-        background-color: var(--accent-primary);
-        color: var(--bg-base);
-    }
-
-    .lib-tab:active:not(.active) {
-        background-color: rgba(255, 255, 255, 0.12);
-    }
 
     /* Mobile view header adjustments */
     @media (max-width: 768px) {

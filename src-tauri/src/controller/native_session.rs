@@ -68,6 +68,7 @@ pub(crate) enum ConnectionReply {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum ControllerReply {
+    BrowseMetadata { result: BrowseMetadataResult },
     Query { result: QueryResult },
     Command { result: ExecutionResult },
     CommandStatus { result: CommandStatus },
@@ -556,6 +557,13 @@ impl NativeSession {
         };
         let operation = async {
             let reply = match request {
+                ControllerRequest::BrowseMetadata { request } => {
+                    if request.host_epoch != active.epoch || request.library_revision != active.library.load(Ordering::SeqCst) { return Err(transport_error(ControlErrorCode::ResyncRequired)); }
+                    let result = active.transport.browse_metadata(&request).await?;
+                    Self::validate_epoch(&active).await?;
+                    if request.library_revision != active.library.load(Ordering::SeqCst) { return Err(transport_error(ControlErrorCode::ResyncRequired)); }
+                    ControllerReply::BrowseMetadata { result }
+                }
                 ControllerRequest::Handshake {} => ControllerReply::Handshake {
                     result: Self::validate_epoch(&active).await?,
                 },

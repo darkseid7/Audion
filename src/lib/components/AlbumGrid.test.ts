@@ -63,6 +63,9 @@ function renderAlbums(savedView?: string, deniedStorage = false, playing = true)
     runInNewContext(outputText, {
       exports, localStorage: storage,
       require(name: string) {
+        if (name === "$lib/application/presentation/browse") return load("../application/presentation/browse.ts");
+        if (name.startsWith("./presentation/") && name.endsWith(".svelte")) return load(name);
+        if (name === "../MediaCard.svelte") return modules["./MediaCard.svelte"];
         if (name === "$lib/stores/album-view") return load("../stores/album-view.ts");
         if (!(name in modules)) throw new Error(`Missing test dependency: ${name}`);
         return modules[name];

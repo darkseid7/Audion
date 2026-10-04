@@ -1,4 +1,5 @@
 <script lang="ts">
+    import Navigation from "./presentation/Navigation.svelte";
     import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { mobileSearchOpen } from "$lib/stores/mobile";
     import {
@@ -87,150 +88,23 @@
             uiSlotManager.unregisterContainer("mobile:bottomnav");
         };
     });
+
+    $: navigationSections = [{ id: "tabs", label: "", rows: [
+        { id: "home", label: "Home", icon: "home" as const, active: activeTab === "home", availability: { enabled: true as const } },
+        { id: "library", label: "Library", icon: "library" as const, active: activeTab === "library", availability: { enabled: true as const } },
+        { id: "plugins", label: "Plugins", icon: "plugins" as const, active: activeTab === "plugins", availability: { enabled: true as const } },
+        { id: "actions", label: "Actions", icon: "actions" as const, active: $pluginDrawerOpen, availability: { enabled: true as const } }
+    ] }];
+    function navigateShared(id: string): void {
+        if (!$desktopEffectsEnabled) return;
+        if (id === "actions") pluginDrawerOpen.set(true);
+        else handleTabClick(id as MobileTab);
+    }
 </script>
 {#if $desktopEffectsEnabled}
 
-<nav class="bottom-nav" class:has-player={!!$currentTrack}>
-    <button
-        class="nav-item"
-        class:active={activeTab === "home"}
-        on:click={() => handleTabClick("home")}
-    >
-        <svg
-            class="nav-icon"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            width="24"
-            height="24"
-        >
-            <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" />
-        </svg>
-        <span>Home</span>
-    </button>
-
-    <button
-        class="nav-item"
-        class:active={activeTab === "library"}
-        on:click={() => handleTabClick("library")}
-    >
-        <svg
-            class="nav-icon"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            width="24"
-            height="24"
-        >
-            <path
-                d="M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 5h-3v5.5a2.5 2.5 0 0 1-5 0 2.5 2.5 0 0 1 2.5-2.5c.57 0 1.08.19 1.5.51V5h4v2zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6z"
-            />
-        </svg>
-        <span>Library</span>
-    </button>
-
-    <button
-        class="nav-item"
-        class:active={activeTab === "plugins"}
-        on:click={() => handleTabClick("plugins")}
-    >
-        <svg
-            class="nav-icon"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            width="24"
-            height="24"
-        >
-            <path
-                d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7s2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"
-            />
-        </svg>
-        <span>Plugins</span>
-    </button>
-
-    <!-- Plugin actions drawer trigger -->
-    <button
-        class="nav-item"
-        class:active={$pluginDrawerOpen}
-        on:click={() => pluginDrawerOpen.set(true)}
-    >
-        <svg
-            class="nav-icon"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            width="24"
-            height="24"
-        >
-            <!-- Bolt / flash icon -->
-            <path d="M7 2v11h3v9l7-12h-4l4-8z" />
-        </svg>
-        <span>Actions</span>
-    </button>
-
-    <!-- Plugin slot for bottom nav extensions -->
-    <div class="plugin-slot" bind:this={pluginSlot}></div>
-</nav>
+<Navigation variant="compact" sections={navigationSections} hasPlayer={!!$currentTrack} onNavigate={navigateShared}>
+    <div slot="extensions" class="plugin-slot" bind:this={pluginSlot}></div>
+</Navigation>
 
 {/if}
-<style>
-    .bottom-nav {
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        width: 100%;
-        height: calc(60px + env(safe-area-inset-bottom));
-        background-color: var(--bg-base);
-        border-top: 1px solid var(--border-color);
-        display: flex;
-        justify-content: space-around;
-        align-items: flex-start;
-        padding-top: 6px;
-        padding-bottom: env(safe-area-inset-bottom);
-        padding-left:var(--safe-area-left);
-        padding-right:var(--safe-area-right);
-        z-index: 1000;
-        -webkit-tap-highlight-color: transparent;
-        user-select: none;
-    }
-
-    .nav-item {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        color: var(--text-subdued);
-        text-align: center;
-        font-size: 10px;
-        font-weight: 500;
-        gap: 2px;
-        padding: 4px 12px;
-        border-radius: var(--radius-sm);
-        transition: color var(--transition-fast);
-        background: none;
-        border: none;
-        cursor: pointer;
-        min-width: 64px;
-        min-height: 48px;
-        -webkit-tap-highlight-color: transparent;
-    }
-
-    .nav-item:active {
-        transform: scale(0.92);
-    }
-
-    .nav-item.active {
-        color: var(--text-primary);
-    }
-
-    .nav-item.active :global(.nav-icon) {
-        color: var(--text-primary);
-    }
-
-    .nav-icon {
-        display: block;
-        width: 24px;
-        height: 24px;
-    }
-
-    .plugin-slot {
-        display: none; /* Hidden by default, plugins can override */
-    }
-</style>

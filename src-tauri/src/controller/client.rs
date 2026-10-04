@@ -355,6 +355,15 @@ impl NativeTransport {
         self.json("/control/v1/handshake", &serde_json::json!({}))
             .await
     }
+    pub(crate) async fn browse_metadata(&self, request: &super::protocol::BrowseMetadataRequest) -> Result<super::protocol::BrowseMetadataResult, ControlError> {
+        if !request.valid() { return Err(transport_error(ControlErrorCode::InvalidRequest)); }
+        let body = Zeroizing::new(serde_json::to_vec(request).map_err(|_|invalid_pairing())?);
+        if body.len()>64*1024 { return Err(transport_error(ControlErrorCode::TooLarge)); }
+        let response = self.send(&format!("{}/control/v1/browse-metadata",self.pairing.base_url()), &body,256*1024).await?;
+        let result: super::protocol::BrowseMetadataResult = serde_json::from_slice(&response.bytes).map_err(|_|transport_error(ControlErrorCode::Unsupported))?;
+        if !result.matches(request) { return Err(transport_error(ControlErrorCode::Unsupported)); }
+        Ok(result)
+    }
     pub(crate) async fn query(&self, q: &ApplicationQuery) -> Result<QueryResult, ControlError> {
         self.json("/control/v1/queries", q).await
     }

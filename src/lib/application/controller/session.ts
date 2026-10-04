@@ -1,5 +1,7 @@
 import { writable, readonly } from "svelte/store";
 import { parseEnvelope } from "../protocol";
+import { parseBrowseMetadataQuery, parseBrowseMetadataResult } from "../browse-metadata";
+import type { BrowseMetadataRequest, BrowseMetadataResult } from "../types";
 import type { ApplicationPort, ApplicationQuery, ApplicationUpdate, ArtworkHandle, ArtworkReference, CommandEnvelope, ExecutionResult, EventBatch, EventCursor, HostSnapshot, QueryResult, ControlError } from "../types";
 import { createArtworkHandle, type NativeImage } from "./media";
 import { createReadAdmission, recoverRead } from "./read-recovery";
@@ -9,6 +11,7 @@ export interface NativeControllerFence {
 }
 export interface AuthenticatedConnection { snapshot: HostSnapshot; grants: { control: boolean } }
 export interface ControllerNativeBridge {
+    browseMetadata(fence: NativeControllerFence, request: BrowseMetadataRequest): Promise<BrowseMetadataResult>;
     beginScope(): Promise<string>;
     connect(hostId: string, fence: NativeControllerFence): Promise<AuthenticatedConnection>;
     updateEndpoint(hostId: string, endpoint: string, fence: NativeControllerFence): Promise<AuthenticatedConnection>;
@@ -44,11 +47,35 @@ export interface ControllerState {
     pairingFingerprint?: string;
 }
 const failure = (code: ControlError["code"], message = "Controller session is unavailable."): ControlError => ({ code, message, retryable: code === "host_not_ready" });
+/** Session-owned, memory-only LRU. Values are private copies, never live capabilities. */
+function navigationCache<T>(maxEntries: number, maxBytes: number) {
+    const entries = new Map<string, { value: T; bytes: number }>();
+    let bytes = 0;
+    return {
+        get(key: string): T | undefined {
+            const entry = entries.get(key);
+            if (!entry) return;
+            entries.delete(key); entries.set(key, entry); return entry.value;
+        },
+        set(key: string, value: T, weight: number) {
+            const old = entries.get(key); if (old) { bytes -= old.bytes; entries.delete(key); }
+            if (weight > maxBytes) return;
+            entries.set(key, { value, bytes: weight }); bytes += weight;
+            while (entries.size > maxEntries || bytes > maxBytes) {
+                const oldest = entries.keys().next().value!;
+                bytes -= entries.get(oldest)!.bytes; entries.delete(oldest);
+            }
+        },
+        clear() { entries.clear(); bytes = 0; }
+    };
+}
 export function createControllerSession(native: ControllerNativeBridge, options: {
     random?: () => number;
 } = {}) {
     let value: ControllerState = { currentHostId: null, snapshot: null, grants: null, ready: false, status: "disconnected" };
     const state = writable(value), listeners = new Set<(update: ApplicationUpdate) => void>(), media = new Set<ArtworkHandle>();
+    const pages = navigationCache<QueryResult>(8, 2 * 1024 * 1024);
+    const images = navigationCache<NativeImage>(192, 24 * 1024 * 1024);
     let generation = 0, scope: Promise<string> | undefined, timer: ReturnType<typeof setTimeout> | undefined, attempts = 0;
     let foreground = true;
     let lifecycle = new AbortController();
@@ -77,6 +104,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         for (const h of media)
             h.dispose();
         media.clear();
+        pages.clear(); images.clear();
         publish({ ready: false, snapshot: null, grants: null, pairingFingerprint: undefined });
         return generation;
     };
@@ -96,7 +124,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             throw failure("host_not_ready");
         return { g: generation, snapshot: value.snapshot };
     };
-    async function read<T>(revision: ReadRevision, signal: AbortSignal | undefined, operation: (f: NativeControllerFence, check: () => void) => Promise<T>, discard?: (result: T) => void): Promise<T> {
+    async function read<T>(revision: ReadRevision, signal: AbortSignal | undefined, operation: (f: NativeControllerFence, check: () => void) => Promise<T>, discard?: (result: T) => void, admission: "foreground" | "optional" = "foreground"): Promise<T> {
         const { g, snapshot } = ready();
         const owner = lifecycle.signal, cancel = new AbortController();
         const abort = () => cancel.abort();
@@ -111,7 +139,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
                 throw failure("resync_required");
         };
         try {
-            const result = await recoverRead(cancel.signal, () => admitRead(cancel.signal, async () => {
+            const result = await recoverRead(cancel.signal, () => (admission === "optional" ? admitRead.tryRun : admitRead)(cancel.signal, async () => {
                 check();
                 const f = await fence(g);
                 // Scope resolution and admission are asynchronous; check at native entry.
@@ -193,6 +221,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
                             break;
                         case "library":
                             next.revisions.libraryRevision = event.libraryRevision;
+                            pages.clear(); images.clear();
                             for (const h of media)
                                 h.dispose();
                             media.clear();
@@ -329,12 +358,39 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         }
     }
     const port: ApplicationPort = {
-        async query(query, signal) {
+        async queryBrowseMetadata(query, signal) {
+            const input = parseBrowseMetadataQuery(query);
+            const { snapshot } = ready();
+            const request: BrowseMetadataRequest = { ...input, metadataVersion: 1, hostEpoch: snapshot.hostEpoch, libraryRevision: snapshot.revisions.libraryRevision };
+            let settlement: Promise<unknown> | undefined;
+            try {
+                return await read("libraryRevision", signal, async f => {
+                    const pending = native.browseMetadata(f, request);
+                    settlement = pending.catch(() => undefined);
+                    return parseBrowseMetadataResult(await pending, request);
+                }, undefined, "optional");
+            } finally {
+                // Owner coalescing must track native completion, not just consumer abort.
+                // Foreground reads still keep the other lane and cancel promptly.
+                await settlement;
+            }
+        },
+        async query(query, signal, options) {
             const revision = query.type === "queue" ? "queueRevision" : query.type === "outputs" ? "outputRevision" : "libraryRevision";
             return read(revision, signal, async (f, check) => {
+                // Snapshot, queue and outputs contain state outside the library domain.
+                const cacheable = query.type !== "snapshot" && query.type !== "queue" && query.type !== "outputs";
+                const key = JSON.stringify(query), cached = cacheable && !options?.refresh ? pages.get(key) : undefined;
+                if (cached) return structuredClone(cached);
                 const result = await native.query(f, query);
                 check();
                 if (result.type !== query.type) throw failure("unsupported");
+                const confirmed = result.type === "album_detail" ? result.revision : "page" in result ? result.page.revision : undefined;
+                if (cacheable && confirmed === value.snapshot?.revisions.libraryRevision) {
+                    const copy = structuredClone(result);
+                    pages.set(key, copy, JSON.stringify(copy).length * 2 + key.length * 2);
+                    return structuredClone(copy);
+                }
                 return result;
             });
         },
@@ -387,10 +443,16 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         },
         async resolveArtwork(reference, signal) {
             return read("libraryRevision", signal, async (f, check) => {
-                const image = await native.media(f, reference);
+                // Presentation identity must never cross the native capability boundary.
+                const request = { resourceId: reference.resourceId, revision: reference.revision };
+                const key = JSON.stringify(request), cached = request.revision === value.snapshot?.revisions.libraryRevision ? images.get(key) : undefined;
+                const image = cached ?? await native.media(f, request);
                 const handle = createArtworkHandle(image);
                 try { check(); }
                 catch (error) { handle.dispose(); throw error; }
+                if (!cached && reference.revision === value.snapshot?.revisions.libraryRevision) {
+                    images.set(key, { mime: image.mime, bytes: new Uint8Array(image.bytes) }, image.bytes.length + key.length * 2);
+                }
                 const owned = { src: handle.src, dispose() {
                     handle.dispose();
                     media.delete(owned);

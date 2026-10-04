@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { theme, presetAccents, themePresets, type ThemeMode } from "$lib/stores/theme";
+  import AppearanceSettings from "./presentation/AppearanceSettings.svelte";
+  import { theme, type ThemeMode } from "$lib/stores/theme";
   import { appSettings } from "$lib/stores/settings";
   import { equalizer, EQ_PRESETS } from "$lib/stores/equalizer";
   import { _, locale } from "svelte-i18n";
@@ -65,7 +66,6 @@
     estimated_time_remaining_ms: number;
   }
 
-  let customColorInput = "#1DB954";
   let showUpdatePopup = false;
 
   // Database reset state
@@ -156,10 +156,10 @@
     localStorage.setItem("audion_language", lang);
   }
 
-  function handleCustomColorAdd() {
-    if (customColorInput && /^#[0-9A-Fa-f]{6}$/.test(customColorInput)) {
-      theme.addCustomColor(customColorInput);
-      theme.setAccentColor(customColorInput);
+  function handleCustomColorAdd(color: string) {
+    if (/^#[0-9A-Fa-f]{6}$/.test(color)) {
+      theme.addCustomColor(color);
+      theme.setAccentColor(color);
     }
   }
 
@@ -1228,10 +1228,8 @@
       </section>
 
       <!-- Section: Appearance -->
-      <section class="settings-section" aria-labelledby="appearance-heading">
-        <h2 id="appearance-heading" class="section-label">{$_('settings.language', { default: 'Appearance' })}</h2>
-        <div class="settings-card">
-           <div class="inner-section">
+      <AppearanceSettings state={$theme} onModeChange={handleModeChange} onAccentChange={handleAccentChange} onCustomAccent={handleCustomColorAdd}>
+        <svelte:fragment slot="language">           <div class="inner-section">
              <span class="setting-title">{$_('settings.selectLanguage', { default: 'Language' })}</span>
              <div class="segmented-pill" style="margin-top: 6px;">
                <button class="segment-btn" class:active={$locale === 'en'} on:click={() => changeLanguage('en')}>English</button>
@@ -1240,43 +1238,8 @@
              </div>
            </div>
 
-           <div class="divider"></div>
-
-           <div class="inner-section">
-             <span class="setting-title">{$_('settings.themeMode', { default: 'Theme mode' })}</span>
-             <div class="segmented-pill" style="margin-top: 6px;">
-               <button class="segment-btn" class:active={$theme.mode === 'dark'} on:click={() => handleModeChange('dark')}>{$_('settings.dark', { default: 'Dark' })}</button>
-               <button class="segment-btn" class:active={$theme.mode === 'light'} on:click={() => handleModeChange('light')}>{$_('settings.light', { default: 'Light' })}</button>
-               <button class="segment-btn" class:active={$theme.mode === 'system'} on:click={() => handleModeChange('system')}>{$_('settings.system', { default: 'System' })}</button>
-             </div>
-           </div>
-
-           <div class="divider"></div>
-
-           <div class="inner-section">
-             <span class="setting-title">{$_('settings.themePresets', { default: 'Theme presets' })}</span>
-             <div class="theme-presets-grid" style="margin-top: 6px;">
-               {#each themePresets as preset}
-                 <button
-                   class="theme-preset-card"
-                   class:active={$theme.mode === preset.id}
-                   on:click={() => handleModeChange(preset.id)}
-                   title={preset.description}
-                 >
-                   <div class="preset-preview" style="background: {preset.preview.bg};">
-                     <span class="preset-icon" style="color: {preset.preview.accent}; text-shadow: 0 0 8px {preset.preview.accent};">{preset.icon}</span>
-                     <div class="preset-colors">
-                       <span class="preset-dot" style="background: {preset.preview.accent};"></span>
-                       <span class="preset-dot" style="background: {preset.preview.text};"></span>
-                     </div>
-                   </div>
-                   <span class="preset-name">{preset.name}</span>
-                 </button>
-               {/each}
-             </div>
-           </div>
-
-           {#if !isAndroid()}
+</svelte:fragment>
+        <svelte:fragment slot="after-presets">           {#if !isAndroid()}
              <div class="divider"></div>
              <div class="inner-section">
                <span class="setting-title">{$_('settings.windowStartMode', { default: 'Window start mode' })}</span>
@@ -1288,28 +1251,8 @@
              </div>
 
 
-           {/if}
-
-           <div class="divider"></div>
-
-           {#if $theme.mode === 'dark' || $theme.mode === 'light' || $theme.mode === 'system'}
-           <div class="inner-section">
-             <span class="setting-title">Accent color</span>
-             <div class="color-grid-compact" style="margin-top: 6px;">
-               {#each presetAccents as preset}
-                 <button
-                   class="color-swatch-sm"
-                   class:active={$theme.accentColor === preset.color}
-                   style="background-color: {preset.color}"
-                   on:click={() => handleAccentChange(preset.color)}
-                   title={preset.name}
-                 ></button>
-               {/each}
-             </div>
-           </div>
-           {/if}
-        </div>
-      </section>
+           {/if}</svelte:fragment>
+      </AppearanceSettings>
 
       <!-- Section: Privacy -->
       <section class="settings-section" aria-labelledby="privacy-heading">
@@ -1695,58 +1638,6 @@
   }
 
   /* Custom Color Input */
-  .custom-color-input {
-    display: flex;
-    gap: var(--spacing-sm);
-    align-items: center;
-  }
-
-  .color-picker {
-    width: 40px;
-    height: 40px;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    padding: 0;
-  }
-
-  .color-picker::-webkit-color-swatch-wrapper {
-    padding: 0;
-  }
-
-  .color-picker::-webkit-color-swatch {
-    border: none;
-    border-radius: var(--radius-sm);
-  }
-
-  .color-text {
-    flex: 1;
-    padding: var(--spacing-sm) var(--spacing-md);
-    background-color: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-family: monospace;
-    max-width: 120px;
-  }
-
-  .color-text:focus {
-    outline: none;
-    border-color: var(--accent-primary);
-  }
-
-  .add-btn {
-    padding: var(--spacing-sm) var(--spacing-md);
-    background-color: var(--accent-primary);
-    color: var(--bg-base);
-    font-weight: 600;
-    border-radius: var(--radius-sm);
-    transition: all var(--transition-fast);
-  }
-
-  .add-btn:hover {
-    background-color: var(--accent-hover);
-  }
 
   .inner-section {
     display: flex;
@@ -2002,98 +1893,8 @@
   }
 
   /* Color Grid Refinement */
-  .color-grid-compact {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    padding: 4px 0;
-  }
 
   /* Theme Presets Grid */
-  .theme-presets-grid {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    padding: 4px 0;
-  }
-
-  .theme-preset-card {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 0;
-    background: none;
-    border: 2px solid transparent;
-    border-radius: var(--radius-md);
-    cursor: pointer;
-    transition: border-color 0.2s, transform 0.15s;
-  }
-
-  .theme-preset-card:hover {
-    transform: scale(1.05);
-  }
-
-  .theme-preset-card.active {
-    border-color: var(--accent-primary);
-  }
-
-  .preset-preview {
-    width: 80px;
-    height: 50px;
-    border-radius: var(--radius-sm);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    overflow: hidden;
-  }
-
-  .preset-icon {
-    font-size: 1.1rem;
-    line-height: 1;
-  }
-
-  .preset-colors {
-    display: flex;
-    gap: 4px;
-  }
-
-  .preset-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-  }
-
-  .preset-name {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    white-space: nowrap;
-  }
-
-  .theme-preset-card.active .preset-name {
-    color: var(--accent-primary);
-  }
-
-  .color-swatch-sm {
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-full);
-    cursor: pointer;
-    border: 2px solid transparent;
-    transition: transform 0.2s, border-color 0.2s;
-    padding: 0;
-  }
-
-  .color-swatch-sm:hover {
-    transform: scale(1.2);
-  }
-
-  .color-swatch-sm.active {
-    border-color: var(--text-primary);
-    box-shadow: 0 0 0 2px var(--bg-surface);
-  }
 
   /* About Section */
   .about-row {
