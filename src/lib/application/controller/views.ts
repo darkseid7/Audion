@@ -31,6 +31,11 @@ export function createControllerPage(port: () => ApplicationPort = getApplicatio
   }
  }
  return { state: readonly(state), setQuery(value: ApplicationQuery) { if (JSON.stringify(value) !== JSON.stringify(query)) { query = value; reset(); } },
-  more: () => get(state).nextCursor ? load(get(state).nextCursor!) : Promise.resolve(), refresh: reset,
+  more: () => get(state).nextCursor ? load(get(state).nextCursor!) : Promise.resolve(), refresh() {
+   if (disposed || get(state).loading) return;
+   if (identity(get(connection)) !== key) { reset(); return; }
+   // Same identity: retain the valid presentation until first-page replacement.
+   generation++; abort?.abort(); void load();
+  },
   dispose() { disposed = true; generation++; abort?.abort(); unsubscribe(); state.set(empty()); } };
 }

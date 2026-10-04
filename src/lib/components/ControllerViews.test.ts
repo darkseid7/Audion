@@ -48,7 +48,7 @@ async function mountEntry(name: string, props: Record<string, unknown> = {}, out
   else modules[id] = await import(/* @vite-ignore */ id);
  }
  const exports: any = {};
- runInNewContext(code, { exports, require: (id: string) => modules[id], console, setTimeout, clearTimeout, localStorage: { getItem: () => null, setItem() {} } });
+ runInNewContext(code, { exports, require: (id: string) => modules[id], console, AbortController, setTimeout, clearTimeout, localStorage: { getItem: () => null, setItem() {} } });
  const html = render(exports.default, { props }).body;
  for (const mount of mounts) { const cleanup = await mount(); if (typeof cleanup === "function") destroys.push(cleanup as () => void); }
  return { child, html, execute, dispose() { destroys.forEach(d => d()); actions.dispose(); } };

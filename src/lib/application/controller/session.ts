@@ -2,6 +2,7 @@ import { writable, readonly } from "svelte/store";
 import { parseEnvelope } from "../protocol";
 import type { ApplicationPort, ApplicationQuery, ApplicationUpdate, ArtworkHandle, ArtworkReference, CommandEnvelope, ExecutionResult, EventBatch, EventCursor, HostSnapshot, QueryResult, ControlError } from "../types";
 import { createArtworkHandle, type NativeImage } from "./media";
+import { createReadAdmission, recoverRead } from "./read-recovery";
 export interface NativeControllerFence {
     scopeId: string;
     generation: number;
@@ -50,13 +51,23 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     const state = writable(value), listeners = new Set<(update: ApplicationUpdate) => void>(), media = new Set<ArtworkHandle>();
     let generation = 0, scope: Promise<string> | undefined, timer: ReturnType<typeof setTimeout> | undefined, attempts = 0;
     let foreground = true;
+    let lifecycle = new AbortController();
+    const admitRead = createReadAdmission();
+    type ReadRevision = "libraryRevision" | "queueRevision" | "outputRevision";
+    const reads = new Set<{ revision: ReadRevision; cancel: AbortController }>();
     let pairing: { generation: number; phase: "capture" | "awaiting-foreground" | "approval"; wake?: () => void } | undefined;
     const publish = (patch: Partial<ControllerState>) => {
+        if (patch.snapshot && value.snapshot) {
+            for (const read of reads)
+                if (patch.snapshot.revisions[read.revision] !== value.snapshot.revisions[read.revision]) read.cancel.abort();
+        }
         value = { ...value, ...patch };
         state.set(value);
     };
     const invalidate = () => {
         generation++;
+        lifecycle.abort();
+        lifecycle = new AbortController();
         const cancelled = pairing;
         pairing = undefined;
         cancelled?.wake?.();
@@ -85,6 +96,40 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             throw failure("host_not_ready");
         return { g: generation, snapshot: value.snapshot };
     };
+    async function read<T>(revision: ReadRevision, signal: AbortSignal | undefined, operation: (f: NativeControllerFence, check: () => void) => Promise<T>, discard?: (result: T) => void): Promise<T> {
+        const { g, snapshot } = ready();
+        const owner = lifecycle.signal, cancel = new AbortController();
+        const abort = () => cancel.abort();
+        const entry = { revision, cancel };
+        owner.addEventListener("abort", abort, { once: true });
+        signal?.addEventListener("abort", abort, { once: true });
+        if (owner.aborted || signal?.aborted) abort();
+        reads.add(entry);
+        const check = () => {
+            current(g, snapshot.hostEpoch);
+            if (cancel.signal.aborted || !value.ready || value.snapshot?.hostId !== snapshot.hostId || value.snapshot.revisions[revision] !== snapshot.revisions[revision])
+                throw failure("resync_required");
+        };
+        try {
+            const result = await recoverRead(cancel.signal, () => admitRead(cancel.signal, async () => {
+                check();
+                const f = await fence(g);
+                // Scope resolution and admission are asynchronous; check at native entry.
+                check();
+                const result = await operation(f, check);
+                try { check(); }
+                catch (error) { discard?.(result); throw error; }
+                return result;
+            }), discard);
+            try { check(); }
+            catch (error) { discard?.(result); throw error; }
+            return result;
+        } finally {
+            reads.delete(entry);
+            owner.removeEventListener("abort", abort);
+            signal?.removeEventListener("abort", abort);
+        }
+    }
     const emit = (update: ApplicationUpdate) => {
         for (const listener of listeners)
             listener(structuredClone(update));
@@ -121,10 +166,15 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         emit({ type: "snapshot", snapshot });
     }
     async function polling(g: number, f: NativeControllerFence) {
+        const signal = lifecycle.signal;
         while (g === generation && value.ready && value.snapshot) {
             const before = value.snapshot;
             try {
-                const batch = await native.poll(f, { hostEpoch: before.hostEpoch, revision: before.revision });
+                const batch = await recoverRead(signal, () => {
+                    current(g, before.hostEpoch);
+                    if (!value.ready) throw failure("resync_required");
+                    return native.poll(f, { hostEpoch: before.hostEpoch, revision: before.revision });
+                });
                 current(g, before.hostEpoch);
                 if (batch.hostEpoch !== before.hostEpoch || batch.events.length > 256 || batch.revision !== before.revision + batch.events.length || batch.events.some((e, i) => e.revision !== before.revision + i + 1)) {
                     await connectController(value.currentHostId!, false);
@@ -280,16 +330,13 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     }
     const port: ApplicationPort = {
         async query(query, signal) {
-            const { g, snapshot } = ready();
-            if (signal?.aborted)
-                throw failure("resync_required");
-            const result = await native.query(await fence(g), query);
-            current(g, snapshot.hostEpoch);
-            if (signal?.aborted)
-                throw failure("resync_required");
-            if (result.type !== query.type)
-                throw failure("unsupported");
-            return result;
+            const revision = query.type === "queue" ? "queueRevision" : query.type === "outputs" ? "outputRevision" : "libraryRevision";
+            return read(revision, signal, async (f, check) => {
+                const result = await native.query(f, query);
+                check();
+                if (result.type !== query.type) throw failure("unsupported");
+                return result;
+            });
         },
         async execute(intent, preconditions) {
             const { g, snapshot } = ready();
@@ -339,28 +386,18 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             return () => listeners.delete(listener);
         },
         async resolveArtwork(reference, signal) {
-            const { g, snapshot } = ready();
-            if (signal?.aborted)
-                throw failure("resync_required");
-            const image = await native.media(await fence(g), reference);
-            const handle = createArtworkHandle(image);
-            try {
-                current(g, snapshot.hostEpoch);
-                if (value.snapshot?.revisions.libraryRevision !== snapshot.revisions.libraryRevision)
-                    throw failure("resync_required");
-                if (signal?.aborted)
-                    throw failure("resync_required");
-            }
-            catch (error) {
-                handle.dispose();
-                throw error;
-            }
-            const owned = { src: handle.src, dispose() {
+            return read("libraryRevision", signal, async (f, check) => {
+                const image = await native.media(f, reference);
+                const handle = createArtworkHandle(image);
+                try { check(); }
+                catch (error) { handle.dispose(); throw error; }
+                const owned = { src: handle.src, dispose() {
                     handle.dispose();
                     media.delete(owned);
                 } };
-            media.add(owned);
-            return owned;
+                media.add(owned);
+                return owned;
+            }, handle => handle.dispose());
         },
     };
     return {
