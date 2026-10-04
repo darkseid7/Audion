@@ -49,6 +49,7 @@ pub(crate) struct Fence {
 pub(crate) enum ConnectionRequest {
     BeginScope {},
     Connect { host_id: String, fence: Fence },
+    UpdateEndpoint { host_id: String, endpoint: String, fence: Fence },
 }
 #[derive(Serialize)]
 #[serde(
@@ -278,16 +279,44 @@ impl NativeSession {
         host: String,
         f: Fence,
     ) -> Result<(HostSnapshot, ControlGrants), ControlError> {
+        self.connect_candidate(store, host, f, None).await
+    }
+    pub(crate) async fn update_endpoint(
+        self: &Arc<Self>,
+        store: Arc<dyn ControllerStore>,
+        host: String,
+        endpoint: String,
+        f: Fence,
+    ) -> Result<(HostSnapshot, ControlGrants), ControlError> {
+        let address = endpoint.parse().map_err(|_| invalid_pairing())?;
+        super::client::validate_host_endpoint(&host, address)?;
+        self.connect_candidate(store, host, f, Some(address.to_string()))
+            .await
+    }
+    async fn connect_candidate(
+        self: &Arc<Self>,
+        store: Arc<dyn ControllerStore>,
+        host: String,
+        f: Fence,
+        endpoint: Option<String>,
+    ) -> Result<(HostSnapshot, ControlGrants), ControlError> {
         uuid_host(&host)?;
         let cancel = self.transition(&f)?;
         let id = host.clone();
-        let load = tokio::task::spawn_blocking(move || store.load(&id));
+        let load_store = store.clone();
+        let load = tokio::task::spawn_blocking(move || load_store.load(&id));
         let bytes=tokio::select!{_ = cancel.cancelled()=>return Err(transport_error(ControlErrorCode::ResyncRequired)), result=load=>result.map_err(|_|transport_error(ControlErrorCode::HostNotReady))??}.ok_or_else(||transport_error(ControlErrorCode::Unauthorized))?;
         self.check(&f)?;
         if bytes.len() > 16 * 1024 {
             return Err(invalid_pairing());
         }
-        let record: PairedRecord = serde_json::from_slice(&bytes).map_err(|_| invalid_pairing())?;
+        let mut record: PairedRecord =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_pairing())?;
+        // Validate the saved identity before changing only the direct endpoint.
+        record.pairing(&host)?;
+        if let Some(endpoint) = &endpoint {
+            record.endpoint = endpoint.clone();
+        }
         let device = record.device_id.clone();
         let transport = (self.connector)(record.pairing(&host)?, true)?;
         let result = async {
@@ -306,18 +335,36 @@ impl NativeSession {
             Ok((snapshot, handshake.grants))
         };
         let (snapshot, grants) = tokio::select! {_ = cancel.cancelled()=>return Err(transport_error(ControlErrorCode::ResyncRequired)),result=result=>result?};
-        let mut inner = self.lock()?;
-        if !Self::matches(&inner, &f) {
-            return Err(transport_error(ControlErrorCode::ResyncRequired));
-        }
-        inner.active = Some(Arc::new(Active {
-            host,
-            device,
-            epoch: snapshot.host_epoch.clone(),
-            transport,
-            poll: AtomicBool::new(false),
-            library: AtomicU64::new(snapshot.revisions.library_revision),
-        }));
+        let this = self.clone();
+        let fence = f.clone();
+        let epoch = snapshot.host_epoch.clone();
+        let library = snapshot.revisions.library_revision;
+        // Scope check, protected persistence and adoption share the existing
+        // native-session gate. No unverified address replaces the saved record.
+        tokio::task::spawn_blocking(move || {
+            let mut inner = this.lock()?;
+            if !Self::matches(&inner, &fence) {
+                return Err(transport_error(ControlErrorCode::ResyncRequired));
+            }
+            if endpoint.is_some() {
+                let encoded =
+                    Zeroizing::new(serde_json::to_vec(&record).map_err(|_| invalid_pairing())?);
+                store.save(&host, &encoded)?;
+                inner.cache.remove_host(&host);
+            }
+            inner.active = Some(Arc::new(Active {
+                host,
+                device,
+                epoch,
+                transport,
+                poll: AtomicBool::new(false),
+                library: AtomicU64::new(library),
+            }));
+            Ok(())
+        })
+        .await
+        .map_err(|_| transport_error(ControlErrorCode::HostNotReady))??;
+        self.check(&f)?;
         Ok((snapshot, grants))
     }
     pub(crate) async fn forget(
@@ -382,9 +429,10 @@ impl NativeSession {
             }
         };
         let host_id = invitation.host_id.clone();
+        let fingerprint = invitation.fingerprint.clone();
         attempt.invitation = Some(invitation);
         attempt.input = Some(input);
-        Ok(super::mobile::PairingStatus::InvitationReady { host_id })
+        Ok(super::mobile::PairingStatus::InvitationReady { host_id, fingerprint })
     }
     pub(crate) async fn pair(
         self: &Arc<Self>,

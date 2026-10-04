@@ -41,11 +41,13 @@ impl CapturedLibrary {
             }
             ApplicationQuery::Queue { .. } => {
                 for entry in context.queue.iter().skip(offset).take(limit) {
+                    // Negative IDs are native-approved display metadata, not DB keys.
+                    if entry.track.id < 0 { continue; }
                     result.load_tracks(conn, "WHERE t.id=?1", rusqlite::params![entry.track.id])?;
                     if result
                         .tracks
                         .last()
-                        .is_none_or(|track| track.id as u64 != entry.track.id)
+                        .is_none_or(|track| track.id != entry.track.id)
                     {
                         return Err(error(ControlErrorCode::NotFound));
                     }

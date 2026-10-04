@@ -111,6 +111,13 @@ function clearPendingForcedEnd() {
 
 // HTML5 Audio element for streaming (initialized lazily)
 let html5Audio: HTMLAudioElement | null = null;
+let html5Origin: { audio: HTMLAudioElement; session: number; emit?: CompletionEmitter } | undefined;
+/** Called at the coordinator commit boundary, never at event delivery. */
+export function refreshPlaybackSignalOwnership(): void {
+  if (html5Origin && html5Origin.audio === html5Audio && html5Origin.session === currentSessionId) {
+    html5Origin.emit = completionSink?.();
+  }
+}
 
 // HTML5 WebAudio graph for EQ processing
 let html5AudioContext: AudioContext | null = null;
@@ -233,6 +240,7 @@ function cleanupHtml5EqGraph(): void {
 }
 
 function recreateHtml5AudioElement(): HTMLAudioElement {
+  html5Origin = undefined;
   if (html5Audio) {
     html5Audio.pause();
     html5Audio.src = "";
@@ -395,14 +403,18 @@ async function resumeHtml5AudioContext(): Promise<void> {
 }
 
 function setupHtml5AudioListeners(audio: HTMLAudioElement): void {
+  const origin = { audio, session: currentSessionId, emit: completionSink?.() };
+  html5Origin = origin;
+  const owns = () => html5Origin === origin && html5Audio === audio
+    && origin.session === currentSessionId && get(activeBackend) === "html5";
   audio.addEventListener("timeupdate", () => {
-    if (get(activeBackend) === "html5") {
+    if (owns()) {
       currentTime.set(audio.currentTime);
     }
   });
 
   audio.addEventListener("durationchange", () => {
-    if (get(activeBackend) === "html5") {
+    if (owns()) {
       if (audio.duration && !isNaN(audio.duration)) {
         duration.set(audio.duration);
       }
@@ -410,27 +422,29 @@ function setupHtml5AudioListeners(audio: HTMLAudioElement): void {
   });
 
   audio.addEventListener("play", () => {
-    if (get(activeBackend) === "html5") {
+    if (owns()) {
       isPlaying.set(true);
       updateMediaSessionPlaybackState("playing");
     }
   });
 
   audio.addEventListener("pause", () => {
-    if (get(activeBackend) === "html5") {
+    if (owns()) {
       isPlaying.set(false);
       updateMediaSessionPlaybackState("paused");
     }
   });
 
   audio.addEventListener("ended", () => {
-    if (get(activeBackend) === "html5") {
-      handleTrackEnd();
+    if (owns()) {
+      // The captured emitter belongs to this media session, not whichever
+      // occurrence happens to own the coordinator when a delayed event arrives.
+      void (origin.emit ? origin.emit("completion") : applyTrackEnd()).catch(console.error);
     }
   });
 
   audio.addEventListener("error", (e) => {
-    if (get(activeBackend) === "html5") {
+    if (owns()) {
       console.error("[Player] HTML5 audio error:", audio.error);
       addToast(
         `Streaming playback failed: ${audio.error?.message || "Unknown error"}`,
@@ -1046,6 +1060,8 @@ function stopStatePoller(): void {
 
 // cleanup function for app unmount or hot reload
 export function cleanupPlayer(): void {
+  currentSessionId++;
+  html5Origin = undefined;
   console.log("[Player] Cleaning up player resources");
   audioInitialized = false;
   runtimeSubscriptions.splice(0).forEach(unsubscribe => unsubscribe());
@@ -1524,7 +1540,7 @@ export async function playTrack(
       }
 
       // Start HTML5
-      let audio = getHtml5Audio();
+      let audio = recreateHtml5AudioElement();
 
       // Reset src to avoid overlap issues
       audio.pause();
@@ -1613,7 +1629,7 @@ export async function playTrack(
         console.log("[Player] Native playback started:", track.title);
       } else {
         // Fallback to HTML5 via convertFileSrc if native is disabled (e.g. on macOS)
-        let audio = getHtml5Audio();
+        let audio = recreateHtml5AudioElement();
         audio = await prepareHtml5AudioForPath(audio, audioPath);
         audio.pause();
 
@@ -1804,7 +1820,7 @@ function _advanceQueueIndex(dry = false): number | null {
   if (q.length === 0) return null;
 
   // Check if we have user-queued tracks to play first
-  if (userCount > 0) {
+  if (userCount > 0 && !shuf) {
     // Play next user-queued track sequentially (always sequential for user queue)
     // User queue tracks are inserted directly after current track in the main queue list.
     // So we just increment normal index.
@@ -1823,7 +1839,10 @@ function _advanceQueueIndex(dry = false): number | null {
       }
     }
 
-    if (!dry) shuffledIndex.set(shufIdx);
+    if (!dry) {
+      shuffledIndex.set(shufIdx);
+      if (userCount > 0) userQueueCount.set(userCount - 1);
+    }
     idx = shufIndices[shufIdx];
   } else {
     idx = idx + 1;
@@ -2432,19 +2451,11 @@ export async function addToQueue(tracks: Track[]): Promise<void> {
         i >= insertPosition ? i + addedCount : i,
       );
 
-      // 2. Add new indices (we append them to the end of shuffled list to not disrupt current flow)
-      // The new tracks are at [insertPosition, insertPosition + addedCount - 1]
-      const newIndices = Array.from(
-        { length: addedCount },
-        (_, i) => insertPosition + i,
-      );
-
-      // We could shuffle 'newIndices' before appending if we want them random
-      // But let's keep them together for now or shuffle them
-      // Let's shuffle the new batch so they are random relative to each other at least
-      const shuffledNew = shuffleArray(newIndices);
-
-      return [...shifted, ...shuffledNew];
+      // Immediate entries belong in the authoritative order, not a second
+      // advancement lane that later replays them from the shuffled tail.
+      const newIndices = Array.from({ length: addedCount }, (_, i) => insertPosition + i);
+      const insertAt = plan.shuffledIndex + 1 + userCount;
+      return [...shifted.slice(0, insertAt), ...newIndices, ...shifted.slice(insertAt)];
     })(plan.shuffledIndices);
   }
 
@@ -2468,30 +2479,15 @@ export async function addToQueue(tracks: Track[]): Promise<void> {
 export async function appendToQueueEnd(tracks: Track[]): Promise<void> {
   const plan = readQueuePlan();
   if (tracks.length === 0) return;
-  const currentIdx = plan.queueIndex;
   const addedCount = tracks.length;
-  const insertPosition = currentIdx + 1 + plan.userQueueCount;
-
-  plan.queue = ((q) => {
-    const newQueue = [...q, ...tracks];
-    return newQueue;
-  })(plan.queue);
-
-  // These tracks go to the end, so they're "user-added" but only after
-  // whatever user tracks are already pending. Bump userQueueCount by
-  // the new count.
-  plan.userQueueCount += addedCount;
-
-  // Sync to Squeeze backend (it has its own queue model).
-
+  const start = plan.queue.length;
+  plan.queue = [...plan.queue, ...tracks];
+  // Tail entries never enlarge the immediate user-queue prefix.
 
   // Shuffle: append the new indices at the tail of the shuffled list
   // so they play after everything else.
   if (get(shuffle)) {
     plan.shuffledIndices = ((indices) => {
-      const start = indices.length > 0
-        ? Math.max(...indices) + 1
-        : currentIdx + 1;
       const newIndices = Array.from(
         { length: addedCount },
         (_, i) => start + i,
@@ -2516,13 +2512,7 @@ export async function appendToQueueEnd(tracks: Track[]): Promise<void> {
 }
 
 
-// Insert tracks at currentIdx + 1 — plays immediately after the current track.
-// Does NOT increment userQueueCount (AD4). The track at currentIdx+1 is picked
-// up by normal sequential advancement (_advanceQueueIndex line 1925).
-//
-// Shuffle-aware: when shuffle is ON, indices are inserted at shuffledIndex+1
-// (not appended to end). The batch is internally shuffled so they are random
-// relative to each other while maintaining position.
+// Insert immediately after the current occurrence in physical and playback order.
 export async function playNext(tracks: Track[]): Promise<void> {
   const plan = readQueuePlan();
   if (tracks.length === 0) return;
@@ -2537,13 +2527,8 @@ export async function playNext(tracks: Track[]): Promise<void> {
     return newQueue;
   })(plan.queue);
 
-  // Play Next does NOT increment userQueueCount.
-  // The inserted tracks sit at currentIdx+1 and are picked up by
-  // normal sequential advancement. Incrementing userQueueCount would
-  // shift _advanceQueueIndex into the user-queue decrement path (AD4).
-
-  // Sync to Squeeze backend
-
+  // Preserve an existing immediate prefix behind this higher-priority batch.
+  if (plan.userQueueCount > 0) plan.userQueueCount += addedCount;
 
   // Update shuffled indices — insert at shuffledIndex+1, NOT appended to end.
   if (get(shuffle)) {
@@ -2559,9 +2544,7 @@ export async function playNext(tracks: Track[]): Promise<void> {
         (_, i) => insertPosition + i,
       );
 
-      // 3. Shuffle the new batch internally so they are random relative
-      //    to each other while maintaining position
-      const shuffledNew = shuffleArray(newIndices);
+      // Keep the immediate batch in the same order as its physical prefix.
 
       // 4. Insert at shuffledIndex+1 (not append to end)
       const shufIdx = plan.shuffledIndex;
@@ -2569,7 +2552,7 @@ export async function playNext(tracks: Track[]): Promise<void> {
 
       return [
         ...shifted.slice(0, insertAt),
-        ...shuffledNew,
+        ...newIndices,
         ...shifted.slice(insertAt),
       ];
     })(plan.shuffledIndices);
@@ -2591,8 +2574,8 @@ export async function playNext(tracks: Track[]): Promise<void> {
 
 // Remove track from queue by index
 export async function removeFromQueue(index: number): Promise<void> {
-  if (get(activeBackend) === "squeeze" && get(currentTrack) && index === get(queueIndex)) {
-    throw new PlaybackFailure({ code: "unsupported", message: "The active Squeeze queue entry cannot be removed; select another entry first", retryable: false });
+  if (get(currentTrack) && get(queue)[index] && index === get(queueIndex)) {
+    throw new PlaybackFailure({ code: "unsupported", message: "The active queue entry cannot be removed; select another entry first", retryable: false });
   }
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
@@ -2757,17 +2740,18 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
 export async function clearUpcoming(): Promise<void> {
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
-  const sourceIndices = plan.queue.map((_, index) => index);
-  plan.queue = ((q) => q.slice(0, currentIdx + 1))(plan.queue);
-  sourceIndices.splice(currentIdx + 1);
-  plan.userQueueCount = 0; // Clear user queue count
-
-  // Update shuffle: remove indices that are now out of bounds
+  const history = get(shuffle)
+    ? plan.shuffledIndices.slice(0, plan.shuffledIndex + 1)
+    : plan.queue.map((_, index) => index).slice(0, currentIdx + 1);
+  // Keep physical storage stable; only playback order partitions history/upcoming.
+  const retained = new Set(history);
+  const sourceIndices = plan.queue.map((_, index) => index).filter(index => retained.has(index));
+  plan.queue = sourceIndices.map(index => plan.queue[index]);
+  plan.queueIndex = Math.max(0, sourceIndices.indexOf(currentIdx));
+  plan.userQueueCount = 0;
   if (get(shuffle)) {
-    plan.shuffledIndices = ((indices) => indices.filter((i) => i <= currentIdx))(plan.shuffledIndices);
-    // And reset/sync pointer
-    const ptr = plan.shuffledIndices.indexOf(currentIdx);
-    plan.shuffledIndex = ptr !== -1 ? ptr : 0;
+    plan.shuffledIndices = history.map(index => sourceIndices.indexOf(index));
+    plan.shuffledIndex = Math.max(0, history.length - 1);
   }
 
   if (get(activeBackend) === "squeeze") {
@@ -2997,7 +2981,7 @@ export function toggleRemoteControl(device: RemoteDevice) {
 /** Backend completion sources enter the same desktop command lane. */
 type CompletionEmitter = (kind: "completion" | "gapless") => Promise<void>;
 let completionSink: (() => CompletionEmitter) | undefined;
-export function bindPlaybackSignals(sink: typeof completionSink): void { completionSink = sink; }
+export function bindPlaybackSignals(sink: typeof completionSink): void { completionSink = sink; refreshPlaybackSignalOwnership(); }
 function handleTrackEnd(emit = completionSink?.()): void { void (emit ? emit("completion") : applyTrackEnd()).catch(console.error); }
 function handleGaplessAdvance(emit = completionSink?.()): void { void (emit ? emit("gapless") : applyGaplessAdvance()).catch(console.error); }
 /** Stop the owned PC pipeline before confirming a different output. */

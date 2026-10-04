@@ -55,6 +55,7 @@ impl PairingInvitation {
             invitation_id: String,
             host_id: &'a str,
             ca: String,
+            fingerprint: String,
             endpoint: String,
             secret: String,
             expires_at: Expiration,
@@ -71,6 +72,7 @@ impl PairingInvitation {
             invitation_id: self.id.to_string(),
             host_id: &self.host_id,
             ca: URL_SAFE_NO_PAD.encode(&self.ca_der),
+            fingerprint: self.fingerprint(),
             endpoint: self.endpoint.to_string(),
             secret: URL_SAFE_NO_PAD.encode(self.secret.as_ref()),
             expires_at: Expiration {
@@ -84,6 +86,9 @@ impl PairingInvitation {
         use zeroize::Zeroize;
         payload.secret.zeroize();
         encoded
+    }
+    pub fn fingerprint(&self) -> String {
+        super::client::ca_fingerprint(&self.ca_der)
     }
     pub fn qr_svg(&self) -> Result<Zeroizing<String>, ControlError> {
         let encoded = self.encode()?;

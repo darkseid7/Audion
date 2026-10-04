@@ -18,6 +18,7 @@ function deferred<T>() {
 }
 function bridge() {
     return {
+        updateEndpoint: vi.fn<ControllerNativeBridge["updateEndpoint"]>(),
         beginScope: vi.fn<ControllerNativeBridge["beginScope"]>(async () => "scope"), connect: vi.fn<ControllerNativeBridge["connect"]>(async (hostId: string) => ({ snapshot: snapshot(hostId), grants: { control: true } })), suspend: vi.fn<ControllerNativeBridge["suspend"]>(async () => {
         }), forget: vi.fn<ControllerNativeBridge["forget"]>(async () => {
         }), scan: vi.fn<ControllerNativeBridge["scan"]>(), pair: vi.fn<ControllerNativeBridge["pair"]>(), query: vi.fn<ControllerNativeBridge["query"]>(async () => ({ type: "tracks", page: { items: [], nextCursor: null, revision: 1 } } as QueryResult)), command: vi.fn<ControllerNativeBridge["command"]>(async () => ({ status: "applied" as const, revision: 1 })), commandStatus: vi.fn<ControllerNativeBridge["commandStatus"]>(async () => ({ status: "applied" as const, revision: 1 })), poll: vi.fn<ControllerNativeBridge["poll"]>(() => new Promise<EventBatch>(() => {
@@ -197,7 +198,7 @@ it("library events dispose late media from the previous revision", async () => {
 
 it.each(["switch", "suspend", "forget"] as const)("held post-pair connect cannot own selection after %s", async (intent) => {
     const n = bridge(), held = deferred<AuthenticatedConnection>();
-    n.scan.mockResolvedValue({ status: "invitation_ready" });
+    n.scan.mockResolvedValue({ status: "invitation_ready", fingerprint: "ab".repeat(32) });
     n.pair.mockResolvedValue({ hostId: "one" });
     n.connect.mockImplementation(async host => host === "one" ? held.promise : { snapshot: snapshot(host), grants: { control: true } });
     const s = createControllerSession(n);
@@ -215,7 +216,7 @@ it.each(["switch", "suspend", "forget"] as const)("held post-pair connect cannot
 
 it("pairing receipt retains connection ownership until the consumer commits selection", async () => {
     const n = bridge();
-    n.scan.mockResolvedValue({ status: "invitation_ready" });
+    n.scan.mockResolvedValue({ status: "invitation_ready", fingerprint: "ab".repeat(32) });
     n.pair.mockResolvedValue({ hostId: "one" });
     const catalog = vi.fn(() => expect(n.connect).not.toHaveBeenCalled());
     const s = createControllerSession(n);
@@ -274,4 +275,29 @@ it.each([true,false])("late status receipt rejection=%s cannot invalidate replac
  else status.resolve({status:"failed",revision:1,partialEffects:[],error:{code:"permission_required",message:"Permission changed",retryable:false}});
  await checked;
  expect(get(s.state)).toMatchObject({ready:true,currentHostId:"two",grants:{control:true}});s.suspendController();
+});
+it("endpoint repair replaces ownership and only adopts the confirmed candidate", async () => {
+    const n = bridge(), candidate = deferred<AuthenticatedConnection>();
+    const updateEndpoint = vi.fn(() => candidate.promise);
+    const s = createControllerSession({ ...n, updateEndpoint } as any);
+    await s.connectController("one");
+    const updating = s.updateEndpoint("one", "192.168.1.9:1234");
+    expect(get(s.state).ready).toBe(false);
+    await vi.waitFor(() => expect(updateEndpoint).toHaveBeenCalledOnce());
+    expect(updateEndpoint).toHaveBeenCalledWith("one", "192.168.1.9:1234", { scopeId: "scope", generation: 2 });
+    s.suspendController();
+    candidate.resolve({ snapshot: snapshot("one"), grants: { control: true } });
+    await updating;
+    expect(get(s.state)).toMatchObject({ ready: false, status: "disconnected" });
+});
+it("shows native-validated fingerprint while waiting for explicit PC approval", async () => {
+    const n = bridge(), approval = deferred<{ hostId: string }>();
+    n.scan.mockResolvedValue({ status: "invitation_ready", hostId: "one", fingerprint: "ab".repeat(32) });
+    n.pair.mockReturnValue(approval.promise);
+    const s = createControllerSession(n), pending = s.pairController();
+    await vi.waitFor(() => expect(n.pair).toHaveBeenCalledOnce());
+    expect(get(s.state).pairingFingerprint).toBe("ab".repeat(32));
+    s.suspendController();
+    expect(get(s.state).pairingFingerprint).toBeUndefined();
+    approval.resolve({ hostId: "one" }); await pending;
 });

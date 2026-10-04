@@ -101,7 +101,7 @@
  .shell-feedback { grid-area:feedback; min-width:0; }
  .shell-player { grid-area:player; min-width:0; }
  .notice { margin:0; padding:8px 24px; font-size:.8rem; color:var(--text-secondary); background:var(--bg-elevated); }
- @media(max-width:767px) {
+ @media(width < 768px) {
   .controller-shell { grid-template-columns:minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr) auto auto auto; grid-template-areas:"header" "connection" "content" "feedback" "player" "nav"; }
   .shell-header { padding:8px 12px; gap:8px; }
   .brand { width:auto; font-size:1.1rem; }

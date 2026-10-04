@@ -516,10 +516,10 @@ pub(super) fn display_track(t: &db::Track, liked: bool) -> DisplayTrack {
         .map(normalized_format);
     let (rate, bits, _) = audio(t);
     DisplayTrack {
-        id: t.id as u64,
+        id: t.id,
         title: t.title.clone(),
         artist: t.artist.clone(),
-        album_id: t.album_id.filter(|id| *id > 0).map(|id| id as u64),
+        album_id: t.album_id.filter(|id| *id > 0),
         album: t.album.clone(),
         duration: t.duration.map(|d| d.max(0) as f64),
         track_number: t.track_number.filter(|n| *n >= 0).map(|n| n as u64),
@@ -730,17 +730,19 @@ fn project(
     }
     if matches!(query, ApplicationQuery::Queue { .. }) {
         let next_cursor = page(c.queue.len())?;
-        let items = c
-            .queue
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .zip(tracks.iter())
-            .map(|(entry, track)| QueueEntry {
-                entry_id: entry.entry_id.clone(),
-                track: display_track(track, liked.contains(&track.id)),
-            })
-            .collect();
+        let mut library_tracks = tracks.iter();
+        let items = c.queue.iter().skip(offset).take(limit).map(|entry| {
+            let track = if entry.track.id < 0 {
+                let mut metadata = entry.track.clone();
+                metadata.artwork = None;
+                metadata
+            } else {
+                let track = library_tracks.next().filter(|track| track.id == entry.track.id)
+                    .ok_or_else(|| error(ControlErrorCode::NotFound))?;
+                display_track(track, liked.contains(&track.id))
+            };
+            Ok(QueueEntry { entry_id: entry.entry_id.clone(), track })
+        }).collect::<Result<Vec<_>, ControlError>>()?;
         return Ok(QueryResult::Queue {
             page: Page {
                 items,
@@ -1343,6 +1345,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_provider_queue_pages_preserve_every_occurrence_and_refresh_only_library_tracks() {
+        let q = fixture();
+        let raw: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/controller/provider-publication.json")).unwrap();
+        let provider: DisplayTrack = serde_json::from_value(raw["snapshot"]["playback"]["track"].clone()).unwrap();
+        let mut c = context(&q);
+        c.queue = [-8, 1, -8, 2, -8].into_iter().enumerate().map(|(i,id)| {
+            let mut track = provider.clone(); track.id = id;
+            QueueEntry { entry_id: format!("occurrence-{i}"), track }
+        }).collect();
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        for expected in [vec![-8,1], vec![-8,2], vec![-8]] {
+            let request = ApplicationQuery::Queue { cursor, limit: Some(2) };
+            let QueryResult::Queue { page } = q.query_library(request, c.clone()).await.unwrap() else { panic!() };
+            assert_eq!(page.items.iter().map(|e| e.track.id).collect::<Vec<_>>(), expected);
+            for entry in &page.items {
+                if entry.track.id < 0 { assert_eq!(entry.track, provider); }
+                else { assert_ne!(entry.track.title, provider.title); }
+                seen.push(entry.entry_id.clone());
+            }
+            cursor = page.next_cursor;
+        }
+        assert!(cursor.is_none());
+        assert_eq!(seen, (0..5).map(|i| format!("occurrence-{i}")).collect::<Vec<_>>());
+        // Native-approved current occurrence remains distinguishable even for duplicate IDs.
+        assert_ne!(c.queue[0].entry_id, c.queue[2].entry_id);
+        q.db.conn.lock().unwrap().execute("DELETE FROM tracks WHERE id=1", []).unwrap();
+        c.stamp = q.stamp().unwrap(); c.revision += 1;
+        assert_eq!(q.query_library(query(serde_json::json!({"type":"queue","limit":2})), c).await.unwrap_err().code, ControlErrorCode::NotFound);
+    }
+    #[test]
+    fn negative_provider_artwork_never_becomes_a_library_entity() {
+        let q = fixture();
+        let raw: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/controller/provider-publication.json")).unwrap();
+        let mut track: DisplayTrack = serde_json::from_value(raw["snapshot"]["playback"]["track"].clone()).unwrap();
+        track.artwork = Some(ArtworkReference { resource_id: "untrusted-provider-art".into(), revision: 1 });
+        let mut result = QueryResult::Tracks { page: Page { items: vec![track], next_cursor: None, revision: 1 } };
+        let c = context(&q);
+        // Any DB capture (including a numeric wrap into Entity::Track/Album)
+        // would fail Busy while this guard is held. Negative metadata must skip it.
+        let _held = q.db.conn.lock().unwrap();
+        attach_artwork(&mut result, &q.resources, &q.db, &c).unwrap();
+        let QueryResult::Tracks { page } = result else { panic!() };
+        assert!(page.items[0].artwork.is_none());
+    }
+    #[tokio::test]
     async fn deleted_queued_tracks_fail_explicitly_instead_of_disappearing() {
         let q = fixture();
         let QueryResult::Tracks { page } = q
@@ -1632,10 +1680,12 @@ fn attach_artwork(
         Ok(())
     };
     let track_art = |t: &mut DisplayTrack| -> Result<(), ControlError> {
-        t.artwork = register(Entity::Track(t.id))?;
+        // Display-only provider IDs are never converted into library authority.
+        if t.id <= 0 { t.artwork = None; return Ok(()); }
+        t.artwork = register(Entity::Track(t.id as u64))?;
         if t.artwork.is_none() {
-            if let Some(id) = t.album_id {
-                t.artwork = register(Entity::Album(id))?;
+            if let Some(id) = t.album_id.filter(|id| *id > 0) {
+                t.artwork = register(Entity::Album(id as u64))?;
             }
         }
         Ok(())

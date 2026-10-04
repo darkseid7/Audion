@@ -51,6 +51,8 @@
     <h3>Pair a phone</h3>
     <p>Invitations expire after 5 minutes and require approval on this PC.</p>
     {#if $settings.invitation}
+      <p>Compare this SHA-256 certificate fingerprint on your phone before approving:</p>
+      <code class="fingerprint">{$settings.invitation.fingerprint}</code>
       <img class="invitation-qr" alt="Short-lived pairing invitation QR code" width="200" height="200" src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent($settings.invitation.qrSvg)}`} />
     {:else}<div class="invitation-empty">No active invitation. Enable hosting to create one.</div>{/if}
     <div class="actions"><button type="button" disabled={$settings.busy || !$settings.host?.ready} on:click={invite}>Create invitation</button><button type="button" disabled={$settings.busy || !$settings.invitation} on:click={copyInvitation}>Copy invitation</button></div>
@@ -91,6 +93,8 @@
   .host-switch { display: flex; align-items: center; gap: var(--spacing-sm); border: 0; background: transparent; padding: var(--spacing-xs); flex-shrink: 0; }
   .switch-track { display: flex; align-items: center; width: 32px; height: 18px; padding: 3px; border-radius: 12px; background: var(--bg-highlight); }
   .switch-track span { width: 12px; height: 12px; border-radius: 50%; background: var(--text-subdued); }
+  .host-switch[aria-checked="true"] .switch-track { background: var(--accent-primary); }
+  .host-switch[aria-checked="true"] .switch-track span { transform: translateX(14px); background: var(--bg-base); }
   .availability { border-left: 2px solid var(--text-subdued); padding: var(--spacing-sm) var(--spacing-md); background: var(--bg-surface); }
   .connection-fields { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--spacing-md); margin-top: var(--spacing-md); }
   label { display: grid; gap: var(--spacing-xs); color: var(--text-secondary); font-size: 12px; }
@@ -107,4 +111,5 @@
   .grants { gap: var(--spacing-md); margin-bottom: var(--spacing-sm); }
   .grants label { display: flex; align-items: center; gap: var(--spacing-xs); }
   @media (max-width: 480px) { .connection-fields { grid-template-columns: minmax(0, 1fr); } }
+  .fingerprint { display:block; overflow-wrap:anywhere; font-size:12px; line-height:1.6; }
 </style>

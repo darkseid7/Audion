@@ -65,6 +65,7 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess, pcName
       const entries = pendingEntries ?? (queueChanged ? tracks.map(track => { const index = available.findIndex(item => item.track === track); return index < 0 ? entry(track) : available.splice(index, 1)[0]; }) : value.queue);
       pendingEntries = undefined;
       value = { ...value, selectedOutput: actualOutput, ...delta, queue: entries, revision: value.revision + 1, revisions: { ...value.revisions, ...(outputChanged ? { outputRevision: value.revisions.outputRevision + 1 } : {}), ...(queueChanged ? { queueRevision: value.revisions.queueRevision + 1 } : {}), ...delta.revisions } };
+      player.refreshPlaybackSignalOwnership();
       setPlayerPreconditions({ hostEpoch, ...value.revisions });
       const update: ApplicationUpdate = { type: "snapshot", snapshot: snapshot() };
       for (const listener of listeners) { try { listener(update); } catch (error) { console.error("Desktop subscriber failed", error); } }

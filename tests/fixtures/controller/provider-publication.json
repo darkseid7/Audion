@@ -1,0 +1,137 @@
+{
+  "type": "projection",
+  "snapshot": {
+    "hostId": "fixture-host",
+    "hostEpoch": "fixture-epoch",
+    "revision": 2,
+    "revisions": {
+      "libraryRevision": 0,
+      "queueRevision": 1,
+      "outputRevision": 0,
+      "settingsRevision": 0
+    },
+    "output": {
+      "kind": "pc"
+    },
+    "outputs": [
+      {
+        "output": {
+          "kind": "pc"
+        },
+        "name": "Fixture PC",
+        "available": true,
+        "capabilities": {
+          "playback": true,
+          "seek": true,
+          "volume": true,
+          "shuffle": true,
+          "repeat": true,
+          "equalizer": false
+        }
+      }
+    ],
+    "settings": {},
+    "jobs": [],
+    "capabilities": {
+      "queries": [
+        "snapshot",
+        "outputs"
+      ],
+      "intents": [
+        "play_album",
+        "play_playlist",
+        "play_artist",
+        "play_liked",
+        "play_track",
+        "select_output",
+        "pause",
+        "resume",
+        "next",
+        "previous",
+        "seek",
+        "set_volume",
+        "set_shuffle",
+        "set_repeat",
+        "queue_insert",
+        "queue_append",
+        "queue_entity",
+        "queue_remove",
+        "queue_reorder",
+        "queue_clear_upcoming",
+        "queue_play"
+      ]
+    },
+    "queue": {
+      "count": 2,
+      "currentEntryId": "fixture-epoch:2"
+    },
+    "playback": {
+      "status": "paused",
+      "track": {
+        "id": -8,
+        "title": "Provider track",
+        "artist": "Provider artist",
+        "album": null,
+        "albumId": -9,
+        "duration": 100,
+        "trackNumber": null,
+        "discNumber": null,
+        "quality": {
+          "format": null,
+          "bitrate": null,
+          "badges": []
+        }
+      },
+      "context": {
+        "type": "track",
+        "trackId": -8
+      },
+      "position": 0,
+      "duration": 100,
+      "volume": 0.5,
+      "shuffle": false,
+      "repeat": "none"
+    }
+  },
+  "presentation": {
+    "queue": [
+      {
+        "entryId": "fixture-epoch:1",
+        "track": {
+          "id": -8,
+          "title": "Provider track",
+          "artist": "Provider artist",
+          "album": null,
+          "albumId": -9,
+          "duration": 100,
+          "trackNumber": null,
+          "discNumber": null,
+          "quality": {
+            "format": null,
+            "bitrate": null,
+            "badges": []
+          }
+        }
+      },
+      {
+        "entryId": "fixture-epoch:2",
+        "track": {
+          "id": -8,
+          "title": "Provider track",
+          "artist": "Provider artist",
+          "album": null,
+          "albumId": -9,
+          "duration": 100,
+          "trackNumber": null,
+          "discNumber": null,
+          "quality": {
+            "format": null,
+            "bitrate": null,
+            "badges": []
+          }
+        }
+      }
+    ],
+    "pinnedAlbumIds": []
+  }
+}

@@ -71,6 +71,12 @@ impl std::fmt::Debug for NativePairing {
     }
 }
 
+/// Public comparison hint only; pinned CA DER remains the trust authority.
+pub(crate) fn ca_fingerprint(ca: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(ca))
+}
+
 pub(crate) fn invalid_pairing() -> ControlError {
     ControlError {
         code: ControlErrorCode::InvalidRequest,

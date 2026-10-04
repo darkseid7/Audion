@@ -18,7 +18,7 @@ let stopDetection: (() => void) | undefined;
 export function initMobileDetection(): () => void {
     stopDetection?.();
     if (typeof window === 'undefined') return () => {};
-    const mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const mediaQuery = window.matchMedia(`(width < ${MOBILE_BREAKPOINT}px)`);
     const update = () => {
         isMobileViewport.set(mediaQuery.matches);
         if (!mediaQuery.matches) isMobileSidebarOpen.set(false);

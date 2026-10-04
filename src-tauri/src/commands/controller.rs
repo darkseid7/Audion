@@ -538,6 +538,7 @@ mod desktop {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct Invitation {
+        fingerprint: String,
         encoded: String,
         qr_svg: String,
     }
@@ -562,6 +563,7 @@ mod desktop {
         }
         deps.pairing.register_invitation(&invitation)?;
         Ok(Invitation {
+            fingerprint: invitation.fingerprint(),
             encoded: encoded.to_string(),
             qr_svg: invitation.qr_svg()?.to_string(),
         })
@@ -868,6 +870,10 @@ pub(crate) async fn controller_connection(
         }),
         ConnectionRequest::Connect { host_id, fence } => {
             let (snapshot, grants) = session.connect(controller_store(&app), host_id, fence).await?;
+            Ok(ConnectionReply::Connected { snapshot, grants })
+        },
+        ConnectionRequest::UpdateEndpoint { host_id, endpoint, fence } => {
+            let (snapshot, grants) = session.update_endpoint(controller_store(&app), host_id, endpoint, fence).await?;
             Ok(ConnectionReply::Connected { snapshot, grants })
         },
     }

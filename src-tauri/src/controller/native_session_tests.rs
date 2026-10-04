@@ -915,3 +915,204 @@ async fn actual_tls_grants_do_not_infer_control_from_ready_snapshot_or_administr
     s.fixture.omit_grants.store(true, Ordering::SeqCst); f.generation += 1;
     assert!(s.session.connect(s.store.clone(), s.fixture.host.clone(), f).await.is_err());
 }
+#[test]
+fn endpoint_update_is_a_closed_connection_operation() {
+    let value = serde_json::json!({"type":"update_endpoint","hostId":"host","endpoint":"192.168.1.9:1234","fence":{"scopeId":"scope","generation":1}});
+    let ConnectionRequest::UpdateEndpoint {
+        host_id,
+        endpoint,
+        fence,
+    } = serde_json::from_value::<ConnectionRequest>(value.clone()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(host_id, "host");
+    assert_eq!(endpoint, "192.168.1.9:1234");
+    assert_eq!(fence.generation, 1);
+    let mut forbidden = value;
+    forbidden["ca"] = serde_json::json!([1, 2]);
+    assert!(serde_json::from_value::<ConnectionRequest>(forbidden).is_err());
+}
+#[tokio::test]
+async fn endpoint_update_authenticates_preserves_identity_and_survives_scope_restart() {
+    let s = server().await;
+    let mut f = connect(&s).await;
+    let original: serde_json::Value =
+        serde_json::from_slice(&s.store.load(&s.fixture.host).unwrap().unwrap()).unwrap();
+    f.generation += 1;
+    s.session
+        .update_endpoint(
+            s.store.clone(),
+            s.fixture.host.clone(),
+            format!("192.168.1.9:{}", s.endpoint.port()),
+            f.clone(),
+        )
+        .await
+        .unwrap();
+    let mut expected = original;
+    expected["endpoint"] = serde_json::json!(format!("192.168.1.9:{}", s.endpoint.port()));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&s.store.load(&s.fixture.host).unwrap().unwrap()).unwrap();
+    assert_eq!(saved, expected);
+    f = Fence {
+        scope_id: s.session.begin_scope().unwrap(),
+        generation: 1,
+    };
+    assert!(s
+        .session
+        .connect(s.store.clone(), s.fixture.host.clone(), f)
+        .await
+        .is_ok());
+}
+#[tokio::test]
+async fn endpoint_update_rejects_wrong_ca_and_interruption_without_persisting_candidate() {
+    let s = server().await;
+    let mut f = connect(&s).await;
+    let original = s.store.load(&s.fixture.host).unwrap().unwrap().to_vec();
+    s.fixture.snapshot_hold.store(true, Ordering::SeqCst);
+    f.generation += 1;
+    let (session, store, host, fence) = (
+        s.session.clone(),
+        s.store.clone(),
+        s.fixture.host.clone(),
+        f.clone(),
+    );
+    let address = format!("192.168.1.9:{}", s.endpoint.port());
+    let pending =
+        tokio::spawn(async move { session.update_endpoint(store, host, address, fence).await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        s.fixture.snapshot_entered.notified(),
+    )
+    .await
+    .unwrap();
+    f.generation += 1;
+    s.session.suspend(&f).unwrap();
+    assert!(pending.await.unwrap().is_err());
+    s.fixture.snapshot_release.notify_one();
+    assert_eq!(
+        s.store.load(&s.fixture.host).unwrap().unwrap().as_slice(),
+        original
+    );
+    assert!(s.session.inner.lock().unwrap().active.is_none());
+
+    let other = server().await;
+    let endpoint = other.endpoint;
+    let wrong = Arc::new(NativeSession {
+        inner: Mutex::default(),
+        connector: Arc::new(move |p, a| {
+            crate::controller::client::tests::loopback_transport(p, a, endpoint)
+        }),
+    });
+    let f = Fence {
+        scope_id: wrong.begin_scope().unwrap(),
+        generation: 1,
+    };
+    assert!(wrong
+        .update_endpoint(
+            s.store.clone(),
+            s.fixture.host.clone(),
+            format!("192.168.1.9:{}", endpoint.port()),
+            f
+        )
+        .await
+        .is_err());
+    assert!(other.fixture.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        s.store.load(&s.fixture.host).unwrap().unwrap().as_slice(),
+        original
+    );
+}
+#[tokio::test]
+async fn endpoint_update_rejects_urls_public_hosts_and_non_ipv4_without_effects() {
+    let s = server().await;
+    let f = connect(&s).await;
+    let original = s.store.load(&s.fixture.host).unwrap().unwrap().to_vec();
+    for endpoint in [
+        "https://192.168.1.9:2345",
+        "pc.local:2345",
+        "8.8.8.8:2345",
+        "[::1]:2345",
+        "192.168.1.9:0",
+    ] {
+        let mut next = f.clone();
+        next.generation += 1;
+        assert!(s
+            .session
+            .update_endpoint(
+                s.store.clone(),
+                s.fixture.host.clone(),
+                endpoint.into(),
+                next
+            )
+            .await
+            .is_err());
+        assert!(s.session.check(&f).is_ok());
+    }
+    assert_eq!(
+        s.store.load(&s.fixture.host).unwrap().unwrap().as_slice(),
+        original
+    );
+}
+#[tokio::test]
+async fn endpoint_update_cancels_old_poll_and_does_not_adopt_failed_persistence() {
+    struct FailSave(Arc<Memory>);
+    impl ControllerStore for FailSave {
+        fn load(&self, host: &str) -> Result<Option<Zeroizing<Vec<u8>>>, ControlError> {
+            self.0.load(host)
+        }
+        fn save(&self, _: &str, _: &[u8]) -> Result<(), ControlError> {
+            Err(transport_error(ControlErrorCode::HostNotReady))
+        }
+        fn delete(&self, host: &str) -> Result<(), ControlError> {
+            ControllerStore::delete(&*self.0, host)
+        }
+    }
+    let s = server().await;
+    let mut f = connect(&s).await;
+    let original = s.store.load(&s.fixture.host).unwrap().unwrap().to_vec();
+    let session = s.session.clone();
+    let old = f.clone();
+    let poll = tokio::spawn(async move {
+        session
+            .request(
+                &old,
+                ControllerRequest::Poll {
+                    cursor: EventCursor {
+                        host_epoch: "epoch".into(),
+                        revision: 0,
+                    },
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        s.fixture.poll_entered.notified(),
+    )
+    .await
+    .unwrap();
+    f.generation += 1;
+    assert!(s
+        .session
+        .update_endpoint(
+            Arc::new(FailSave(s.store.clone())),
+            s.fixture.host.clone(),
+            format!("192.168.1.9:{}", s.endpoint.port()),
+            f
+        )
+        .await
+        .is_err());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), poll)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert!(s.session.inner.lock().unwrap().active.is_none());
+    assert_eq!(
+        s.store.load(&s.fixture.host).unwrap().unwrap().as_slice(),
+        original
+    );
+}

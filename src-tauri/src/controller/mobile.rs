@@ -16,6 +16,7 @@ pub struct NativeInvitation {
     pub host_id: String,
     pub endpoint: SocketAddr,
     pub ca_der: Vec<u8>,
+    pub fingerprint: String,
     pub secret: Zeroizing<[u8; 32]>,
     pub expires_at: SystemTime,
 }
@@ -39,6 +40,7 @@ struct InvitationPayload {
     host_id: String,
     endpoint: String,
     ca: String,
+    fingerprint: String,
     secret: String,
     expires_at: Expiration,
 }
@@ -83,6 +85,8 @@ pub fn validate_invitation(text: &str, now: SystemTime) -> Result<NativeInvitati
     let ca_der = URL_SAFE_NO_PAD
         .decode(&payload.ca)
         .map_err(|_| invalid_pairing())?;
+    let fingerprint = super::client::ca_fingerprint(&ca_der);
+    if payload.fingerprint != fingerprint { return Err(invalid_pairing()); }
     // Build (without connecting) to validate certificate encoding and the exact
     // pinned trust policy before any pairing secret can be submitted.
     validate_trust(&payload.host_id, endpoint, &ca_der)?;
@@ -102,6 +106,7 @@ pub fn validate_invitation(text: &str, now: SystemTime) -> Result<NativeInvitati
         host_id: payload.host_id.clone(),
         endpoint,
         ca_der,
+        fingerprint,
         secret,
         expires_at,
     })
@@ -115,7 +120,7 @@ pub fn validate_invitation(text: &str, now: SystemTime) -> Result<NativeInvitati
 )]
 pub enum PairingStatus {
     Cancelled,
-    InvitationReady { host_id: String },
+    InvitationReady { host_id: String, fingerprint: String },
 }
 
 #[derive(Default)]
@@ -138,6 +143,7 @@ impl NativePairingState {
         let invitation = validate_invitation(input, now)?;
         let status = PairingStatus::InvitationReady {
             host_id: invitation.host_id.clone(),
+            fingerprint: invitation.fingerprint.clone(),
         };
         *pending = Some(invitation);
         Ok(status)
@@ -423,6 +429,22 @@ mod tests {
         (invitation.encode().unwrap().to_string(), now)
     }
     #[test]
+    fn invitation_fingerprint_is_canonical_and_required_before_staging() {
+        use sha2::{Digest, Sha256};
+        let (text, now) = invitation();
+        let mut wire: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let ca = URL_SAFE_NO_PAD.decode(wire["ca"].as_str().unwrap()).unwrap();
+        let expected = format!("{:x}", Sha256::digest(&ca));
+        assert_eq!(wire["fingerprint"], expected);
+        let status = NativePairingState::default().accept_input(Some(&text), now).unwrap();
+        assert_eq!(serde_json::to_value(status).unwrap()["fingerprint"], expected);
+        for invalid in [None, Some(serde_json::json!("0".repeat(64))), Some(serde_json::json!(expected.to_uppercase()))] {
+            if let Some(value) = invalid { wire["fingerprint"] = value; }
+            else { wire.as_object_mut().unwrap().remove("fingerprint"); }
+            assert!(validate_invitation(&wire.to_string(), now).is_err());
+        }
+    }
+    #[test]
     fn scan_and_paste_stage_native_invitation_but_return_only_status() {
         let (text, now) = invitation();
         let state = NativePairingState::default();
@@ -433,7 +455,7 @@ mod tests {
             .expect("native invitation must be staged");
         assert_eq!(
             serde_json::to_value(status).unwrap(),
-            serde_json::json!({"status":"invitation_ready","hostId":pending.host_id})
+            serde_json::json!({"status":"invitation_ready","hostId":pending.host_id,"fingerprint":pending.fingerprint})
         );
         assert!(state.take_invitation(now).unwrap().is_none());
         state.accept_input(Some(&text), now).unwrap();

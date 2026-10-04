@@ -32,6 +32,12 @@ function nativeBridge(): ControllerNativeBridge {
                 throw new Error("Invalid native session");
             return { snapshot: reply.snapshot, grants: reply.grants };
         },
+        async updateEndpoint(hostId, endpoint, fence) {
+            const reply = await invoke<{ type: string; snapshot: HostSnapshot; grants: { control: boolean } }>(
+                "controller_connection", { request: { type: "update_endpoint", hostId, endpoint, fence } });
+            if (reply.type !== "connected") throw new Error("Invalid native session");
+            return { snapshot: reply.snapshot, grants: reply.grants };
+        },
         suspend: fence => invoke("controller_suspend", { fence }), forget: (hostId, fence) => invoke("controller_forget", { hostId, fence }),
         scan: fence => invoke("controller_scan_pair", { fence, invitation: null }), pair: (fence, deviceName) => invoke("controller_pair", { fence, deviceName }),
         query: (fence, query) => request<QueryResult>(fence, { type: "query", query }, "query", "result"),
@@ -67,6 +73,14 @@ export async function connectController(hostId: string): Promise<void> {
     savePreferences();
     await active.connectController(hostId);
 }
+export async function updateControllerEndpoint(hostId: string, endpoint: string): Promise<void> {
+    const session = active;
+    if (!session || !known.includes(hostId)) return;
+    const receipt = await session.updateEndpoint(hostId, endpoint);
+    if (active !== session || !receipt?.isCurrent()) return;
+    selected = hostId;
+    savePreferences();
+}
 export function suspendController(): void {
     active?.suspendController();
 }
@@ -86,7 +100,13 @@ export async function pairController(): Promise<void> {
     const receipt = await session.pairController(host => {
         if (active !== session)
             return;
-        known = [host, ...known.filter(h => h !== host)].slice(0, 32);
+        const candidates = [host, ...known.filter(h => h !== host)];
+        known = candidates.slice(0, 32);
+        // A newly persisted pairing must not evict the selected resume target
+        // while its follow-up connection can still fail or be cancelled.
+        if (selected && candidates.includes(selected) && !known.includes(selected)) {
+            known[known.length - 1] = selected;
+        }
         savePreferences();
     });
     if (active !== session || !receipt?.isCurrent())

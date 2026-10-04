@@ -10,11 +10,13 @@ export interface AuthenticatedConnection { snapshot: HostSnapshot; grants: { con
 export interface ControllerNativeBridge {
     beginScope(): Promise<string>;
     connect(hostId: string, fence: NativeControllerFence): Promise<AuthenticatedConnection>;
+    updateEndpoint(hostId: string, endpoint: string, fence: NativeControllerFence): Promise<AuthenticatedConnection>;
     suspend(fence: NativeControllerFence): Promise<void>;
     forget(hostId: string, fence: NativeControllerFence): Promise<void>;
     scan(fence: NativeControllerFence): Promise<{
         status: "cancelled" | "invitation_ready";
         hostId?: string;
+        fingerprint?: string;
     }>;
     pair(fence: NativeControllerFence, deviceName: string): Promise<{
         hostId: string;
@@ -38,6 +40,7 @@ export interface ControllerState {
     ready: boolean;
     status: "disconnected" | "connecting" | "connected" | "unavailable" | "pairing" | "pairing_required" | "permission_required" | "protocol_error";
     error?: ControlError;
+    pairingFingerprint?: string;
 }
 const failure = (code: ControlError["code"], message = "Controller session is unavailable."): ControlError => ({ code, message, retryable: code === "host_not_ready" });
 export function createControllerSession(native: ControllerNativeBridge, options: {
@@ -58,7 +61,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         for (const h of media)
             h.dispose();
         media.clear();
-        publish({ ready: false, snapshot: null, grants: null });
+        publish({ ready: false, snapshot: null, grants: null, pairingFingerprint: undefined });
         return generation;
     };
     const fence = async (g: number) => {
@@ -81,7 +84,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         for (const listener of listeners)
             listener(structuredClone(update));
     };
-    function disconnected(error: unknown, g: number) {
+    function disconnected(error: unknown, g: number, retry = true) {
         if (g !== generation)
             return;
         const e = (error && typeof error === "object" && "code" in error ? error : failure("host_not_ready")) as ControlError;
@@ -91,7 +94,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         publish({ status: e.code === "unauthorized" ? "pairing_required" : e.code === "permission_required" ? "permission_required" : terminal ? "protocol_error" : "unavailable", error: e });
         void fence(next).then(f => native.suspend(f)).catch(() => {
         });
-        if (!terminal && host) {
+        if (retry && !terminal && host) {
             const delay = Math.min(8000, 1000 * 2 ** Math.min(attempts++, 3)) * (0.8 + 0.2 * (options.random ?? Math.random)());
             timer = setTimeout(() => {
                 timer = undefined;
@@ -189,6 +192,20 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             disconnected(error, g);
         }
     }
+    async function updateEndpoint(hostId: string, endpoint: string): Promise<ControllerConnectionReceipt | undefined> {
+        const g = invalidate();
+        publish({ currentHostId: hostId, status: "connecting", error: undefined });
+        try {
+            const f = await fence(g);
+            const receipt = await native.updateEndpoint(hostId, endpoint, f);
+            adopt(receipt, hostId, g);
+            void polling(g, f);
+            return { hostId, isCurrent: () => g === generation };
+        } catch (error) {
+            // Never reconnect to the old endpoint and imply the edit succeeded.
+            disconnected(error, g, false);
+        }
+    }
     function suspendController(): void {
         const g = invalidate();
         publish({ status: "disconnected", error: undefined });
@@ -212,6 +229,10 @@ export function createControllerSession(native: ControllerNativeBridge, options:
                 suspendController();
                 return;
             }
+            if (!input.fingerprint || !/^[0-9a-f]{64}$/.test(input.fingerprint)) {
+                throw failure("invalid_request", "Invalid invitation fingerprint. Create a new invitation on the PC.");
+            }
+            publish({ pairingFingerprint: input.fingerprint });
             const paired = await native.pair(f, "Android controller");
             current(g);
             // Catalog membership is committed before connection, independently of selection.
@@ -312,7 +333,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     return {
         port, state: readonly(state), initialize: async () => {
             await fence(generation);
-        }, connectController, suspendController, forgetController, pairController
+        }, connectController, updateEndpoint, suspendController, forgetController, pairController
     };
 }
 const sessions = new WeakMap<ControllerNativeBridge, ReturnType<typeof createControllerSession>>();

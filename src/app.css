@@ -322,7 +322,7 @@ a:hover {
   display: none !important;
 }
 
-@media (max-width: 767px) {
+@media (width < 768px) {
   :root {
     --sidebar-width: 0px;
     --player-height: 64px;

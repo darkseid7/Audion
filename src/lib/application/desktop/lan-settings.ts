@@ -10,7 +10,7 @@ export interface LanSettingsDependencies {
   release(): Promise<void>;
 }
 export function createLanSettings(dependencies: LanSettingsDependencies) {
-  const state = writable<{ host: HostInspection | null; busy: boolean; error: string | null; invitation: { encoded: string; qrSvg: string } | null }>({ host: null, busy: false, error: null, invitation: null });
+  const state = writable<{ host: HostInspection | null; busy: boolean; error: string | null; invitation: { encoded: string; qrSvg: string; fingerprint: string } | null }>({ host: null, busy: false, error: null, invitation: null });
   let busy = false;
   const inspect = async () => {
     const host = await dependencies.invoke<HostInspection>("control_host_enable", { request: { action: "status" } });
@@ -42,7 +42,7 @@ export function createLanSettings(dependencies: LanSettingsDependencies) {
       await inspect();
     }),
     createInvitation: () => run(async () => {
-      const invitation = await dependencies.invoke<{ encoded: string; qrSvg: string }>("control_host_invitation");
+      const invitation = await dependencies.invoke<{ encoded: string; qrSvg: string; fingerprint: string }>("control_host_invitation");
       state.update(value => ({ ...value, invitation }));
     }),
     approve: (pendingId: string, grants: { control: boolean; administration: boolean }) => run(async () => {

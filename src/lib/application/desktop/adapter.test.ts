@@ -9,7 +9,7 @@ vi.mock("$lib/api/tauri", async importOriginal => ({
 }));
 import { createDesktopAdapter } from "./adapter";
 import { playbackStateWriter as state } from "$lib/stores/playback-state";
-import { activeSqueezePlayer, commitSqueezeTarget } from "$lib/stores/squeeze";
+import { activeSqueezePlayer, commitSqueezeTarget, discoveredSqueezePlayers } from "$lib/stores/squeeze";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -534,4 +534,31 @@ it("host shuffle chooses a nonzero initial member while explicit start wins",asy
   await adapter.port.execute({type:"play_album",albumId:42,playMode:"all",startTrackId:8},{hostEpoch:adapter.state.read().hostEpoch});
   expect(api.play).toHaveBeenLastCalledWith("A",[7,8,9],1);
  } finally { await adapter.dispose();random.mockRestore(); }
+});
+it("publishes negative provider metadata through the real host bridge without local paths", async () => {
+  discoveredSqueezePlayers.set([]);
+  const { connectHostBridge } = await import("./bridge");
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const track = { id: -8, album_id: -9, title: "Provider track", artist: "Provider artist", path: "plugin://private", source_type: "plugin", duration: 100 } as any;
+  state.queue.set([track, track]); state.queueIndex.set(1); state.currentTrack.set(track);
+  state.playbackContext.set({ type: "track", trackId: -8 });
+  state.currentTime.set(0); state.duration.set(100); state.volume.set(0.5); state.repeat.set("none");
+  const adapter = createDesktopAdapter(undefined, "Fixture PC");
+  const updates: unknown[] = [];
+  const bridge = await connectHostBridge(adapter.port, adapter.attachAuthority, adapter.coordinator, {
+    listen: async () => () => {},
+    register: async request => {
+      if (request.phase === "publish") updates.push(request.update);
+      return { hostId: "fixture-host", lease: { hostEpoch: "fixture-epoch", leaseId: "fixture-lease" }, revision: 1 };
+    }, authorize: async () => { throw new Error("No command in publication fixture"); }, complete: async () => {},
+  });
+  try {
+    const update = updates.at(-1) as any;
+    expect(update.snapshot.playback.track.id).toBe(-8);
+    expect(update.presentation.queue[0].entryId).not.toBe(update.presentation.queue[1].entryId);
+    expect(JSON.stringify(update)).not.toMatch(/plugin:|private|source_type|credential/);
+    const path = new URL("../../../../tests/fixtures/controller/provider-publication.json", import.meta.url);
+    if (process.env.UPDATE_PROVIDER_FIXTURE === "1") writeFileSync(path, JSON.stringify(update, null, 2) + "\n");
+    expect(update).toEqual(JSON.parse(readFileSync(path, "utf8")));
+  } finally { await bridge.dispose(); await adapter.dispose(); }
 });

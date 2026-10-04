@@ -32,6 +32,28 @@ fn safe_number(value: &serde_json::Number) -> Option<u64> {
     (float.is_finite() && float >= 0.0 && float <= MAX_SAFE_INTEGER as f64 && float.fract() == 0.0)
         .then_some(float as u64)
 }
+// Display metadata is not a library command identity: providers may use
+// negative IDs, but the JSON number must still be an exact nonzero integer.
+fn display_id<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let number = serde_json::Number::deserialize(d)?;
+    let value = number
+        .as_f64()
+        .ok_or_else(|| D::Error::custom("Invalid display ID"))?;
+    if !value.is_finite() || value.fract() != 0.0 || value.abs() > MAX_SAFE_INTEGER as f64 {
+        return Err(D::Error::custom("Invalid display ID"));
+    }
+    let id = value as i64;
+    if id == 0 || !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&id) {
+        return Err(D::Error::custom("Invalid display ID"));
+    }
+    Ok(id)
+}
+fn nullable_display_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    value
+        .map(|v| display_id(v).map_err(D::Error::custom))
+        .transpose()
+}
 fn entity_id<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     let value = safe_revision(d)?;
     if value == 0 {
@@ -110,13 +132,6 @@ fn nullable_revision<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::
     Option::<serde_json::Number>::deserialize(d)?
         .map(|value| safe_number(&value).ok_or_else(|| D::Error::custom("unsafe integer")))
         .transpose()
-}
-fn nullable_entity_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    let value = nullable_revision(d)?;
-    if value == Some(0) {
-        return Err(D::Error::custom("entity ID must be positive"));
-    }
-    Ok(value)
 }
 fn nullable_signed_integer<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
     Option::<serde_json::Number>::deserialize(d)?
@@ -530,14 +545,14 @@ pub struct DisplayTrack {
         skip_serializing_if = "Option::is_none"
     )]
     pub liked: Option<bool>,
-    #[serde(deserialize_with = "entity_id")]
-    pub id: u64,
+    #[serde(deserialize_with = "display_id")]
+    pub id: i64,
     #[serde(deserialize_with = "required_nullable")]
     pub title: Option<String>,
     #[serde(deserialize_with = "required_nullable")]
     pub artist: Option<String>,
-    #[serde(deserialize_with = "nullable_entity_id")]
-    pub album_id: Option<u64>,
+    #[serde(deserialize_with = "nullable_display_id")]
+    pub album_id: Option<i64>,
     #[serde(deserialize_with = "required_nullable")]
     pub album: Option<String>,
     #[serde(deserialize_with = "nullable_finite")]
@@ -958,13 +973,13 @@ pub struct HostCapabilities {
 )]
 pub enum PlaybackContext {
     Album {
-        #[serde(deserialize_with = "entity_id")]
-        album_id: u64,
+        #[serde(deserialize_with = "display_id")]
+        album_id: i64,
         play_mode: AlbumPlayMode,
     },
     Playlist {
-        #[serde(deserialize_with = "entity_id")]
-        playlist_id: u64,
+        #[serde(deserialize_with = "display_id")]
+        playlist_id: i64,
     },
     Artist {
         #[serde(deserialize_with = "identifier")]
@@ -972,8 +987,8 @@ pub enum PlaybackContext {
     },
     Liked {},
     Track {
-        #[serde(deserialize_with = "entity_id")]
-        track_id: u64,
+        #[serde(deserialize_with = "display_id")]
+        track_id: i64,
     },
     Queue {},
 }
@@ -1296,6 +1311,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_publication_accepts_signed_metadata_without_widening_commands() {
+        let raw: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/controller/provider-publication.json")).unwrap();
+        let received = serde_json::from_value::<HostUpdate>(raw.clone());
+        assert!(received.is_ok(), "actual TypeScript host projection must cross native publication");
+        let HostUpdate::Projection { snapshot, presentation: _ } = received.unwrap();
+        assert_eq!(serde_json::to_value(snapshot).unwrap()["playback"]["track"]["id"], -8);
+        let presentation: HostPresentation = serde_json::from_value(raw["presentation"].clone()).unwrap();
+        assert_eq!(presentation.queue.len(), 2);
+        assert_ne!(presentation.queue[0].entry_id, presentation.queue[1].entry_id);
+        for field in ["trackId", "albumId", "playlistId"] {
+            let kind = match field { "trackId" => "play_track", "albumId" => "play_album", _ => "play_playlist" };
+            let mut intent = serde_json::json!({"type":kind,field:-8});
+            if field == "albumId" { intent["playMode"] = serde_json::json!("all"); }
+            let envelope = serde_json::json!({"protocolVersion":1,"requestId":"fixture","preconditions":{"hostEpoch":"fixture-epoch","libraryRevision":0,"outputRevision":0},"intent":intent});
+            assert!(serde_json::from_value::<CommandEnvelope>(envelope).is_err());
+        }
+    }
     fn track_fixture() -> serde_json::Value {
         serde_json::json!({"id":1,"title":"","artist":null,"albumId":null,"album":null,"duration":null,"trackNumber":null,"discNumber":null,"quality":{"format":null,"bitrate":null,"badges":[]}})
     }
@@ -1353,6 +1386,12 @@ mod tests {
             serde_json::json!(9_007_199_254_740_992_u64),
         ]
     }
+    fn invalid_display_ids() -> Vec<serde_json::Value> {
+        let mut values = invalid_entity_ids();
+        values.retain(|v| v.as_i64() != Some(-1));
+        values.push(serde_json::json!(-9_007_199_254_740_992i64));
+        values
+    }
     fn invalid_entity_ids() -> Vec<serde_json::Value> {
         let mut values = invalid_revisions();
         values.push(serde_json::json!(0));
@@ -1397,8 +1436,8 @@ mod tests {
     #[test]
     fn display_entities_validate_ids_counts_and_required_nullable_fields() {
         let track = track_fixture();
-        rejects_field_values::<DisplayTrack>(&track, "id", &invalid_entity_ids());
-        rejects_field_values::<DisplayTrack>(&track, "albumId", &invalid_entity_ids());
+        rejects_field_values::<DisplayTrack>(&track, "id", &invalid_display_ids());
+        rejects_field_values::<DisplayTrack>(&track, "albumId", &invalid_display_ids());
         for field in ["trackNumber", "discNumber"] {
             rejects_field_values::<DisplayTrack>(&track, field, &invalid_revisions());
         }
@@ -1425,7 +1464,7 @@ mod tests {
                 "playlist" => "playlistId",
                 _ => "trackId",
             };
-            rejects_field_values::<PlaybackContext>(&context, field, &invalid_entity_ids());
+            rejects_field_values::<PlaybackContext>(&context, field, &invalid_display_ids());
         }
         rejects_field_values::<PlaybackContext>(
             &serde_json::json!({"type":"artist","artistName":"Artist"}),

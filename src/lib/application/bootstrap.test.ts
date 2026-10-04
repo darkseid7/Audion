@@ -194,8 +194,9 @@ describe("post-pair selection ownership", () => {
     capabilities: { queries: ["snapshot"], intents: ["pause"] }, settings: {}, jobs: [],
   });
 
-  it.each(["switch", "suspend", "forget", "complete"] as const)("preserves persisted and resume selection after %s during post-pair connect", async intent => {
-    const records = new Map([["audion_controller_hosts", JSON.stringify({ known: [hostB], selected: hostB })]]);
+  it.each(["switch", "suspend", "forget", "complete", "capacity"] as const)("preserves persisted and resume selection after %s during post-pair connect", async intent => {
+    const initial = intent === "capacity" ? [...Array.from({ length: 31 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`), hostB] : [hostB];
+    const records = new Map([["audion_controller_hosts", JSON.stringify({ known: initial, selected: hostB })]]);
     vi.stubGlobal("localStorage", {
       getItem: (key: string) => records.get(key) ?? null,
       setItem: (key: string, value: string) => { records.set(key, value); },
@@ -219,7 +220,7 @@ describe("post-pair selection ownership", () => {
           return { type: "connected", snapshot: snapshot(hostId), grants: { control: true } };
         }
       }
-      if (command === "controller_scan_pair") return { status: "invitation_ready" };
+      if (command === "controller_scan_pair") return { status: "invitation_ready", fingerprint: "ab".repeat(32) };
       if (command === "controller_pair") return { hostId: hostA };
       if (command === "controller_suspend" || command === "controller_forget") return;
       if (command === "controller_request" && input.request?.type === "poll") return new Promise(() => {});
@@ -232,7 +233,7 @@ describe("post-pair selection ownership", () => {
       const pairing = controller.pairController();
       await vi.waitFor(() => expect(connections).toEqual([hostB, hostA]));
       if (intent === "switch") await controller.connectController(hostB);
-      else if (intent === "suspend") controller.suspendController();
+      else if (intent === "suspend" || intent === "capacity") controller.suspendController();
       else if (intent === "forget") await controller.forgetController(hostA);
       const before = get(controller.controllerState);
       release({ type: "connected", snapshot: snapshot(hostA), grants: { control: true } });
@@ -241,7 +242,8 @@ describe("post-pair selection ownership", () => {
       else expect(get(controller.controllerState)).toEqual(before);
       const selected = intent === "complete" ? hostA : hostB;
       expect(prefs().selected).toBe(selected);
-      expect(prefs().known).toEqual(intent === "forget" ? [hostB] : [hostA, hostB]);
+      if (intent === "capacity") { expect(prefs().known).toHaveLength(32); expect(prefs().known).toContain(hostB); expect(prefs().known).toContain(hostA); }
+      else expect(prefs().known).toEqual(intent === "forget" ? [hostB] : [hostA, hostB]);
       expect(get(controller.pairedHostIds)).toEqual(prefs().known);
       visibility.visibilityState = "hidden";
       visibility.dispatchEvent(new Event("visibilitychange"));
