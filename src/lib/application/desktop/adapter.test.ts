@@ -4,7 +4,7 @@ import { get } from "svelte/store";
 const api = vi.hoisted(() => ({ play: vi.fn(), stop: vi.fn(), tracks: vi.fn(), players: vi.fn() }));
 vi.mock("$lib/api/tauri", async importOriginal => ({
   ...await importOriginal<object>(),
-  squeezeNext: vi.fn().mockResolvedValue(undefined), squeezePrevious: vi.fn().mockResolvedValue(undefined), squeezeSeek: vi.fn().mockResolvedValue(undefined), getLikedTrackIds: vi.fn().mockResolvedValue([7]), squeezeGetPlayerState: vi.fn(), squeezeUpdateQueue: vi.fn().mockResolvedValue(undefined), squeezePause: vi.fn().mockResolvedValue(undefined), squeezePlay: api.play, squeezeStop: api.stop, squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined), getTracksByAlbum: api.tracks,
+  getPlaylistTracks: vi.fn(), getTracksByArtist: vi.fn(), getLikedTracks: vi.fn(), squeezeNext: vi.fn().mockResolvedValue(undefined), squeezePrevious: vi.fn().mockResolvedValue(undefined), squeezeSeek: vi.fn().mockResolvedValue(undefined), getLikedTrackIds: vi.fn().mockResolvedValue([7]), squeezeGetPlayerState: vi.fn(), squeezeUpdateQueue: vi.fn().mockResolvedValue(undefined), squeezePause: vi.fn().mockResolvedValue(undefined), squeezePlay: api.play, squeezeStop: api.stop, squeezeDisconnectPlayer: vi.fn().mockResolvedValue(undefined), getTracksByAlbum: api.tracks,
   squeezeGetPlayers: api.players, getTrackById: async (id: number) => ({ id, title: `Track ${id}`, duration: 100, cover_url: "fixture" }),
 }));
 import { createDesktopAdapter } from "./adapter";
@@ -489,4 +489,37 @@ it.each(["queue_insert", "queue_append"] as const)("refreshes bound local %s on 
   const intent=type==="queue_insert"?{type,trackIds:[7],placement:"next" as const}:{type,trackIds:[7]};
   await expect(local.execute(intent)).resolves.toBeUndefined();expect(adapter.state.read().queue.map(e=>e.track.id)).toEqual([7]);
   revision=3;expect(await adapter.port.execute(intent,{hostEpoch:adapter.state.read().hostEpoch,libraryRevision:2})).toMatchObject({status:"superseded",error:{code:"revision_conflict"}});expect(adapter.state.read().queue).toHaveLength(1);await adapter.dispose();registered.mockRestore();
+});
+
+it("projects a safe PC-provided name and explicit identity fallback", async () => {
+ const named = createDesktopAdapter(undefined, "  Studio PC  ");
+ expect(await named.port.query({ type: "outputs" })).toMatchObject({ outputs: expect.arrayContaining([expect.objectContaining({ name: "Studio PC", output: { kind: "pc" } })]) }); await named.dispose();
+ const fallback = createDesktopAdapter(undefined, "\u0000\n"); await fallback.attachAuthority({ hostId: "native-host", hostEpoch: "epoch" });
+ expect(await fallback.port.query({ type: "outputs" })).toMatchObject({ outputs: expect.arrayContaining([expect.objectContaining({ name: "PC · native-host" })]) }); await fallback.dispose();
+});
+
+it("resolves an over-200-track album once on the PC for one queue operation", async () => {
+ const tracks=Array.from({length:201},(_,i)=>({id:i+1,title:`Track ${i+1}`,duration:100,cover_url:"fixture"})); api.tracks.mockResolvedValue(tracks);
+ const adapter=createDesktopAdapter(); const before=adapter.state.read();
+ const result=await adapter.port.execute({type:"queue_entity",entity:{type:"album",albumId:42,playMode:"all"},placement:"end"} as any,{hostEpoch:before.hostEpoch,...before.revisions});
+ expect(result.status).toBe("applied"); expect(api.tracks).toHaveBeenCalledExactlyOnceWith(42); expect(get(state.queue).map(t=>t.id)).toEqual(Array.from({length:201},(_,i)=>i+1)); await adapter.dispose();
+});
+
+it.each(["playlist","artist","liked"] as const)("queues a complete >200 %s entity with duplicate occurrences on PC",async type=>{
+ const apiModule=await import("$lib/api/tauri");const tracks=Array.from({length:201},()=>({id:7,title:"Duplicate",path:"fixture",duration:100}));
+ const resolver=type==="playlist"?apiModule.getPlaylistTracks:type==="artist"?apiModule.getTracksByArtist:apiModule.getLikedTracks;vi.mocked(resolver).mockResolvedValue(tracks as any);
+ const entity=type==="playlist"?{type,playlistId:9}:type==="artist"?{type,artistName:"Ada"}:{type};const adapter=createDesktopAdapter();
+ expect(await adapter.port.execute({type:"queue_entity",entity,placement:"end"},{hostEpoch:adapter.state.read().hostEpoch,...adapter.state.read().revisions})).toMatchObject({status:"applied"});
+ expect(resolver).toHaveBeenCalledOnce();expect(get(state.queue)).toHaveLength(201);expect(adapter.state.read().queue.map(e=>e.entryId).filter((id,i,all)=>all.indexOf(id)===i)).toHaveLength(201);await adapter.dispose();
+});
+it("filters liked-only album enqueue on PC without losing duplicate occurrences",async()=>{
+ api.tracks.mockResolvedValue([{id:7,duration:100},{id:8,duration:100},{id:7,duration:100}]);const adapter=createDesktopAdapter();
+ await adapter.port.execute({type:"queue_entity",entity:{type:"album",albumId:42,playMode:"liked_only"},placement:"end"},{hostEpoch:adapter.state.read().hostEpoch,...adapter.state.read().revisions});
+ expect(get(state.queue).map(t=>t.id)).toEqual([7,7]);await adapter.dispose();
+});
+
+it("reports a confirmed Squeeze seek stop without pretending restart succeeded",async()=>{
+ const native=await import("$lib/api/tauri");vi.mocked(native.squeezeSeek).mockRejectedValueOnce("SQUEEZE_SEEK_PARTIAL: output stopped; restart failed");
+ commitSqueezeTarget("A");state.duration.set(100);const adapter=createDesktopAdapter();
+ expect(await adapter.port.execute({type:"seek",seconds:25},{hostEpoch:adapter.state.read().hostEpoch,...adapter.state.read().revisions})).toMatchObject({status:"failed",partialEffects:["Previous output stopped"]});await adapter.dispose();
 });

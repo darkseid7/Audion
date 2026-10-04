@@ -1,4 +1,10 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerTransport from "./ControllerTransport.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+
     import { fly } from "svelte/transition";
     import {
         isMiniPlayer,
@@ -54,7 +60,7 @@
     let albumArt: string | null = null;
     let imageLoadFailed = false;
 
-    $: if ($currentTrack) loadTrackCover($currentTrack);
+    $: if ($applicationMode !== "controller" && $currentTrack) loadTrackCover($currentTrack);
     else {
         albumArt = null;
         imageLoadFailed = false;
@@ -147,14 +153,20 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         // Force a re-run of lyrics sync for this instance
         destroyLyricsSync();
         initLyricsSync();
         return () => destroyLyricsSync();
     });
 </script>
-
 <svelte:window on:mousemove={onSeekMove} on:mouseup={onSeekUp} />
+{#if $applicationMode === "controller"}
+ <ControllerTransport variant="mini" execute={handleControllerIntent} />
+{:else}
+
+
+
 
 {#if $isMiniPlayer}
     <div
@@ -422,6 +434,8 @@
             <div class="bottom-fill" style="width:{$progress * 100}%"></div>
         </div>
     </div>
+{/if}
+
 {/if}
 
 <style>

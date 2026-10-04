@@ -1,4 +1,11 @@
 ﻿<script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
   import type { Track } from "$lib/api/tauri";
   import {
     formatDuration,
@@ -317,7 +324,7 @@
   // fetch the next paginated batch from the backend.
   $: {
     if (
-      virtualScrollState.endIndex >= sortedTracks.length - 10 &&
+      $applicationMode !== "controller" && virtualScrollState.endIndex >= sortedTracks.length - 10 &&
       sortedTracks.length > 0
     ) {
       loadMoreTracks();
@@ -351,6 +358,7 @@
 
   // Measure container height on mount
   onMount(() => {
+        if ($applicationMode === "controller") return;
     // 5: Load playlists once on mount to avoid race conditions
     if ($playlists.length === 0) {
       loadPlaylists();
@@ -957,6 +965,10 @@
     }
   }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"tracks"}} heading="Tracks" enqueue={handleControllerQueue} execute={handleControllerIntent} />
+{:else}
+
 
 {#if metadataModalTrack}
   <MetadataModal
@@ -1352,6 +1364,8 @@
     </div>
   {/if}
 </div>
+
+{/if}
 
 <style>
   .track-list {

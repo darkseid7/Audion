@@ -1,3 +1,4 @@
+import { hostname } from "@tauri-apps/plugin-os";
 import { get } from "svelte/store";
 import { createDesktopAdapter } from "./adapter";
 import { connectHostBridge, createDesktopLibraryAccess } from "./bridge";
@@ -50,7 +51,8 @@ async function start(): Promise<void> {
     equalizer.initialize();
     stops.push(initializePinned(), initializeCustomArtwork(), initializePlaylistCovers(), initializeLyricsPreferences());
     initializeFromPersistedState();
-    adapter = createDesktopAdapter(createDesktopLibraryAccess(() => [...get(pinnedItems).albums]));
+    const pcName = await hostname().catch(() => null);
+    adapter = createDesktopAdapter(createDesktopLibraryAccess(() => [...get(pinnedItems).albums]), pcName);
     stops.push(setupAutoSave(), initializeSleepTimer(() => adapter!.pauseForTimer()), initializeSqueeze(), wsStore.initialize());
     await initAudioBackend();
     initDiscordPresence();

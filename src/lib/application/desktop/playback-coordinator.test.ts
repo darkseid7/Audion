@@ -153,3 +153,20 @@ it("disposal cancels queued remote, local and signal work but drains the entered
   expect(f.runtime.applySignal).not.toHaveBeenCalled();
   expect(drained).toBe(true);
 });
+
+it("keeps whole entity resolution and apply in one lane and rejects a changed library", async () => {
+ const f=fixture(); let release!:()=>void; const held=new Promise<void>(r=>release=r);
+ f.runtime.resolvePlayback=vi.fn(async()=>{await held;return {tracks:[],startIndex:0,context:null};});
+ const pending=f.coordinator.execute({type:"queue_entity",entity:{type:"liked"},placement:"next"},{hostEpoch:"host",libraryRevision:0,queueRevision:0,outputRevision:0});
+ await vi.waitFor(()=>expect(f.runtime.resolvePlayback).toHaveBeenCalledOnce());
+ const local=vi.fn(async()=>ok); const later=f.coordinator.executeLocal(local);
+ const signal=f.coordinator.enqueueSignal({kind:"completion",output:{kind:"pc"},ownershipGeneration:1,transitionGeneration:1});
+ expect(local).not.toHaveBeenCalled(); expect(f.runtime.applySignal).not.toHaveBeenCalled();
+ f.state.commit({revisions:{libraryRevision:1}}); release();
+ expect(await pending).toMatchObject({status:"superseded",error:{code:"revision_conflict"}});
+ expect(f.runtime.apply).not.toHaveBeenCalled(); await Promise.all([later,signal]); expect(local).toHaveBeenCalledOnce();
+});
+
+it.each(["libraryRevision","queueRevision","outputRevision"] as const)("rejects stale entity enqueue %s before resolving or applying",async key=>{
+ const f=fixture();expect(await f.coordinator.execute({type:"queue_entity",entity:{type:"liked"},placement:"next"},{hostEpoch:"host",libraryRevision:0,queueRevision:0,outputRevision:0,[key]:1})).toMatchObject({status:"superseded",error:{code:"revision_conflict"}});expect(f.runtime.resolvePlayback).not.toHaveBeenCalled();expect(f.runtime.apply).not.toHaveBeenCalled();
+});

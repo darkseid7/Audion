@@ -1,4 +1,10 @@
 ﻿<script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerTransport from "./ControllerTransport.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+
     import { onMount } from "svelte";
     import {
         currentTrack,
@@ -124,7 +130,7 @@
     // Expose audio element for visualizer - removed for native backend
 
     // Load track cover - with priority order
-    $: if ($currentTrack) {
+    $: if ($applicationMode !== "controller" && $currentTrack) {
         loadTrackCover($currentTrack);
     } else {
         albumArt = null;
@@ -252,6 +258,7 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         // Global mouse events for seeking and volume
         const handleGlobalMouseMove = (e: MouseEvent) => {
             if (isSeeking) handleSeek(e);
@@ -281,6 +288,10 @@
         };
     });
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerTransport variant="bar" visible={!hidden} execute={handleControllerIntent} />
+{:else}
+
 
 <footer
     class="player-bar"
@@ -956,6 +967,8 @@
 
 {#if showConnectPanel}
     <ConnectPanel on:close={() => showConnectPanel = false} />
+{/if}
+
 {/if}
 
 <style>

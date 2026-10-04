@@ -48,7 +48,7 @@ export interface PlaybackCoordinator {
 }
 export const sameOutput = (a: SnapshotOutputRef, b: SnapshotOutputRef): boolean => a.kind === b.kind && (a.kind === "pc" || a.kind === "desktop_only" && b.kind === "desktop_only" && a.reason === b.reason || a.kind === "squeeze" && b.kind === "squeeze" && a.playerId === b.playerId);
 const replacement = (intent: PlaybackIntent) => intent.type.startsWith("play_") || ["next", "previous", "queue_play"].includes(intent.type);
-const resolvesTracks = (intent: PlaybackIntent) => intent.type.startsWith("play_") || intent.type === "queue_insert" || intent.type === "queue_append";
+const resolvesTracks = (intent: PlaybackIntent) => intent.type.startsWith("play_") || intent.type === "queue_insert" || intent.type === "queue_append" || intent.type === "queue_entity";
 export function runtimeFailure(error: unknown): RuntimeResult {
   if (error instanceof PlaybackFailure) return { status: error.status, error: error.controlError, partialEffects: error.partialEffects };
   return { status: "failed", error: { code: "execution_failed", message: error instanceof Error ? error.message : String(error), retryable: false }, partialEffects: [] };

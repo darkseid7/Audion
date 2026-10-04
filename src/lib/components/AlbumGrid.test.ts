@@ -23,6 +23,9 @@ function renderAlbums(savedView?: string, deniedStorage = false, playing = true)
     setItem(key: string, value: string) { if (deniedStorage) throw new Error("denied"); saved.set(key, value); },
   };
   const modules: Record<string, unknown> = {
+    "$lib/application/bootstrap": { applicationMode: writable("desktop") },
+    "$lib/application/view-actions": { viewActions: {} },
+    "./ControllerBrowse.svelte": { default: () => {} },
     "svelte": svelte,
     "svelte/internal/server": server,
     "$lib/stores/view": { goToAlbumDetail() {}, goToArtistDetail() {} },

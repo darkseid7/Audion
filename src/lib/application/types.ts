@@ -12,6 +12,7 @@ export interface CommandPreconditions {
   libraryRevision?: number;
   outputRevision?: number;
 }
+export type QueueEntity = { type: "album"; albumId: number; playMode: "all" | "liked_only" } | { type: "playlist"; playlistId: number } | { type: "artist"; artistName: string } | { type: "liked" };
 export type ApplicationIntent =
   | { type: "play_album"; albumId: number; playMode: "all" | "liked_only"; startTrackId?: number }
   | { type: "play_playlist"; playlistId: number; startTrackId?: number }
@@ -24,6 +25,7 @@ export type ApplicationIntent =
   | { type: "set_volume"; volume: number }
   | { type: "set_shuffle"; enabled: boolean }
   | { type: "set_repeat"; mode: RepeatMode }
+  | { type: "queue_entity"; entity: QueueEntity; placement: "next" | "after_user_queue" | "end" }
   | { type: "queue_insert"; trackIds: number[]; placement: "next" | "after_user_queue" }
   | { type: "queue_append"; trackIds: number[] }
   | { type: "queue_remove"; entryId: string }

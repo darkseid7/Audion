@@ -885,5 +885,111 @@
         "type": "pause"
       }
     }
+  },
+{
+  "name": "queue_entity_0",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 42,
+        "playMode": "all"
+      },
+      "placement": "next"
+    }
   }
+},
+{
+  "name": "queue_entity_1",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 42,
+        "playMode": "liked_only"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_2",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "playlist",
+        "playlistId": 9
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_3",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "artist",
+        "artistName": "Björk"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_4",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "liked"
+      },
+      "placement": "next"
+    }
+  }
+}
 ]

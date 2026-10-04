@@ -230,6 +230,12 @@ impl CommandService {
             .clone()
             .ok_or_else(|| error(ControlErrorCode::HostNotReady))
     }
+    pub fn authenticated_control_grant(&self, device: &AuthenticatedDevice) -> Result<bool, ControlError> {
+        self.ensure_running()?;
+        let grants = self.pairing.authenticate(device.id, &device.secret)?;
+        self.ensure_running()?;
+        Ok(grants.control)
+    }
     pub fn authenticated_snapshot(
         &self,
         device: &AuthenticatedDevice,

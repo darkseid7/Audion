@@ -34,6 +34,7 @@
     "dialog:default",
     "notification:default",
     "os:default",
+    "os:allow-hostname",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-unregister-all",

@@ -132,6 +132,12 @@ impl PlayQueue {
         self.order.get(self.position?).copied()
     }
 
+    /// Restore an exact occurrence without reordering or reshuffling the queue.
+    pub fn select_occurrence(&mut self, index: usize) -> Result<(), String> {
+        let position=self.order.iter().position(|entry| *entry==index)
+            .filter(|_| self.tracks.get(index).is_some()).ok_or("Queue occurrence is unavailable")?;
+        self.position=Some(position); Ok(())
+    }
     /// Get the currently playing track.
     pub fn current(&self) -> Option<&QueueTrack> {
         let pos = self.position?;

@@ -26,10 +26,11 @@ function nativeBridge(): ControllerNativeBridge {
             const reply = await invoke<{
                 type: string;
                 snapshot: HostSnapshot;
+                grants: { control: boolean };
             }>("controller_connection", { request: { type: "connect", hostId, fence } });
             if (reply.type !== "connected")
                 throw new Error("Invalid native session");
-            return reply.snapshot;
+            return { snapshot: reply.snapshot, grants: reply.grants };
         },
         suspend: fence => invoke("controller_suspend", { fence }), forget: (hostId, fence) => invoke("controller_forget", { hostId, fence }),
         scan: fence => invoke("controller_scan_pair", { fence, invitation: null }), pair: (fence, deviceName) => invoke("controller_pair", { fence, deviceName }),
@@ -42,7 +43,7 @@ function nativeBridge(): ControllerNativeBridge {
         media: (fence, reference) => request<NativeImage>(fence, { type: "media", reference }, "media", "image"),
     };
 }
-const empty: ControllerState = { currentHostId: null, snapshot: null, ready: false, status: "disconnected" };
+const empty: ControllerState = { currentHostId: null, snapshot: null, grants: null, ready: false, status: "disconnected" };
 const state = writable<ControllerState>(empty);
 export const controllerState = readonly(state);
 const hosts = writable<string[]>([]);

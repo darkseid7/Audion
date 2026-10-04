@@ -1,7 +1,7 @@
 //! Native paired records, cancellation and bounded display cache. No domain owner.
 use super::{
     client::{
-        invalid_pairing, transport_error, CommandStatus, Handshake, NativeImage, NativePairing,
+        invalid_pairing, transport_error, CommandStatus, ControlGrants, Handshake, NativeImage, NativePairing,
         NativeTransport, PairReply,
     },
     mobile::{validate_invitation, NativeInvitation},
@@ -58,7 +58,7 @@ pub(crate) enum ConnectionRequest {
 )]
 pub(crate) enum ConnectionReply {
     Scope { scope_id: String },
-    Connected { snapshot: HostSnapshot },
+    Connected { snapshot: HostSnapshot, grants: ControlGrants },
 }
 #[derive(Serialize)]
 #[serde(
@@ -277,7 +277,7 @@ impl NativeSession {
         store: Arc<dyn ControllerStore>,
         host: String,
         f: Fence,
-    ) -> Result<HostSnapshot, ControlError> {
+    ) -> Result<(HostSnapshot, ControlGrants), ControlError> {
         uuid_host(&host)?;
         let cancel = self.transition(&f)?;
         let id = host.clone();
@@ -303,9 +303,9 @@ impl NativeSession {
             if snapshot.host_id != host || snapshot.host_epoch != handshake.host_epoch {
                 return Err(transport_error(ControlErrorCode::ResyncRequired));
             }
-            Ok(snapshot)
+            Ok((snapshot, handshake.grants))
         };
-        let snapshot = tokio::select! {_ = cancel.cancelled()=>return Err(transport_error(ControlErrorCode::ResyncRequired)),result=result=>result?};
+        let (snapshot, grants) = tokio::select! {_ = cancel.cancelled()=>return Err(transport_error(ControlErrorCode::ResyncRequired)),result=result=>result?};
         let mut inner = self.lock()?;
         if !Self::matches(&inner, &f) {
             return Err(transport_error(ControlErrorCode::ResyncRequired));
@@ -318,7 +318,7 @@ impl NativeSession {
             poll: AtomicBool::new(false),
             library: AtomicU64::new(snapshot.revisions.library_revision),
         }));
-        Ok(snapshot)
+        Ok((snapshot, grants))
     }
     pub(crate) async fn forget(
         self: &Arc<Self>,

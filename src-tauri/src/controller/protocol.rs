@@ -237,6 +237,7 @@ pub struct CommandPreconditions {
     deny_unknown_fields
 )]
 pub enum ApplicationIntent {
+    QueueEntity { entity: QueueEntity, placement: EntityQueuePlacement },
     PlayAlbum {
         #[serde(deserialize_with = "entity_id")]
         album_id: u64,
@@ -327,6 +328,17 @@ pub enum ApplicationIntent {
     },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum QueueEntity {
+    Album { #[serde(deserialize_with = "entity_id")] album_id: u64, play_mode: AlbumPlayMode },
+    Playlist { #[serde(deserialize_with = "entity_id")] playlist_id: u64 },
+    Artist { #[serde(deserialize_with = "identifier")] artist_name: String },
+    Liked {},
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityQueuePlacement { Next, AfterUserQueue, End }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", try_from = "RawCommandEnvelope")]
 pub struct CommandEnvelope {
     pub protocol_version: u8,
@@ -362,6 +374,7 @@ impl TryFrom<RawCommandEnvelope> for CommandEnvelope {
         let queue = matches!(
             raw.intent,
             QueueInsert { .. }
+                | QueueEntity { .. }
                 | QueueAppend { .. }
                 | QueueRemove { .. }
                 | QueueReorder { .. }
@@ -369,11 +382,12 @@ impl TryFrom<RawCommandEnvelope> for CommandEnvelope {
                 | QueuePlay { .. }
         );
         let library =
-            entity_playback || matches!(raw.intent, QueueInsert { .. } | QueueAppend { .. });
+            entity_playback || matches!(raw.intent, QueueInsert { .. } | QueueAppend { .. } | QueueEntity { .. });
         let output = entity_playback
             || matches!(
                 raw.intent,
-                QueuePlay { .. }
+                QueueEntity { .. }
+                    | QueuePlay { .. }
                     | SelectOutput { .. }
                     | Pause { .. }
                     | Resume { .. }
@@ -880,6 +894,7 @@ pub enum IntentType {
     SetVolume,
     SetShuffle,
     SetRepeat,
+    QueueEntity,
     QueueInsert,
     QueueAppend,
     QueueRemove,

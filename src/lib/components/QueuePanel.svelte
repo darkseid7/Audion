@@ -1,4 +1,10 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerQueue from "./ControllerQueue.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+
     import { fade, fly } from "svelte/transition";
     import { isQueueVisible, toggleQueue } from "$lib/stores/ui";
     import { isMobile } from "$lib/stores/mobile";
@@ -168,6 +174,7 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         isAndroid =
             typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
 
@@ -335,6 +342,10 @@
         draggedEl.style.transform = `translate3d(${lockedTx}px, ${finalTy}px, 0)`;
     }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerQueue visible={forceVisible || $isQueueVisible} {hideheader} execute={handleControllerIntent} />
+{:else}
+
 
 {#if $isQueueVisible || forceVisible}
     <aside
@@ -591,6 +602,8 @@
             {/if}
         </div>
     </aside>
+{/if}
+
 {/if}
 
 <style>

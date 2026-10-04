@@ -1,4 +1,11 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
     import { onMount } from "svelte";
     import type { Track, Playlist } from "$lib/api/tauri";
     import {
@@ -36,6 +43,7 @@
     import { addToast } from "$lib/stores/toast";
 
     export let playlistId: number;
+    export let controllerTitle = "Playlist";
 
     let playlist: Playlist | null = null;
     let tracks: Track[] = [];
@@ -74,12 +82,13 @@
     // Drain any tracks that were dropped onto this playlist while it was active
     // it reads and clears in one update
     // so multiple rapid drops won't double append
-    $: if ($playlistPendingTracks[playlistId]?.length) {
+    $: if ($applicationMode !== "controller" && $playlistPendingTracks[playlistId]?.length) {
         tracks = [...tracks, ...drainPendingTracks(playlistId)];
     }
 
     // Reactive cover source - updates instantly when playlistCovers changes
     $: coverSrc = (() => {
+        if ($applicationMode === "controller") return "";
         if (!playlist) return generateSvgCover("Playlist");
         
         // 1. Check local session/custom cover overrides
@@ -355,12 +364,17 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         loadPlaylistData();
     });
 
     // Reload when playlistId changes
-    $: playlistId, loadPlaylistData();
+    $: if ($applicationMode !== "controller") { playlistId; loadPlaylistData(); }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"playlist_tracks",playlistId}} heading={controllerTitle} context={{type:"playlist",playlistId}} enqueue={handleControllerQueue} execute={handleControllerIntent} />
+{:else}
+
 
 <div class="playlist-detail">
     {#if loading}
@@ -621,6 +635,8 @@
         </div>
     {/if}
 </div>
+
+{/if}
 
 <style>
     .playlist-detail {

@@ -1,4 +1,11 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
     import { onMount } from "svelte";
     import type { Album, Track } from "$lib/api/tauri";
     import {
@@ -278,11 +285,12 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         loadAlbumData();
     });
 
     // Reload when albumId changes
-    $: albumId, loadAlbumData();
+    $: if ($applicationMode !== "controller") { albumId; loadAlbumData(); }
 
     import { contextMenu } from "$lib/stores/ui";
     import { deleteAlbum } from "$lib/api/tauri";
@@ -482,6 +490,10 @@
         });
     }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"album_tracks",albumId}} heading="Album" context={{type:"album",albumId,playMode:"all"}} enqueue={handleControllerQueue} execute={handleControllerIntent} />
+{:else}
+
 
 <div class="album-detail">
     {#if loading}
@@ -810,6 +822,8 @@
         bind:open={infoOpen}
         on:close={() => (infoOpen = false)}
     />
+{/if}
+
 {/if}
 
 <style>

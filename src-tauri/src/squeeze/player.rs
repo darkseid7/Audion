@@ -89,6 +89,11 @@ pub fn friendly_name(mac: &MacAddress) -> Option<&'static str> {
     }
 }
 
+pub struct SeekPlan {
+    pub track: QueueTrack,
+    pub elapsed_ms: u32,
+    occurrence: usize,
+}
 impl SqueezePlayer {
     pub fn new(
         mac: MacAddress,
@@ -193,7 +198,7 @@ impl SqueezePlayer {
     pub fn get_elapsed_ms(&self) -> u32 {
         if let Some(started) = self.play_started_at {
             if self.state == PlayerState::Playing {
-                return self.elapsed_ms + started.elapsed().as_millis() as u32;
+                return self.elapsed_ms.saturating_add(started.elapsed().as_millis().min(u32::MAX as u128) as u32);
             }
         }
         self.elapsed_ms
@@ -440,6 +445,28 @@ impl SqueezePlayer {
         }
     }
 
+    /// Validate the exact audible occurrence before any transport effect.
+    pub fn seek_plan(&self, seconds: f64) -> Result<SeekPlan, String> {
+        if !seconds.is_finite() || seconds < 0.0 { return Err("Invalid seek position".into()); }
+        let occurrence = if self.display_track.is_some() { self.display_queue_index } else { self.queue.current_track_index() }.ok_or("No audible queue occurrence")?;
+        let track=self.queue.track_at(occurrence).ok_or("Audible queue occurrence is unavailable")?;
+        if self.display_track.as_ref().is_some_and(|display| display.id != track.id || display.path != track.path || display.duration != track.duration) { return Err("Stale audible queue occurrence".into()); }
+        if !track.duration.is_finite() || track.duration <= 0.0 { return Err("Track has no seekable duration".into()); }
+        let elapsed_ms=(seconds.min(track.duration).min(u32::MAX as f64/1000.0)*1000.0).min(u32::MAX as f64) as u32;
+        Ok(SeekPlan { track:track.clone(),elapsed_ms,occurrence })
+    }
+    /// Caller retains the player lock through stop, flush, queue-file and restart.
+    pub fn begin_seek(&mut self, plan: &SeekPlan) -> Result<(), String> {
+        let current=self.seek_plan(plan.elapsed_ms as f64/1000.0)?;
+        if current.occurrence != plan.occurrence || current.track.path != plan.track.path || current.track.id != plan.track.id || current.track.duration != plan.track.duration { return Err("Seek occurrence changed".into()); }
+        self.queue.select_occurrence(plan.occurrence)?;
+        self.display_track=None; self.display_queue_index=None;
+        self.prefetched_generation=None; self.confirmed_generation=None;
+        self.suppress_track_finished=true;
+        self.seek_offset_ms=plan.elapsed_ms;
+        self.advance_stream_generation();
+        Ok(())
+    }
     /// Capture the audible occurrence before the queue cursor advances for prefetch.
     pub fn retain_audible_occurrence(&mut self) {
         self.display_track = self.queue.current().cloned();
@@ -551,6 +578,31 @@ mod audible_occurrence_tests {
     }
     fn confirm(p: &mut SqueezePlayer) {
         p.handle_stat(&StatMessage { event: StatEvent::TrackStarted, buffer_size: 0, buffer_fullness: 0, bytes_received: 0, signal_strength: 0, jiffies: 0, output_buffer_size: 0, output_buffer_fullness: 0, elapsed_seconds: 0, elapsed_milliseconds: 0, timestamp: 0 });
+    }
+    #[test]
+    fn seek_plan_uses_audible_duplicate_occurrence_and_preserves_shuffle_order() {
+        for shuffled in [false, true] {
+            let mut p=player(shuffled); p.queue.repeat=RepeatMode::All;
+            p.retain_audible_occurrence(); p.queue.next(); p.prefetched_generation=Some(12);
+            let plan=p.seek_plan(200.0).unwrap(); assert_eq!(plan.elapsed_ms,100000);
+            p.begin_seek(&plan).unwrap();
+            assert_eq!(p.queue.current_track_index(),Some(2)); assert_eq!(p.info().current_queue_index,Some(2));
+            assert!(p.prefetched_generation.is_none()); assert!(p.display_track.is_none());
+            assert_eq!(p.queue.shuffle,shuffled); assert_eq!(p.queue.repeat,RepeatMode::All);
+        }
+    }
+    #[test]
+    fn seek_rejects_invalid_bounds_and_stale_pair_without_mutation() {
+        let mut p=player(false);
+        for value in [f64::NAN,f64::INFINITY,-1.0] { assert!(p.seek_plan(value).is_err()); }
+        p.retain_audible_occurrence(); p.display_queue_index=Some(99);
+        let old=p.queue.current_track_index(); assert!(p.seek_plan(1.0).is_err()); assert_eq!(p.queue.current_track_index(),old);
+    }
+    #[test]
+    fn seek_retains_shifted_occurrence_not_first_duplicate_id() {
+        let mut p=player(false);p.queue.repeat=RepeatMode::All;p.retain_audible_occurrence();p.queue.next();
+        p.insert_queue(vec![track(8)],0);let plan=p.seek_plan(1.5).unwrap();p.begin_seek(&plan).unwrap();
+        assert_eq!(p.queue.current_track_index(),Some(3));assert_eq!(plan.elapsed_ms,1500);
     }
     #[test]
     fn audible_occurrence_is_retained_until_actual_start_including_shuffle() {

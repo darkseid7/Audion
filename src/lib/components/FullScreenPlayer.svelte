@@ -1,4 +1,10 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerTransport from "./ControllerTransport.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+
   import { _ } from "svelte-i18n";
   import { fade, fly } from "svelte/transition";
   import { flip } from "svelte/animate";
@@ -137,7 +143,7 @@
   }
 
   // Load album art
-  $: if ($currentTrack) {
+  $: if ($applicationMode !== "controller" && $currentTrack) {
     const trackCover = getTrackCoverSrc($currentTrack);
     albumArt = trackCover || null;
   } else {
@@ -389,6 +395,7 @@
   }
 
   onMount(() => {
+        if ($applicationMode === "controller") return;
     isAndroid =
       typeof navigator !== "undefined" && /android/i.test(navigator.userAgent);
 
@@ -396,6 +403,10 @@
     return () => {};
   });
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerTransport variant="full" visible={$isFullScreen} execute={handleControllerIntent} />
+{:else}
+
 
 {#if $isFullScreen}
   <div
@@ -1279,6 +1290,8 @@
 
 {#if showConnectPanel}
   <ConnectPanel on:close={() => (showConnectPanel = false)} />
+{/if}
+
 {/if}
 
 <style>

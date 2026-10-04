@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 
 const { forbiddenDomainCalls, controllerCalls } = vi.hoisted(() => ({ forbiddenDomainCalls: [] as string[], controllerCalls: [] as {command:string;args:unknown}[] }));
+vi.mock("@tauri-apps/plugin-os", () => ({ hostname: async () => { forbiddenDomainCalls.push("hostname"); throw new Error("Android hostname forbidden"); } }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (command: string,args:unknown) => {
     if(command==="controller_connection" && JSON.stringify(args)===JSON.stringify({request:{type:"begin_scope"}})){controllerCalls.push({command,args});return {type:"scope",scopeId:"native-renderer-scope"};}
@@ -215,7 +216,7 @@ describe("post-pair selection ownership", () => {
           const hostId = input.request.hostId;
           connections.push(hostId);
           if (hostId === hostA && connections.filter(id => id === hostA).length === 1) return held;
-          return { type: "connected", snapshot: snapshot(hostId) };
+          return { type: "connected", snapshot: snapshot(hostId), grants: { control: true } };
         }
       }
       if (command === "controller_scan_pair") return { status: "invitation_ready" };
@@ -234,7 +235,7 @@ describe("post-pair selection ownership", () => {
       else if (intent === "suspend") controller.suspendController();
       else if (intent === "forget") await controller.forgetController(hostA);
       const before = get(controller.controllerState);
-      release({ type: "connected", snapshot: snapshot(hostA) });
+      release({ type: "connected", snapshot: snapshot(hostA), grants: { control: true } });
       await pairing;
       if (intent === "complete") expect(get(controller.controllerState)).toMatchObject({ ready: true, currentHostId: hostA });
       else expect(get(controller.controllerState)).toEqual(before);
@@ -254,4 +255,13 @@ describe("post-pair selection ownership", () => {
       vi.mocked(invoke).mockImplementation(original);
     }
   });
+});
+
+it("grants hostname only to the desktop main window",async()=>{
+ const {readFileSync}=await import("node:fs");
+ const desktop=JSON.parse(readFileSync(new URL("../../../src-tauri/capabilities/default.json",import.meta.url),"utf8"));
+ const mobile=JSON.parse(readFileSync(new URL("../../../src-tauri/capabilities/mobile.json",import.meta.url),"utf8"));
+ expect(desktop.platforms).toEqual(["linux","macOS","windows"]);expect(desktop.windows).toEqual(["main"]);
+ expect(desktop.permissions.filter((p:unknown)=>typeof p==="string"&&p.startsWith("os:"))).toEqual(["os:default","os:allow-hostname"]);
+ expect(mobile.permissions).toEqual(["core:default","os:default","mobile-controller"]);
 });

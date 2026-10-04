@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import { createControllerSession, type ControllerNativeBridge } from "./session";
+import { createControllerSession, type AuthenticatedConnection, type ControllerNativeBridge } from "./session";
 import type { HostSnapshot, EventBatch, QueryResult } from "../types";
 const snapshot = (hostId = "one", hostEpoch = "epoch"): HostSnapshot => ({
     hostId, hostEpoch, revision: 0, revisions: { libraryRevision: 1, queueRevision: 2, outputRevision: 3, settingsRevision: 0 }, playback: {
@@ -18,7 +18,7 @@ function deferred<T>() {
 }
 function bridge() {
     return {
-        beginScope: vi.fn<ControllerNativeBridge["beginScope"]>(async () => "scope"), connect: vi.fn<ControllerNativeBridge["connect"]>(async (hostId: string) => snapshot(hostId)), suspend: vi.fn<ControllerNativeBridge["suspend"]>(async () => {
+        beginScope: vi.fn<ControllerNativeBridge["beginScope"]>(async () => "scope"), connect: vi.fn<ControllerNativeBridge["connect"]>(async (hostId: string) => ({ snapshot: snapshot(hostId), grants: { control: true } })), suspend: vi.fn<ControllerNativeBridge["suspend"]>(async () => {
         }), forget: vi.fn<ControllerNativeBridge["forget"]>(async () => {
         }), scan: vi.fn<ControllerNativeBridge["scan"]>(), pair: vi.fn<ControllerNativeBridge["pair"]>(), query: vi.fn<ControllerNativeBridge["query"]>(async () => ({ type: "tracks", page: { items: [], nextCursor: null, revision: 1 } } as QueryResult)), command: vi.fn<ControllerNativeBridge["command"]>(async () => ({ status: "applied" as const, revision: 1 })), commandStatus: vi.fn<ControllerNativeBridge["commandStatus"]>(async () => ({ status: "applied" as const, revision: 1 })), poll: vi.fn<ControllerNativeBridge["poll"]>(() => new Promise<EventBatch>(() => {
         })), media: vi.fn<ControllerNativeBridge["media"]>()
@@ -36,12 +36,12 @@ it("offline_mutations_are_not_queued", async () => {
     s.suspendController();
 });
 it("snapshot_precedes_enabled_controls", async () => {
-    const n = bridge(), d = deferred<HostSnapshot>();
+    const n = bridge(), d = deferred<AuthenticatedConnection>();
     n.connect.mockReturnValue(d.promise);
     const s = createControllerSession(n), p = s.connectController("one");
     expect(get(s.state).ready).toBe(false);
     await Promise.resolve();
-    d.resolve(snapshot());
+    d.resolve({ snapshot: snapshot(), grants: { control: true } });
     await p;
     expect(get(s.state)).toMatchObject({ ready: true, snapshot: { hostId: "one" } });
     expect(n.poll).toHaveBeenCalledTimes(1);
@@ -80,7 +80,7 @@ it("old_session_results_cannot_replace_new_host", async () => {
 it("rejects old epoch and noncontiguous batches without enabling stale controls", async () => {
     const n = bridge(), poll = deferred<EventBatch>();
     n.poll.mockReturnValueOnce(poll.promise);
-    n.connect.mockImplementation(async (id) => snapshot(id, n.connect.mock.calls.length === 1 ? "epoch" : "restart"));
+    n.connect.mockImplementation(async (id) => ({ snapshot: snapshot(id, n.connect.mock.calls.length === 1 ? "epoch" : "restart"), grants: { control: true } }));
     const s = createControllerSession(n);
     await s.connectController("one");
     poll.resolve({ hostEpoch: "old", revision: 1, events: [] });
@@ -196,10 +196,10 @@ it("library events dispose late media from the previous revision", async () => {
 });
 
 it.each(["switch", "suspend", "forget"] as const)("held post-pair connect cannot own selection after %s", async (intent) => {
-    const n = bridge(), held = deferred<HostSnapshot>();
+    const n = bridge(), held = deferred<AuthenticatedConnection>();
     n.scan.mockResolvedValue({ status: "invitation_ready" });
     n.pair.mockResolvedValue({ hostId: "one" });
-    n.connect.mockImplementation(async host => host === "one" ? held.promise : snapshot(host));
+    n.connect.mockImplementation(async host => host === "one" ? held.promise : { snapshot: snapshot(host), grants: { control: true } });
     const s = createControllerSession(n);
     const pending = s.pairController();
     await vi.waitFor(() => expect(n.connect).toHaveBeenCalledOnce());
@@ -207,7 +207,7 @@ it.each(["switch", "suspend", "forget"] as const)("held post-pair connect cannot
     else if (intent === "suspend") s.suspendController();
     else await s.forgetController("one");
     const before = get(s.state);
-    held.resolve(snapshot("one"));
+    held.resolve({ snapshot: snapshot("one"), grants: { control: true } });
     expect(await pending).toBeUndefined();
     expect(get(s.state)).toEqual(before);
     s.suspendController();
@@ -225,4 +225,26 @@ it("pairing receipt retains connection ownership until the consumer commits sele
     expect(receipt?.isCurrent()).toBe(true);
     s.suspendController();
     expect(receipt?.isCurrent()).toBe(false);
+});
+
+it("requires explicit authenticated grants and clears them on reconnect", async () => {
+    const n = bridge();
+    n.connect.mockResolvedValueOnce({ snapshot: snapshot(), grants: { control: false } } as any);
+    const s = createControllerSession(n);
+    await s.connectController("one");
+    expect(get(s.state)).toMatchObject({ ready: true, grants: { control: false } });
+    await expect(s.port.execute({ type: "pause" }, { hostEpoch: "epoch", outputRevision: 3 })).rejects.toMatchObject({ code: "permission_required" });
+    expect(n.command).not.toHaveBeenCalled();
+    n.connect.mockReturnValueOnce(new Promise(() => {}));
+    void s.connectController("one");
+    expect(get(s.state)).toMatchObject({ ready: false, grants: null });
+    s.suspendController();
+});
+it("rejects missing grant receipts instead of treating readiness as permission", async () => {
+    const n = bridge();
+    n.connect.mockResolvedValueOnce({ snapshot: snapshot() } as any);
+    const s = createControllerSession(n);
+    await s.connectController("one");
+    expect(get(s.state)).toMatchObject({ ready: false, grants: null, status: "protocol_error" });
+    s.suspendController();
 });

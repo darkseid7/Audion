@@ -2,7 +2,7 @@
   import { desktopEffectsEnabled } from "$lib/application/bootstrap";
   import { onMount, tick } from "svelte";
   import "../app.css";
-  import ControllerConnection from "$lib/components/ControllerConnection.svelte";
+  import ControllerShell from "$lib/components/ControllerShell.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import MainView from "$lib/components/MainView.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
@@ -108,7 +108,7 @@
       <p>Loading your music library...</p>
     </div>
   {:else if !$desktopEffectsEnabled}
-    <ControllerConnection />
+    <ControllerShell />
   {:else}
     {#if $isMiniPlayer}
       <MiniPlayer />

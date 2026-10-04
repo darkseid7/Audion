@@ -1033,3 +1033,6 @@ export function getCacheStats() {
     },
   };
 }
+
+// Controller read models stay separate from trusted desktop Track/Album stores.
+export { createControllerPage as createControllerLibraryPage } from "$lib/application/controller/views";

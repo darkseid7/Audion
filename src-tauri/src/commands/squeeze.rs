@@ -399,52 +399,26 @@ pub async fn squeeze_seek(
     let mac_addr = parse_mac(&mac)?;
     let server = state.0.lock().await;
 
-    // Suppress track finished during seek
+    // Retain one player lock across restart: STAT/prefetch, replacement and
+    // reconnect cannot replace the captured audible occurrence mid-seek.
     {
         let mut map = server.players.lock().await;
         let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.suppress_track_finished = true;
+        let plan = player.seek_plan(position_seconds)?;
+        let path = PathBuf::from(&plan.track.path);
+        let file_size = std::fs::metadata(&path).map_err(|e| format!("Seek file unavailable: {e}"))?.len();
+        let seconds = plan.elapsed_ms as f64 / 1000.0;
+        let byte_offset = ((seconds / plan.track.duration) * file_size as f64) as u64;
+        // A failed stop has an unknown outcome and is never followed by a start.
         player.stop().await?;
-        player.flush().await?;
-    }
-
-    // Get track info for byte offset calculation
-    let (path, duration) = {
-        let map = server.players.lock().await;
-        let player = map.get(&mac_addr).ok_or("Player not found")?;
-        let track = player.queue.current().ok_or("No track to seek in")?;
-        (PathBuf::from(&track.path), track.duration)
-    };
-
-    // Simple byte offset estimation based on file size and duration
-    let byte_offset = if duration > 0.0 {
-        let file_size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        ((position_seconds / duration) * file_size as f64) as u64
-    } else {
-        0
-    };
-
-    let gen = {
-        let mut map = server.players.lock().await;
-        let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.advance_stream_generation();
-        player.seek_offset_ms = (position_seconds * 1000.0) as u32;
-        player.generation
-    };
-
-    server.streaming.queue_file(&mac_addr, path, gen, byte_offset).await;
-
-    {
-        let mut map = server.players.lock().await;
-        let player = map.get_mut(&mac_addr).ok_or("Player not found")?;
-        player.start_stream(HTTP_PORT, 0).await?;
-        player.elapsed_ms = (position_seconds * 1000.0) as u32;
+        let partial = |e| format!("SQUEEZE_SEEK_PARTIAL: output stopped; {e}");
+        player.flush().await.map_err(partial)?;
+        player.begin_seek(&plan).map_err(partial)?;
+        server.streaming.queue_file(&mac_addr, path, player.generation, byte_offset).await;
+        player.start_stream(HTTP_PORT, 0).await.map_err(partial)?;
+        player.elapsed_ms = plan.elapsed_ms;
         player.play_started_at = Some(Instant::now());
-        if player.is_cometd {
-            player.state = PlayerState::Playing;
-        }
+        if player.is_cometd { player.state = PlayerState::Playing; }
     }
 
     server.cometd.notify_player_status(&mac).await;

@@ -374,7 +374,7 @@ async fn route_inner(
             let snapshot = deps
                 .commands
                 .authenticated_snapshot(device.as_ref().unwrap())?;
-            Ok(axum::Json(serde_json::json!({"protocolVersion":1,"hostId":snapshot.host_id,"hostEpoch":snapshot.host_epoch,"capabilities":snapshot.capabilities})).into_response())
+            Ok(axum::Json(serde_json::json!({"protocolVersion":1,"hostId":snapshot.host_id,"hostEpoch":snapshot.host_epoch,"capabilities":snapshot.capabilities,"grants":{"control":deps.commands.authenticated_control_grant(device.as_ref().unwrap())?}})).into_response())
         }
         "/control/v1/queries" => {
             let query: ApplicationQuery = decode(&body)?;
@@ -792,6 +792,7 @@ mod tests {
     #[tokio::test]
     async fn authenticated_snapshot_outputs_and_event_routes_share_native_cursor() {
         use crate::controller::{commands::AuthoritativeWindow, protocol::HostUpdate};
+        for control in [false,true] {
         let deps = fixture();
         let invitation = super::super::pairing::create_invitation(
             &deps.identity,
@@ -809,8 +810,8 @@ mod tests {
             .approve_pairing(
                 pending.id,
                 Grants {
-                    control: true,
-                    administration: false,
+                    control,
+                    administration: !control,
                 },
             )
             .unwrap();
@@ -886,11 +887,13 @@ mod tests {
                 assert_eq!(value["events"][0]["playback"]["position"], 5.0);
             }
             if path == "handshake" {
+                assert_eq!(value["grants"], serde_json::json!({"control":control}));
                 assert_eq!(
                     value["capabilities"]["queries"],
                     serde_json::json!(["snapshot", "outputs"])
                 );
             }
+        }
         }
     }
     #[tokio::test]

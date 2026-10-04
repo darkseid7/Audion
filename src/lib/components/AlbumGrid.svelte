@@ -4,6 +4,13 @@
 </script>
 
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
     import type { Album, Track } from "$lib/api/tauri";
     import { goToAlbumDetail, goToArtistDetail } from "$lib/stores/view";
     import {
@@ -143,6 +150,7 @@
     $: selectedSortLabel = sortOptionLabels[albumSort];
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         const handleGlobalPointerDown = (event: PointerEvent) => {
             const target = event.target as HTMLElement | null;
             if (!target) return;
@@ -810,6 +818,10 @@
         description: "Add a music folder to see your albums",
     };
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"albums"}} heading="Albums" layout={albumView} selectLayout={selectAlbumView} enqueue={handleControllerQueue} execute={handleControllerIntent} />
+{:else}
+
 
 <div class="albums-grid" class:list-view={albumView === "list"}>
     <div class="albums-toolbar-wrap">
@@ -1015,6 +1027,8 @@
         </VirtualizedGrid>
     </div>
 </div>
+
+{/if}
 
 <style>
     .albums-grid {

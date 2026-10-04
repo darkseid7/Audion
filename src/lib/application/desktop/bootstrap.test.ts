@@ -1,3 +1,4 @@
+vi.mock("@tauri-apps/plugin-os", () => ({ hostname: vi.fn(async () => "Studio PC") }));
 import type { HostSnapshot } from "../types";
 
 vi.mock("./adapter", () => ({ createDesktopAdapter: () => ({
@@ -181,4 +182,9 @@ it.each(["initial failure", "steady timeout", "dispose"])("finishes desktop clea
   expect(state.bridgeSteps.filter(step => step === "unlisten")).toHaveLength(1);
   expect(state.bridgeSteps.filter(step => step === "ready")).toHaveLength(reason === "initial failure" ? 0 : 1);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("desktop startup continues when hostname permission/API is unavailable",async()=>{
+ const {hostname}=await import("@tauri-apps/plugin-os");vi.mocked(hostname).mockRejectedValueOnce(new Error("unavailable"));
+ const {bootstrapDesktop}=await import("./bootstrap");const handle=await bootstrapDesktop();expect(state.starts).toBe(1);await handle.dispose();
 });

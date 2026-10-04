@@ -1,4 +1,11 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
     import { onMount } from "svelte";
     import type { Album, Track } from "$lib/api/tauri";
     import {
@@ -220,12 +227,13 @@
     }
 
     onMount(() => {
+        if ($applicationMode === "controller") return;
         loadArtistData();
         getArtistPicture(artistName);
     });
 
     // Reload when artistName changes
-    $: if (artistName) {
+    $: if ($applicationMode !== "controller" && artistName) {
         loadArtistData();
         getArtistPicture(artistName);
         // Reset MB info so it gets re-fetched for the new artist
@@ -359,6 +367,11 @@
         });
     }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"artist_tracks",artistName}} heading={artistName} context={{type:"artist",artistName}} enqueue={handleControllerQueue} execute={handleControllerIntent} />
+ <ControllerBrowse query={{type:"artist_albums",artistName}} heading="Albums" execute={handleControllerIntent} enqueue={handleControllerQueue} />
+{:else}
+
 
 <div class="artist-detail">
     {#if loading}
@@ -737,6 +750,8 @@
         </div>
     {/if}
 </div>
+
+{/if}
 
 <style>
     .artist-detail {

@@ -1,4 +1,11 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerBrowse from "./ControllerBrowse.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+    function handleControllerQueue(query: ApplicationQuery, placement: "next" | "after_user_queue" | "end") { return viewActions.queueQuery(query, placement); }
+
     import { getLikedTracks, type Track } from "$lib/api/tauri";
     import { likedTrackIds } from "$lib/stores/liked";
     import { playTracks, setShuffle } from "$lib/stores/player";
@@ -8,7 +15,7 @@
     let loading = true;
     let scrollTop = 0;
 
-    $: loadTracks($likedTrackIds);
+    $: if ($applicationMode !== "controller") loadTracks($likedTrackIds);
 
     // Header transition calculations
     $: headerOpacity = Math.max(0, 1 - scrollTop / 150);
@@ -44,6 +51,10 @@
         scrollTop = (e.target as HTMLElement).scrollTop;
     }
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerBrowse query={{type:"liked_tracks"}} heading="Liked Songs" context={{type:"liked"}} enqueue={handleControllerQueue} execute={handleControllerIntent} />
+{:else}
+
 
 <div class="liked-songs-view">
     <!-- Header -->
@@ -145,6 +156,8 @@
         {/if}
     </div>
 </div>
+
+{/if}
 
 <style>
     .liked-songs-view {

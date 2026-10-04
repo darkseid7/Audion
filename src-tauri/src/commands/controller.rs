@@ -866,11 +866,10 @@ pub(crate) async fn controller_connection(
         ConnectionRequest::BeginScope {} => Ok(ConnectionReply::Scope {
             scope_id: session.begin_scope()?,
         }),
-        ConnectionRequest::Connect { host_id, fence } => Ok(ConnectionReply::Connected {
-            snapshot: session
-                .connect(controller_store(&app), host_id, fence)
-                .await?,
-        }),
+        ConnectionRequest::Connect { host_id, fence } => {
+            let (snapshot, grants) = session.connect(controller_store(&app), host_id, fence).await?;
+            Ok(ConnectionReply::Connected { snapshot, grants })
+        },
     }
 }
 #[cfg(target_os = "android")]

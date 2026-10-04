@@ -16,7 +16,7 @@ const displayTrack = (track: api.Track): DisplayTrack => ({ id: track.id, title:
 const capabilities = { playback: true, seek: true, volume: true, shuffle: true, repeat: true, equalizer: false };
 const unwrap = async (result: Promise<ExecutionResult>): Promise<void> => { const value = await result; if (value.status === "failed" || value.status === "superseded") throw new PlaybackFailure(value.error, value.status, value.partialEffects); };
 /** Desktop authority. Network transports never receive host Track objects or legacy calls. */
-export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
+export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess, pcName?: string | null) {
   let hostEpoch: string = crypto.randomUUID();
   let hostId = "desktop";
   let sequence = 0;
@@ -37,7 +37,7 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
   let libraryTimer: ReturnType<typeof setTimeout> | undefined;
   const presentations = new WeakMap<HostSnapshot, HostPresentation>();
   const media = typeof window !== "undefined" ? window.matchMedia?.("(prefers-reduced-motion: reduce)") : undefined;
-  const outputs = (): AvailableOutput[] => [{ output: { kind: "pc" }, name: "This PC", available: true, capabilities }, ...get(discoveredSqueezePlayers).map(device => ({ output: { kind: "squeeze" as const, playerId: device.mac }, name: device.name, available: device.state !== "Disconnected", capabilities }))];
+  const outputs = (): AvailableOutput[] => [{ output: { kind: "pc" }, name: pcName?.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 128) || `PC · ${hostId}`, available: true, capabilities }, ...get(discoveredSqueezePlayers).map(device => ({ output: { kind: "squeeze" as const, playerId: device.mac }, name: device.name, available: device.state !== "Disconnected", capabilities }))];
   const snapshot = (): HostSnapshot => {
     const track = get(player.currentTrack);
     const context = get(player.playbackContext);
@@ -45,7 +45,7 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
       hostId, hostEpoch, revision: value.revision, revisions: value.revisions,
       output: get(player.activeBackend) === "remote" ? { kind: "desktop_only", reason: "Legacy cloud control is desktop-only" } : value.selectedOutput,
       outputs: outputs(), settings: media ? { reducedMotion: media.matches } : {}, jobs: [],
-      capabilities: { queries: (library ?? localLibrary) ? ["snapshot", "outputs", "albums", "album_detail", "album_tracks", "tracks", "artists", "artist_albums", "artist_tracks", "playlists", "playlist_tracks", "liked_tracks", "search", "queue"] : ["snapshot", "outputs"], intents: output().kind === "desktop_only" ? [] : ["play_album", "play_playlist", "play_artist", "play_liked", "play_track", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume", "set_shuffle", "set_repeat", "queue_insert", "queue_append", "queue_remove", "queue_reorder", "queue_clear_upcoming", "queue_play"] },
+      capabilities: { queries: (library ?? localLibrary) ? ["snapshot", "outputs", "albums", "album_detail", "album_tracks", "tracks", "artists", "artist_albums", "artist_tracks", "playlists", "playlist_tracks", "liked_tracks", "search", "queue"] : ["snapshot", "outputs"], intents: output().kind === "desktop_only" ? [] : ["play_album", "play_playlist", "play_artist", "play_liked", "play_track", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume", "set_shuffle", "set_repeat", "queue_insert", "queue_append", "queue_entity", "queue_remove", "queue_reorder", "queue_clear_upcoming", "queue_play"] },
       queue: { count: value.queue.length, currentEntryId: value.queue[get(player.queueIndex)]?.entryId ?? null },
       playback: { status: get(player.isPlaying) ? "playing" : track ? "paused" : "stopped", track: track ? displayTrack(track) : null,
         context: context?.type === "album" && context.albumId !== undefined ? { type: "album", albumId: context.albumId, playMode: context.playMode ?? "all" } : context?.type === "playlist" && context.playlistId !== undefined ? { type: "playlist", playlistId: context.playlistId } : context?.type === "artist" && context.artistName ? { type: "artist", artistName: context.artistName } : context?.type === "liked" ? { type: "liked" } : context?.type === "track" && context.trackId !== undefined ? { type: "track", trackId: context.trackId } : context?.type === "queue" ? { type: "queue" } : null,
@@ -89,6 +89,11 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
     async resolvePlayback(intent): Promise<ResolvedPlayback> {
       let tracks: api.Track[];
       let context: ResolvedPlayback["context"] = null;
+      if (intent.type === "queue_entity") {
+        const e=intent.entity;
+        const play: ApplicationIntent = e.type === "album" ? {type:"play_album",albumId:e.albumId,playMode:e.playMode} : e.type === "playlist" ? {type:"play_playlist",playlistId:e.playlistId} : e.type === "artist" ? {type:"play_artist",artistName:e.artistName} : {type:"play_liked"};
+        return runtime.resolvePlayback(play);
+      }
       switch (intent.type) {
         case "play_album":
           tracks = await api.getTracksByAlbum(intent.albumId);
@@ -129,7 +134,10 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
         case "resume": await player.resume(); break;
         case "next": await player.nextTrack(); break;
         case "previous": await player.previousTrack(); break;
-        case "seek": await player.seek(get(player.duration) > 0 ? intent.seconds / get(player.duration) : 0); break;
+        case "seek":
+          try { await player.seek(get(player.duration) > 0 ? intent.seconds / get(player.duration) : 0); }
+          catch (error) { if (String(error).includes("SQUEEZE_SEEK_PARTIAL:")) throw new PlaybackFailure({code:"execution_failed",message:String(error),retryable:false},"failed",["Previous output stopped"]); throw error; }
+          break;
         case "set_volume": await player.setVolume(intent.volume); break;
         case "set_shuffle": if (get(player.shuffle) !== intent.enabled) await player.toggleShuffle(); break;
         case "set_repeat": await player.setRepeatMode(intent.mode); break;
@@ -137,6 +145,12 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess) {
           if (!resolved) fail("not_found", "Queue tracks were not resolved");
           if (intent.placement === "next") await player.playNext(resolved!.tracks); else await player.addToQueue(resolved!.tracks); break;
         case "queue_append": await player.appendToQueueEnd(resolved!.tracks); break;
+        case "queue_entity":
+          if (!resolved) fail("not_found", "Queue entity was not resolved");
+          if (intent.placement === "next") await player.playNext(resolved!.tracks);
+          else if (intent.placement === "end") await player.appendToQueueEnd(resolved!.tracks);
+          else await player.addToQueue(resolved!.tracks);
+          break;
         case "queue_remove": { const at = index(intent.entryId); const entries = [...value.queue]; entries.splice(at, 1); await player.removeFromQueue(at); pendingEntries = entries; break; }
         case "queue_reorder": {
           const from = index(intent.entryId);

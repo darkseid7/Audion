@@ -194,6 +194,9 @@ fn connection_error(error: reqwest::Error) -> ControlError {
         ControlErrorCode::OutcomeUnknown
     })
 }
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ControlGrants { pub control: bool }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Handshake {
@@ -201,6 +204,7 @@ pub(crate) struct Handshake {
     pub host_id: String,
     pub host_epoch: String,
     pub capabilities: HostCapabilities,
+    pub grants: ControlGrants,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
@@ -663,8 +667,8 @@ pub(super) mod tests {
     async fn endpoint_change_rebuilds_trust_bound_pool() {
         let (ca, key) = authority();
         let name = format!("audion-{HOST}.invalid");
-        let first_reply = r#"{"protocolVersion":1,"hostId":"cf8dd70c-8cc2-4640-bd40-5b06f68cc301","hostEpoch":"first","capabilities":{"queries":[],"intents":[]}}"#;
-        let second_reply = r#"{"protocolVersion":1,"hostId":"cf8dd70c-8cc2-4640-bd40-5b06f68cc301","hostEpoch":"second","capabilities":{"queries":[],"intents":[]}}"#;
+        let first_reply = r#"{"protocolVersion":1,"hostId":"cf8dd70c-8cc2-4640-bd40-5b06f68cc301","hostEpoch":"first","capabilities":{"queries":[],"intents":[]},"grants":{"control":true}}"#;
+        let second_reply = r#"{"protocolVersion":1,"hostId":"cf8dd70c-8cc2-4640-bd40-5b06f68cc301","hostEpoch":"second","capabilities":{"queries":[],"intents":[]},"grants":{"control":true}}"#;
         let (first, first_worker) = serve(
             &ca,
             &key,

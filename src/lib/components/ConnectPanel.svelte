@@ -1,4 +1,10 @@
 <script lang="ts">
+    import { applicationMode } from "$lib/application/bootstrap";
+    import { viewActions } from "$lib/application/view-actions";
+    import type { ApplicationIntent, ApplicationQuery } from "$lib/application/types";
+    import ControllerOutputs from "./ControllerOutputs.svelte";
+    function handleControllerIntent(intent: ApplicationIntent) { return viewActions.execute(intent); }
+
   import { fade, fly, slide } from "svelte/transition";
   import {
     wsStore,
@@ -52,6 +58,7 @@
   $: squeezePlayers = $discoveredSqueezePlayers;
 
   onMount(async () => {
+        if ($applicationMode === "controller") return;
     try {
       squeezeRunning = await squeezeIsRunning();
       // Make sure the global discovery is alive even if the user reached
@@ -120,6 +127,10 @@
 
 
 </script>
+{#if $applicationMode === "controller"}
+ <ControllerOutputs {close} execute={handleControllerIntent} />
+{:else}
+
 
 <div
   class="connect-overlay"
@@ -475,6 +486,8 @@
     </footer>
   </div>
 </div>
+
+{/if}
 
 <style>
   .connect-overlay {

@@ -111,6 +111,8 @@ struct Fixture {
     pair_release: tokio::sync::Notify,
     art: Vec<u8>,
     revoked: AtomicBool,
+    control: AtomicBool,
+    omit_grants: AtomicBool,
     resource_denied: AtomicBool,
     outcome_expired: AtomicBool,
     snapshot_hold: AtomicBool,
@@ -153,9 +155,9 @@ async fn route(State(f): State<Arc<Fixture>>, request: Request) -> Response {
         }
     }
     match path.as_str(){
-  "/control/v1/pairing"=>{let invite=json["invitation"].as_str().unwrap();match f.pairing.request_wire(invite,"Phone".into()){Ok(p)=>{let credential=f.pairing.approve_pairing(p.id,Grants{control:true,administration:false}).unwrap();*f.issued.lock().unwrap()=Some(credential);axum::Json(serde_json::json!({"status":"pending","pendingId":p.id.to_string()})).into_response()},Err(e)=>(axum::http::StatusCode::UNAUTHORIZED,axum::Json(e)).into_response()}},
+  "/control/v1/pairing"=>{let invite=json["invitation"].as_str().unwrap();match f.pairing.request_wire(invite,"Phone".into()){Ok(p)=>{let credential=f.pairing.approve_pairing(p.id,Grants{control:f.control.load(Ordering::SeqCst),administration:true}).unwrap();*f.issued.lock().unwrap()=Some(credential);axum::Json(serde_json::json!({"status":"pending","pendingId":p.id.to_string()})).into_response()},Err(e)=>(axum::http::StatusCode::UNAUTHORIZED,axum::Json(e)).into_response()}},
   "/control/v1/pairing/status"=>{if f.pair_hold.load(Ordering::SeqCst){f.pair_entered.notify_one();f.pair_release.notified().await;}match f.issued.lock().unwrap().take(){Some(c)=>axum::Json(serde_json::json!({"status":"approved","deviceId":c.device_id().to_string(),"secret":URL_SAFE_NO_PAD.encode(c.secret())})).into_response(),None=>(axum::http::StatusCode::UNAUTHORIZED,axum::Json(transport_error(ControlErrorCode::Unauthorized))).into_response()}},
-  "/control/v1/handshake"=>axum::Json(serde_json::json!({"protocolVersion":1,"hostId":f.host,"hostEpoch":*f.epoch.lock().unwrap(),"capabilities":{"queries":["snapshot","tracks"],"intents":["pause"]}})).into_response(),
+  "/control/v1/handshake"=>{ let mut response=serde_json::json!({"protocolVersion":1,"hostId":f.host,"hostEpoch":*f.epoch.lock().unwrap(),"capabilities":{"queries":["snapshot","tracks"],"intents":["pause"]},"grants":{"control":f.control.load(Ordering::SeqCst)}}); if f.omit_grants.load(Ordering::SeqCst) { response.as_object_mut().unwrap().remove("grants"); } axum::Json(response).into_response() },
   "/control/v1/queries"=>{if json["type"]=="snapshot"{let captured=snapshot(&f.host,&f.epoch.lock().unwrap());if f.snapshot_hold.load(Ordering::SeqCst){f.snapshot_entered.notify_one();f.snapshot_release.notified().await;}axum::Json(QueryResult::Snapshot{snapshot:captured}).into_response()}else{if f.query_hold.load(Ordering::SeqCst){f.query_entered.notify_one();f.query_release.notified().await;}axum::Json(serde_json::json!({"type":"tracks","page":{"items":[],"nextCursor":null,"revision":1}})).into_response()}},
   "/control/v1/events"=>{f.poll_entered.notify_one();f.poll_release.notified().await;if f.poll_library.load(Ordering::SeqCst){axum::Json(serde_json::json!({"hostEpoch":*f.epoch.lock().unwrap(),"revision":1,"events":[{"type":"library","revision":1,"libraryRevision":2}]})).into_response()}else{axum::Json(serde_json::json!({"hostEpoch":*f.epoch.lock().unwrap(),"revision":0,"events":[]})).into_response()}},
   "/control/v1/commands"=>(axum::http::StatusCode::GATEWAY_TIMEOUT,axum::Json(transport_error(ControlErrorCode::OutcomeUnknown))).into_response(),
@@ -230,6 +232,8 @@ async fn server() -> Server {
         pair_release: Default::default(),
         art: image.into_inner(),
         revoked: AtomicBool::new(false),
+        control: AtomicBool::new(true),
+        omit_grants: AtomicBool::new(false),
         resource_denied: AtomicBool::new(false),
         outcome_expired: AtomicBool::new(false),
         snapshot_hold: AtomicBool::new(false),
@@ -288,7 +292,8 @@ async fn connect(s: &Server) -> Fence {
         .connect(s.store.clone(), s.fixture.host.clone(), f.clone())
         .await
         .unwrap();
-    assert_eq!(snapshot.host_id, s.fixture.host);
+    assert_eq!(snapshot.0.host_id, s.fixture.host);
+    assert!(snapshot.1.control);
     f
 }
 #[tokio::test]
@@ -898,4 +903,15 @@ async fn late_native_snapshot_cannot_regress_poll_library_revision_or_release_ol
             .load(Ordering::SeqCst),
         2
     );
+}
+
+#[tokio::test]
+async fn actual_tls_grants_do_not_infer_control_from_ready_snapshot_or_administration() {
+    let s = server().await;
+    s.fixture.control.store(false, Ordering::SeqCst);
+    let mut f = pair(&s).await; f.generation += 1;
+    let (snapshot, grants) = s.session.connect(s.store.clone(), s.fixture.host.clone(), f.clone()).await.unwrap();
+    assert_eq!(snapshot.host_id, s.fixture.host); assert!(!grants.control);
+    s.fixture.omit_grants.store(true, Ordering::SeqCst); f.generation += 1;
+    assert!(s.session.connect(s.store.clone(), s.fixture.host.clone(), f).await.is_err());
 }

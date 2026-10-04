@@ -443,18 +443,20 @@ async fn handle_prefetch(
         (next, gen)
     };
 
-    // Send strm 's' with NO_RESTART_DECODER flag
-    {
-        let mut map = players.lock().await;
-        if let Some(player) = map.get_mut(mac).filter(|p| session_id.is_none_or(|id| p.owns_tcp_session(id))) {
-            player.seek_offset_ms = 0;
-            if let Err(e) = player.start_stream(HTTP_PORT, 0x40).await {
-                tracing::error!("Squeeze: prefetch start_stream failed: {}", e);
-            }
-        }
-    }
+    if !finish_prefetch(mac, players, session_id, gen).await { return; }
 
     tracing::info!("Squeeze: prefetch: \"{}\" by {} (gen={})", next_track.title, next_track.artist, gen);
+}
+
+/// Second prefetch phase may be queued behind a newer seek or reader takeover.
+async fn finish_prefetch(mac: &MacAddress, players: &PlayerMap, session_id: Option<u64>, generation: u64) -> bool {
+    let mut map=players.lock().await;
+    let Some(player)=map.get_mut(mac).filter(|p| p.generation==generation && session_id.is_none_or(|id| p.owns_tcp_session(id))) else { return false; };
+    player.seek_offset_ms=0;
+    if let Err(e)=player.start_stream(HTTP_PORT,0x40).await {
+        tracing::error!("Squeeze: prefetch start_stream failed: {}",e); return false;
+    }
+    true
 }
 
 /// Handle track finished (STMu): if prefetch happened, just confirm. Otherwise, play next.
@@ -688,6 +690,24 @@ pub async fn disconnect_player(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn held_prefetch_continuation_cannot_restart_a_newer_seek_generation() {
+        for replace in [false,true] {
+            let players=new_player_map(); let mac=MacAddress([1,2,3,4,5,6]);
+            let mut player=SqueezePlayer::new_cometd(mac,"fixture".into(),"fixture".into());
+            player.queue.set_tracks(vec![crate::squeeze::queue::QueueTrack{id:7,path:"fixture.flac".into(),title:"Fixture".into(),artist:String::new(),album:String::new(),duration:100.0,format:"flac".into()}],0);
+            let generation=player.advance_stream_generation();player.seek_offset_ms=17000;
+            players.lock().await.insert(mac,player);
+            let mut held=players.lock().await;
+            let pending=tokio::spawn({let players=players.clone();async move { finish_prefetch(&mac,&players,None,generation).await }});
+            tokio::task::yield_now().await;
+            if replace { held.get_mut(&mac).unwrap().advance_stream_generation(); }
+            drop(held);
+            assert_eq!(pending.await.unwrap(),!replace);
+            assert_eq!(players.lock().await.get(&mac).unwrap().seek_offset_ms,if replace {17000}else{0});
+        }
+    }
+
     use super::*;
     use crate::squeeze::player::new_player_map;
     use crate::squeeze::streaming::StreamingState;

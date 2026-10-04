@@ -57,3 +57,6 @@ export const searchResults = derived(
 export function clearSearch(): void {
     searchQuery.set('');
 }
+
+// PC search uses authoritative cursor pages, not the loaded desktop arrays above.
+export { createControllerPage as createControllerSearchPage } from "$lib/application/controller/views";

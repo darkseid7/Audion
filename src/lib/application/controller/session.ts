@@ -6,9 +6,10 @@ export interface NativeControllerFence {
     scopeId: string;
     generation: number;
 }
+export interface AuthenticatedConnection { snapshot: HostSnapshot; grants: { control: boolean } }
 export interface ControllerNativeBridge {
     beginScope(): Promise<string>;
-    connect(hostId: string, fence: NativeControllerFence): Promise<HostSnapshot>;
+    connect(hostId: string, fence: NativeControllerFence): Promise<AuthenticatedConnection>;
     suspend(fence: NativeControllerFence): Promise<void>;
     forget(hostId: string, fence: NativeControllerFence): Promise<void>;
     scan(fence: NativeControllerFence): Promise<{
@@ -33,6 +34,7 @@ interface ControllerConnectionReceipt {
 export interface ControllerState {
     currentHostId: string | null;
     snapshot: HostSnapshot | null;
+    grants: { control: boolean } | null;
     ready: boolean;
     status: "disconnected" | "connecting" | "connected" | "unavailable" | "pairing" | "pairing_required" | "permission_required" | "protocol_error";
     error?: ControlError;
@@ -41,7 +43,7 @@ const failure = (code: ControlError["code"], message = "Controller session is un
 export function createControllerSession(native: ControllerNativeBridge, options: {
     random?: () => number;
 } = {}) {
-    let value: ControllerState = { currentHostId: null, snapshot: null, ready: false, status: "disconnected" };
+    let value: ControllerState = { currentHostId: null, snapshot: null, grants: null, ready: false, status: "disconnected" };
     const state = writable(value), listeners = new Set<(update: ApplicationUpdate) => void>(), media = new Set<ArtworkHandle>();
     let generation = 0, scope: Promise<string> | undefined, timer: ReturnType<typeof setTimeout> | undefined, attempts = 0;
     const publish = (patch: Partial<ControllerState>) => {
@@ -56,7 +58,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         for (const h of media)
             h.dispose();
         media.clear();
-        publish({ ready: false, snapshot: null });
+        publish({ ready: false, snapshot: null, grants: null });
         return generation;
     };
     const fence = async (g: number) => {
@@ -98,12 +100,14 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             }, delay);
         }
     }
-    function adopt(snapshot: HostSnapshot, host: string, g: number) {
+    function adopt(receipt: AuthenticatedConnection, host: string, g: number) {
+        if (!receipt?.snapshot || typeof receipt.grants?.control !== "boolean") throw failure("unsupported", "Missing authenticated permissions.");
+        const { snapshot, grants } = receipt;
         current(g);
         if (snapshot.hostId !== host)
             throw failure("unsupported", "Unexpected PC identity.");
         publish({
-            snapshot: structuredClone(snapshot), currentHostId: host, ready: true, status: "connected", error: undefined
+            snapshot: structuredClone(snapshot), grants: { control: grants.control }, currentHostId: host, ready: true, status: "connected", error: undefined
         });
         attempts = 0;
         emit({ type: "snapshot", snapshot });
@@ -235,6 +239,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
         },
         async execute(intent, preconditions) {
             const { g, snapshot } = ready();
+            if (!value.grants?.control) throw failure("permission_required", "This controller does not have playback permission.");
             if (preconditions.hostEpoch !== snapshot.hostEpoch)
                 throw failure("resync_required");
             for (const key of ["libraryRevision", "queueRevision", "outputRevision"] as const)
@@ -246,12 +251,15 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             try {
                 const result = await native.command(f, envelope);
                 current(g, snapshot.hostEpoch);
+                if ((result.status === "failed" || result.status === "superseded") && ["unauthorized", "permission_required"].includes(result.error.code)) disconnected(result.error,g);
                 return result;
             }
             catch (error) {
                 current(g, snapshot.hostEpoch);
-                if ((error as ControlError)?.code !== "outcome_unknown")
+                if ((error as ControlError)?.code !== "outcome_unknown") {
+                    if (["unauthorized", "permission_required"].includes((error as ControlError)?.code)) disconnected(error, g);
                     throw error;
+                }
                 const result = await native.commandStatus(f, envelope.requestId);
                 current(g, snapshot.hostEpoch);
                 if (result.status === "pending")

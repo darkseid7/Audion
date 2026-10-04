@@ -51,6 +51,15 @@ function ids(value: unknown): void {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PAGE_ITEMS) invalid();
   for (const item of value) id(item);
 }
+function entity(value: unknown): void {
+ if (!value || typeof value !== "object") invalid();
+ const type = (value as WireObject).type;
+ if (type === "album") { const e=object(value,["type","albumId","playMode"]); id(e.albumId); oneOf("all","liked_only")(e.playMode); }
+ else if (type === "playlist") { const e=object(value,["type","playlistId"]); id(e.playlistId); }
+ else if (type === "artist") { const e=object(value,["type","artistName"]); text(e.artistName); }
+ else if (type === "liked") object(value,["type"]);
+ else invalid();
+}
 const intentFields: { [K in ApplicationIntent["type"]]: { required: Record<string, Validator>; optional?: Record<string, Validator> } } = {
   play_album: { required: { albumId: id, playMode: oneOf("all", "liked_only") }, optional: { startTrackId: id } },
   play_playlist: { required: { playlistId: id }, optional: { startTrackId: id } },
@@ -63,6 +72,7 @@ const intentFields: { [K in ApplicationIntent["type"]]: { required: Record<strin
   set_volume: { required: { volume: value => { nonnegative(value); if ((value as number) > 1) invalid(); } } },
   set_shuffle: { required: { enabled: value => { if (typeof value !== "boolean") invalid(); } } },
   set_repeat: { required: { mode: oneOf("none", "one", "all") } },
+  queue_entity: { required: { entity, placement: oneOf("next", "after_user_queue", "end") } },
   queue_insert: { required: { trackIds: ids, placement: oneOf("next", "after_user_queue") } },
   queue_append: { required: { trackIds: ids } },
   queue_remove: { required: { entryId: text } },
@@ -92,14 +102,15 @@ export function parseEnvelope(value: unknown): CommandEnvelope {
   }
   const entityPlayback = type.startsWith("play_");
   if (type.startsWith("queue_") && !Object.hasOwn(preconditions, "queueRevision")) invalid();
-  if ((entityPlayback || type === "queue_insert" || type === "queue_append") && !Object.hasOwn(preconditions, "libraryRevision")) invalid();
-  if ((entityPlayback || ["queue_play", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume"].includes(type)) && !Object.hasOwn(preconditions, "outputRevision")) invalid();
+  if ((entityPlayback || type === "queue_insert" || type === "queue_append" || type === "queue_entity") && !Object.hasOwn(preconditions, "libraryRevision")) invalid();
+  if ((entityPlayback || ["queue_entity", "queue_play", "select_output", "pause", "resume", "next", "previous", "seek", "set_volume"].includes(type)) && !Object.hasOwn(preconditions, "outputRevision")) invalid();
   const result = {
     protocolVersion: 1 as const,
     requestId: envelope.requestId as string,
     preconditions: { ...preconditions } as unknown as CommandPreconditions,
     intent: { ...intent } as unknown as ApplicationIntent,
   };
+  if (result.intent.type === "queue_entity") result.intent.entity = {...result.intent.entity};
   if ("trackIds" in result.intent) result.intent.trackIds = [...result.intent.trackIds];
   if (result.intent.type === "select_output") result.intent.output = { ...result.intent.output };
   if (encoder.encode(JSON.stringify(result)).length > MAX_COMMAND_BYTES) invalid();

@@ -1412,5 +1412,194 @@
         "startTrackId": 2
       }
     }
+  },
+{
+  "name": "queue_entity_missing_libraryRevision",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 42,
+        "playMode": "all"
+      },
+      "placement": "next"
+    }
   }
+},
+{
+  "name": "queue_entity_missing_queueRevision",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 42,
+        "playMode": "all"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_missing_outputRevision",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 42,
+        "playMode": "all"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_0",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 1
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_1",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "album",
+        "albumId": 0,
+        "playMode": "all"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_2",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "liked",
+        "path": "secret"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_3",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "artist",
+        "artistName": ""
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_4",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "unknown"
+      },
+      "placement": "next"
+    }
+  }
+},
+{
+  "name": "queue_entity_invalid_5",
+  "envelope": {
+    "protocolVersion": 1,
+    "requestId": "entity-queue",
+    "preconditions": {
+      "hostEpoch": "epoch",
+      "libraryRevision": 4,
+      "queueRevision": 7,
+      "outputRevision": 3
+    },
+    "intent": {
+      "type": "queue_entity",
+      "entity": {
+        "type": "playlist",
+        "playlistId": null
+      },
+      "placement": "next"
+    }
+  }
+}
 ]
