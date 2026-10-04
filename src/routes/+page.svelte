@@ -65,9 +65,9 @@
 
   // On mobile, default to home view on first load
   let mobileInitialized = false;
-  $: if ($isMobile && !mobileInitialized && !isLoading) {
+  $: if ($desktopEffectsEnabled && !mobileInitialized && !isLoading) {
     mobileInitialized = true;
-    goToHome();
+    if ($isMobile) goToHome();
   }
 
   onMount(() => {
@@ -112,26 +112,10 @@
   {:else}
     {#if $isMiniPlayer}
       <MiniPlayer />
-    {:else if $isMobile}
-      <!-- ========= MOBILE LAYOUT (Spotify-like) ========= -->
-      <div class="mobile-layout">
-        <div class="mobile-content">
-          <MainView />
-        </div>
-      </div>
-
-      <!-- PlayerBar always rendered for audio element (never hidden on mobile) -->
-      <PlayerBar />
-      <MobileBottomNav />
-
-      <FullScreenPlayer />
-      <ContextMenu />
-      <QueuePanel />
-      <LyricsPanel />
     {:else}
-      <!-- ========= DESKTOP LAYOUT ========= -->
-      <div class="app-layout">
-        <Sidebar />
+      <!-- Responsive presentation keeps browse/player instances stable on resize. -->
+      <div class="app-layout" class:compact={$isMobile}>
+        <div class="desktop-sidebar"><Sidebar /></div>
         <MainView />
         <LyricsPanel />
         <QueuePanel />
@@ -139,6 +123,7 @@
         <ContextMenu />
       </div>
       <PlayerBar />
+      {#if $isMobile}<MobileBottomNav />{/if}
       <KeyboardShortcuts />
       <KeyboardShortcutsHelp />
     {/if}
@@ -220,20 +205,7 @@
     overflow: hidden;
   }
 
-  /* ========= MOBILE LAYOUT ========= */
-  .mobile-layout {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    background-color: var(--bg-base);
-  }
-
-  .mobile-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: hidden;
-  }
+  .app-layout { min-height:0; min-width:0; }
+  .desktop-sidebar { display:flex; }
+  .compact .desktop-sidebar { display:none; }
 </style>

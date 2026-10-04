@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { get } from "svelte/store";
     import {
         togglePlay,
@@ -47,6 +48,7 @@
     let isMuted = false;
 
     function handleKeydown(e: KeyboardEvent) {
+        if (!get(desktopEffectsEnabled) || e.defaultPrevented) return;
         // Check if shortcuts help is open - only allow Escape
         if (get(isShortcutsHelpVisible)) {
             if (e.key === "Escape") {

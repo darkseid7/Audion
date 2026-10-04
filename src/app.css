@@ -19,6 +19,7 @@
   /* Higher contrast for WCAG compliance (4.5:1 on #121212) */
 
   --border-color: #404040;
+  --border-subtle: var(--border-color);
   --error-color: #f15e6c;
 
   /* Toast/notification colors - can be customized per theme */
@@ -321,7 +322,7 @@ a:hover {
   display: none !important;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   :root {
     --sidebar-width: 0px;
     --player-height: 64px;
@@ -375,4 +376,13 @@ a:hover {
   .carousel-container::-webkit-scrollbar {
     display: none;
   }
+}
+/* Touch ergonomics follow pointer capability, not desktop native authorization. */
+@media (pointer: coarse) {
+  button, a, [role="button"], input, select { min-height:44px; }
+  button, [role="button"] { min-width:44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --transition-fast:0ms; --transition-normal:0ms; }
+  *, *::before, *::after { transition-duration:0ms !important; animation-duration:0ms !important; animation-delay:0ms !important; scroll-behavior:auto !important; }
 }

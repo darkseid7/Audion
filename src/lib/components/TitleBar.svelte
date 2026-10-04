@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { get } from "svelte/store";
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount } from "svelte";
     import { getCurrentWindow } from "@tauri-apps/api/window";
     import { goBack, goForward, navigationHistory } from "$lib/stores/view";
@@ -12,27 +14,30 @@
     import MenuBar from "./MenuBar.svelte";
     import Breadcrumbs from "./Breadcrumbs.svelte";
 
-    const appWindow = isTauri() ? getCurrentWindow() : null;
+    let appWindow: ReturnType<typeof getCurrentWindow> | null = null;
     let isMaximized = false;
 
     function minimize() {
-        if (!appWindow) return;
+        if (!get(desktopEffectsEnabled) || !appWindow) return;
         appWindow.minimize();
     }
 
     function minimizeToTray() {
-        if (!appWindow) return;
+        if (!get(desktopEffectsEnabled) || !appWindow) return;
         appWindow.hide();
     }
 
     async function toggleMaximize() {
-        if (!appWindow) return;
-        await appWindow.toggleMaximize();
-        isMaximized = await appWindow.isMaximized();
+        if (!get(desktopEffectsEnabled) || !appWindow) return;
+        const nativeWindow = appWindow;
+        await nativeWindow.toggleMaximize();
+        if (!get(desktopEffectsEnabled) || appWindow !== nativeWindow) return;
+        const maximized = await nativeWindow.isMaximized();
+        if (get(desktopEffectsEnabled) && appWindow === nativeWindow) isMaximized = maximized;
     }
 
     function close() {
-        if (!appWindow) return;
+        if (!get(desktopEffectsEnabled) || !appWindow) return;
         appWindow.close();
     }
 
@@ -68,6 +73,7 @@
     }
 
     function handleGlobalKeydown(e: KeyboardEvent) {
+        if (!get(desktopEffectsEnabled)) return;
         // Ignore if active element is an input or textarea (except for specific shortcuts)
         const tagName = document.activeElement?.tagName.toLowerCase();
         const isInput = tagName === "input" || tagName === "textarea";
@@ -90,21 +96,22 @@
     }
 
     onMount(() => {
-        if (!appWindow) {
-            return;
-        }
-
-        // Initial maximize state
-        appWindow.isMaximized().then((m) => (isMaximized = m));
+        if (!get(desktopEffectsEnabled) || !isTauri()) return;
+        appWindow = getCurrentWindow();
+        const nativeWindow = appWindow;
+        let active = true;
+        nativeWindow.isMaximized().then(m => { if (active && get(desktopEffectsEnabled)) isMaximized = m; });
 
         // Listen for resize to update maximize state
         let _resizeTimer: ReturnType<typeof setTimeout> | null = null;
-        const unlistenResize = appWindow.onResized(() => {
+        const unlistenResize = nativeWindow.onResized(() => {
+            if (!active || !get(desktopEffectsEnabled)) return;
             // Debounce rapid resize events to avoid triggering reactive loops
             if (_resizeTimer) clearTimeout(_resizeTimer);
             _resizeTimer = setTimeout(async () => {
                 try {
-                    isMaximized = await appWindow.isMaximized();
+                    const maximized = await nativeWindow.isMaximized();
+                    if (active && get(desktopEffectsEnabled)) isMaximized = maximized;
                 } catch (e) {
                     console.warn("[TitleBar] Failed to get maximize state:", e);
                 }
@@ -126,10 +133,13 @@
         window.addEventListener("keydown", handleGlobalKeydown);
 
         return () => {
+            active = false;
+            appWindow = null;
+            clearTimeout(searchDebounceTimer);
             unsubscribeSearch();
             unsubscribeNav();
             window.removeEventListener("keydown", handleGlobalKeydown);
-            unlistenResize.then((f) => f());
+            unlistenResize.then((f) => f()).catch(console.error);
             if (_resizeTimer) {
                 clearTimeout(_resizeTimer);
                 _resizeTimer = null;
@@ -138,6 +148,7 @@
     });
 </script>
 
+{#if $desktopEffectsEnabled}
 <div class="titlebar" class:mobile={$isMobile}>
     <div class="titlebar-left">
         <div class="left-controls">
@@ -443,6 +454,8 @@
         {/if}
     </div>
 </div>
+
+{/if}
 
 <style>
     .titlebar {

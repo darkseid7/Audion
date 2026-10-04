@@ -1,57 +1,50 @@
-import { writable, derived, get } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { isMiniPlayer } from '$lib/stores/ui';
 
-/**
- * Mobile detection and responsive state management.
- * Uses both CSS media queries (via matchMedia) and Tauri platform detection.
- */
-
+/** Viewport layout is presentation only; platform hints never grant native authority. */
 const MOBILE_BREAKPOINT = 768;
-
-// Core state: is the viewport mobile-sized?
+export function selectLayout(width: number): "compact" | "expanded" {
+    return width < MOBILE_BREAKPOINT ? "compact" : "expanded";
+}
 export const isMobileViewport = writable(false);
-
-// Is the sidebar drawer open on mobile?
 export const isMobileSidebarOpen = writable(false);
-
-// Platform detection (set once on init)
 export const isMobilePlatform = writable(false);
-
-// Combined: treat as mobile if viewport is small OR platform is mobile.
-// Exception: never switch to mobile layout while PIP mini player is active
-// (Tauri resizes the window to ~360px for PIP, which would trigger the breakpoint).
+// Native mini-player resizing must not turn the desktop into a phone layout.
 export const isMobile = derived(
-    [isMobileViewport, isMobilePlatform, isMiniPlayer],
-    ([$viewport, $platform, $pip]) => !$pip && ($viewport || $platform)
+    [isMobileViewport, isMiniPlayer],
+    ([$viewport, $pip]) => !$pip && $viewport
 );
-
-let mediaQuery: MediaQueryList | null = null;
-
-export function initMobileDetection() {
-    // 1. Media query detection
-    if (typeof window !== 'undefined') {
-        mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`);
+let stopDetection: (() => void) | undefined;
+export function initMobileDetection(): () => void {
+    stopDetection?.();
+    if (typeof window === 'undefined') return () => {};
+    const mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const update = () => {
         isMobileViewport.set(mediaQuery.matches);
-
-        const handler = (e: MediaQueryListEvent) => {
-            isMobileViewport.set(e.matches);
-            // Auto-close sidebar when switching to desktop
-            if (!e.matches) {
-                isMobileSidebarOpen.set(false);
-            }
-        };
-
-        mediaQuery.addEventListener('change', handler);
-    }
-
-    // 2. Tauri platform detection
-    detectMobilePlatform();
+        if (!mediaQuery.matches) isMobileSidebarOpen.set(false);
+    };
+    const handler = (event: MediaQueryListEvent) => {
+        isMobileViewport.set(event.matches);
+        if (!event.matches) isMobileSidebarOpen.set(false);
+    };
+    update();
+    mediaQuery.addEventListener('change', handler);
+    let active = true;
+    const dispose = () => {
+        if (!active) return;
+        active = false;
+        mediaQuery.removeEventListener('change', handler);
+        if (stopDetection === dispose) stopDetection = undefined;
+    };
+    stopDetection = dispose;
+    void detectMobilePlatform();
+    return dispose;
 }
 
 async function detectMobilePlatform() {
     try {
         // Check if we're on Android/iOS via Tauri
-        const { type, arch } = await import('@tauri-apps/plugin-os');
+        const { type } = await import('@tauri-apps/plugin-os');
         const osType = type();
         if (osType === 'android' || osType === 'ios') {
             isMobilePlatform.set(true);

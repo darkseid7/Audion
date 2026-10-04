@@ -1,4 +1,5 @@
 <script lang="ts">
+ import { controllerOverlay } from "$lib/application/controller-ui";
  import ControllerFeedback from "./ControllerFeedback.svelte";
  import { controllerState } from "$lib/application/controller/bootstrap";
  import { canExecute, sameOutput } from "$lib/application/capabilities";
@@ -8,7 +9,7 @@
  function select(output: OutputRef) { return execute({ type: "select_output", output }); }
 </script>
 <div class="connect-overlay" role="presentation" on:click|self={close}>
- <section class="connect-panel" aria-label="PC outputs">
+ <div class="connect-panel" role="dialog" aria-modal="true" tabindex="-1" use:controllerOverlay={{close}} aria-label="PC outputs">
   <header><h2>Connect to a device</h2><button on:click={close} aria-label="Close outputs">×</button></header>
   <p>Playback stays on your PC or its Squeeze player.</p>
   {#if $controllerState.snapshot?.output.kind === "desktop_only"}<p role="status">{$controllerState.snapshot.output.reason}. Choose a supported output on the PC.</p>{/if}
@@ -20,6 +21,11 @@
   {/each}
   <ControllerFeedback />
   <p class="unavailable" aria-disabled="true">Cloud playback is unavailable on this controller.</p>
- </section>
+ </div>
 </div>
-<style>.connect-overlay{position:fixed;inset:0;background:#0008;z-index:200;display:grid;place-items:center;padding:var(--spacing-lg)}.connect-panel{background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:var(--spacing-lg);width:min(100%,440px)}header{display:flex;align-items:center;justify-content:space-between}h2{font-size:1.25rem}p,small{color:var(--text-secondary);font-size:.85rem}button{color:var(--text-primary);background:var(--bg-highlight);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px;cursor:pointer}.device-card{display:flex;gap:16px;align-items:center;width:100%;margin-top:12px;text-align:left}.active{border-color:var(--accent-primary);color:var(--accent-primary)}small{display:block;margin-top:4px}.unavailable{margin-top:20px}button:disabled{opacity:.45;cursor:not-allowed}</style>
+<style>.connect-overlay{position:fixed;inset:0;background:#0008;z-index:200;display:grid;place-items:center;padding:var(--spacing-lg)}.connect-panel{background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:var(--spacing-lg);width:min(100%,440px)}header{display:flex;align-items:center;justify-content:space-between}h2{font-size:1.25rem}p,small{color:var(--text-secondary);font-size:.85rem}button{color:var(--text-primary);background:var(--bg-highlight);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px;cursor:pointer}.device-card{display:flex;gap:16px;align-items:center;width:100%;margin-top:12px;text-align:left}.active{border-color:var(--accent-primary);color:var(--accent-primary)}small{display:block;margin-top:4px}.unavailable{margin-top:20px}button:disabled{opacity:.45;cursor:not-allowed}
+ .connect-overlay { padding:calc(16px + var(--safe-area-top)) calc(16px + var(--safe-area-right)) calc(16px + var(--safe-area-bottom)) calc(16px + var(--safe-area-left)); }
+ .connect-panel { max-height:100%; overflow:auto; overscroll-behavior:contain; min-width:0; }
+ button { min-width:44px; min-height:44px; }
+ .device-card span { min-width:0; overflow-wrap:anywhere; }
+</style>

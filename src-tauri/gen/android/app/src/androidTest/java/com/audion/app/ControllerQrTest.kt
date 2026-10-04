@@ -38,6 +38,42 @@ class ControllerQrTest {
             assertEquals("opaque invitation", scenario.result.resultData?.getStringExtra("invitation"))
         }
     }
+    @Test fun oversizedPasteDoesNotReplaceOrRetainAnInvitation() {
+        open().use { scenario ->
+            onView(withHint("Paste invitation")).perform(replaceText("opaque invitation"), closeSoftKeyboard())
+            onView(withHint("Paste invitation")).perform(replaceText("x".repeat(2049)), closeSoftKeyboard())
+            onView(withHint("Paste invitation")).check(matches(withText("opaque invitation")))
+            scenario.recreate()
+            onView(withHint("Paste invitation")).check(matches(withText("opaque invitation")))
+        }
+    }
+    @Test fun multibyteBudgetIsExactAndNeverSplitsAnEmoji() {
+        val exact = "😀".repeat(512)
+        open().use { scenario ->
+            onView(withHint("Paste invitation")).perform(replaceText(exact), closeSoftKeyboard())
+            onView(withHint("Paste invitation")).perform(replaceText(exact + "é"), closeSoftKeyboard())
+            scenario.recreate()
+            onView(withHint("Paste invitation")).check(matches(withText(exact)))
+            onView(withText("Use invitation")).perform(click())
+            assertEquals(exact, scenario.result.resultData?.getStringExtra("invitation"))
+        }
+    }
+    @Test fun savedStateRejectsOversizedInputEvenIfTheEditFilterIsBypassed() {
+        open().use { scenario ->
+            scenario.onActivity { activity ->
+                val field = ControllerCaptureActivity::class.java.getDeclaredField("input").apply { isAccessible = true }
+                val input = field.get(activity) as android.widget.EditText
+                assertFalse(input.isSaveEnabled)
+                input.filters = emptyArray()
+                input.setText("😀".repeat(513))
+                val saved = android.os.Bundle()
+                ControllerCaptureActivity::class.java.getDeclaredMethod("onSaveInstanceState", android.os.Bundle::class.java).apply { isAccessible = true }.invoke(activity, saved)
+                assertEquals("", saved.getString("invitation"))
+            }
+            scenario.recreate()
+            onView(withHint("Paste invitation")).check(matches(withText("")))
+        }
+    }
     @Test fun deniedCameraKeepsPasteFallbackAvailable() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val device = UiDevice.getInstance(instrumentation)

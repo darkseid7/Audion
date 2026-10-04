@@ -1,4 +1,5 @@
 <script lang="ts">
+ import { controllerOverlay } from "$lib/application/controller-ui";
  import ControllerFeedback from "./ControllerFeedback.svelte";
  import { onDestroy } from "svelte";
  import { controllerState } from "$lib/application/controller/bootstrap";
@@ -15,7 +16,7 @@
  $: entries = $state.items as QueueEntry[];
  onDestroy(page.dispose);
 </script>
-{#if visible}<aside class="queue-panel" aria-label="Queue">
+{#if visible}<button class="queue-backdrop" tabindex="-1" aria-label="Dismiss queue" on:click={toggleQueue}></button><div class="queue-panel" role="dialog" aria-modal="true" tabindex="-1" use:controllerOverlay={{close:toggleQueue}} aria-label="Queue">
  {#if !hideheader}<header><h2>Queue</h2><button on:click={toggleQueue} aria-label="Close queue">×</button></header>{/if}
  <button disabled={!canExecute($controllerState,"queue_clear_upcoming")} on:click={() => execute({type:"queue_clear_upcoming"})}>Clear upcoming</button>
  <ControllerFeedback />
@@ -32,5 +33,11 @@
  {#if $state.loading}<p role="status">Loading queue…</p>{:else if !entries.length}<p>Queue is empty</p>{/if}
  {#if $state.hasEarlier}<p>Showing the latest 1,000 loaded entries.</p><button on:click={page.refresh}>Back to first page</button>{/if}
  {#if $state.nextCursor}<button on:click={page.more} disabled={$state.loading}>Load more queue entries</button>{/if}
-</aside>{/if}
-<style>.queue-panel{position:fixed;right:0;top:0;bottom:0;z-index:150;width:min(100%,430px);overflow:auto;background:var(--bg-elevated);border-left:1px solid var(--border-subtle);padding:var(--spacing-lg)}header,.queue-row{display:flex;align-items:center;gap:8px}header{justify-content:space-between}.queue-row{min-height:64px;border-bottom:1px solid var(--border-subtle)}.art{width:40px;height:40px;flex:none;border-radius:var(--radius-sm);overflow:hidden}.track{text-align:left;flex:1;min-width:0}strong,small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}small,p{color:var(--text-secondary)}.current .track{color:var(--accent-primary)}button{color:var(--text-primary);background:none;border:0;padding:10px;cursor:pointer}button:disabled{opacity:.4;cursor:not-allowed}</style>
+</div>{/if}
+<style>.queue-panel{position:fixed;right:0;top:0;bottom:0;z-index:150;width:min(100%,430px);overflow:auto;background:var(--bg-elevated);border-left:1px solid var(--border-subtle);padding:var(--spacing-lg)}header,.queue-row{display:flex;align-items:center;gap:8px}header{justify-content:space-between}.queue-row{min-height:64px;border-bottom:1px solid var(--border-subtle)}.art{width:40px;height:40px;flex:none;border-radius:var(--radius-sm);overflow:hidden}.track{text-align:left;flex:1;min-width:0}strong,small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}small,p{color:var(--text-secondary)}.current .track{color:var(--accent-primary)}button{color:var(--text-primary);background:none;border:0;padding:10px;cursor:pointer}button:disabled{opacity:.4;cursor:not-allowed}
+ .queue-backdrop { position:fixed; inset:0; z-index:149; background:#0008; border:0; }
+ .queue-panel { padding:calc(16px + var(--safe-area-top)) calc(16px + var(--safe-area-right)) calc(16px + var(--safe-area-bottom)) calc(16px + var(--safe-area-left)); overscroll-behavior:contain; }
+ button { min-height:44px; min-width:44px; }
+ .track { min-width:0; }
+ @media(max-width:767px) { .queue-panel { width:100%; } .queue-row { gap:4px; } .art { width:32px; height:32px; } }
+</style>

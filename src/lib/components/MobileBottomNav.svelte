@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { mobileSearchOpen } from "$lib/stores/mobile";
     import {
         currentView,
@@ -45,6 +46,7 @@
     }
 
     function handleTabClick(tab: MobileTab) {
+        if (!$desktopEffectsEnabled) return;
         // Close search when switching tabs
         mobileSearchOpen.set(false);
         clearSearch();
@@ -77,6 +79,7 @@
     }
 
     onMount(() => {
+        if (!$desktopEffectsEnabled) return;
         if (pluginSlot) {
             uiSlotManager.registerContainer("mobile:bottomnav", pluginSlot);
         }
@@ -85,6 +88,7 @@
         };
     });
 </script>
+{#if $desktopEffectsEnabled}
 
 <nav class="bottom-nav" class:has-player={!!$currentTrack}>
     <button
@@ -165,6 +169,7 @@
     <div class="plugin-slot" bind:this={pluginSlot}></div>
 </nav>
 
+{/if}
 <style>
     .bottom-nav {
         position: fixed;
@@ -179,6 +184,8 @@
         align-items: flex-start;
         padding-top: 6px;
         padding-bottom: env(safe-area-inset-bottom);
+        padding-left:var(--safe-area-left);
+        padding-right:var(--safe-area-right);
         z-index: 1000;
         -webkit-tap-highlight-color: transparent;
         user-select: none;

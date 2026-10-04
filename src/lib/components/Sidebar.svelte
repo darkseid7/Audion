@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
     import { onMount, createEventDispatcher } from "svelte";
     import {
         playlists,
@@ -158,7 +159,7 @@
     }
 
     // Reload track counts when playlists change
-    $: if ($playlists.length > 0) {
+    $: if ($desktopEffectsEnabled && $playlists.length > 0) {
         loadPlaylistTrackCounts();
     }
 
@@ -385,6 +386,7 @@
     }
 
     onMount(() => {
+        if (!$desktopEffectsEnabled) return;
         loadPlaylists();
         updates.checkUpdate();
 
@@ -399,6 +401,7 @@
         };
     });
 </script>
+{#if $desktopEffectsEnabled}
 
 <aside class="sidebar">
     <div class="sidebar-header">
@@ -870,6 +873,7 @@
     />
 {/if}
 
+{/if}
 <style>
     .sidebar {
         width: var(--sidebar-width);

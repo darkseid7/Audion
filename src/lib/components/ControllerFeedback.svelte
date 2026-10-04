@@ -20,9 +20,9 @@
  </section>
 {/if}
 <style>
- .action-feedback { flex-basis:100%; flex-shrink:0; max-height:160px; overflow:auto; padding:8px 12px; background:var(--bg-highlight); border-radius:var(--radius-sm); }
+ .action-feedback { flex-basis:100%; flex-shrink:0; max-height:min(160px,20dvh); overflow:auto; padding:8px 12px; background:var(--bg-highlight); border-radius:var(--radius-sm); }
  .action-feedback div { display:flex; align-items:center; gap:12px; }
- p { flex:1; margin:4px 0; font-size:.8rem; color:var(--text-secondary); }
+ p { flex:1; min-width:0; overflow-wrap:anywhere; margin:4px 0; font-size:.8rem; color:var(--text-secondary); }
  .error p { color:var(--error-color); }
- button { border:1px solid var(--border-subtle); border-radius:var(--radius-sm); background:none; color:var(--text-primary); padding:6px; cursor:pointer; }
+ button { min-height:44px; flex-shrink:0; border:1px solid var(--border-subtle); border-radius:var(--radius-sm); background:none; color:var(--text-primary); padding:6px; cursor:pointer; }
 </style>

@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.text.InputFilter
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -35,7 +36,18 @@ class ControllerCaptureActivity : AppCompatActivity() {
         status = TextView(this).apply { text = "Scan the PC invitation or paste it below." }
         input = EditText(this).apply {
             hint = "Paste invitation"
-            setText(savedInstanceState?.getString("invitation"))
+            // Own the only saved copy; automatic view state must not retain another raw input.
+            isSaveEnabled = false
+            filters = arrayOf(InputFilter { source, start, end, destination, dstart, dend ->
+                val insertion = source.subSequence(start, end)
+                if (ControllerInputBudget.permitsEdit(destination, dstart, dend, insertion)) null
+                else {
+                    status.text = "The invitation is too large or invalid. Copy a new invitation from the PC."
+                    // Reject the complete edit, never accept a truncated invitation.
+                    destination.subSequence(dstart, dend)
+                }
+            })
+            setText(ControllerInputBudget.retain(savedInstanceState?.getString("invitation")))
             setSelectAllOnFocus(true)
         }
         layout.addView(status)
@@ -57,7 +69,7 @@ class ControllerCaptureActivity : AppCompatActivity() {
             .setPrompt("Scan the invitation displayed on your PC"))
     }
     private fun finishWithInvitation(text: String) {
-        if (text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 2048) {
+        if (text.isBlank() || ControllerInputBudget.retain(text) != text) {
             status.text = "The invitation is empty or too large. Copy a new invitation from the PC."
             return
         }
@@ -65,7 +77,7 @@ class ControllerCaptureActivity : AppCompatActivity() {
         finish()
     }
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putString("invitation", input.text.toString())
+        outState.putString("invitation", ControllerInputBudget.retain(input.text.toString()))
         super.onSaveInstanceState(outState)
     }
 }

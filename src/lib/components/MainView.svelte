@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { desktopEffectsEnabled } from "$lib/application/bootstrap";
+    import { albumViewTransitionDuration } from "$lib/stores/album-view";
     import {
         currentView,
         goToTracks,
@@ -128,6 +130,7 @@
     }
 
     async function handleDrop(event: any) {
+        if (!get(desktopEffectsEnabled)) return;
         try {
             if (event && typeof event.preventDefault === "function")
                 event.preventDefault();
@@ -301,6 +304,8 @@
 
     // Add native capture-phase listeners to help when webview swallows events
     onMount(() => {
+        if (!get(desktopEffectsEnabled)) return;
+        let active = true;
         const isOverLyricsPanel = (e: DragEvent): boolean =>
             e.target instanceof Element && e.target.closest('.lyrics-panel') !== null;
 
@@ -352,9 +357,12 @@
 
         (async () => {
             try {
+                if (!active || !get(desktopEffectsEnabled)) return;
                 const webview = await getCurrentWebview();
+                if (!active || !get(desktopEffectsEnabled)) return;
                 unlistenWebview = await webview.onDragDropEvent(
                     async (event) => {
+                        if (!active || !get(desktopEffectsEnabled)) return;
                         console.log(
                             "[DND] webview onDragDropEvent",
                             event.payload.type,
@@ -437,12 +445,14 @@
                         }
                     },
                 );
+                if (!active || !get(desktopEffectsEnabled)) { unlistenWebview(); unlistenWebview = null; }
             } catch (e) {
                 console.warn("[DND] getCurrentWebview.onDragDropEvent not available", e);
             }
         })();
 
         return () => {
+            active = false;
             window.removeEventListener("dragenter", nativeEnter, true);
             window.removeEventListener("dragover", nativeOver, true);
             window.removeEventListener("dragleave", nativeLeave, true);
@@ -454,12 +464,14 @@
     });
 
     function handleDragOver(event: DragEvent) {
+        if (!get(desktopEffectsEnabled)) return;
         if (!hasFiles(event.dataTransfer)) return;
         event.preventDefault();
         isDragging.set(true);
     }
 
     function handleDragEnter(event: DragEvent) {
+        if (!get(desktopEffectsEnabled)) return;
         if (!hasFiles(event.dataTransfer)) return;
         event.preventDefault();
         dragCounter.update(n => {
@@ -498,8 +510,8 @@
     on:drop={handleDrop}
 >
     {#if $isDragging}
-        <div class="drop-overlay" transition:fade={{ duration: 200 }}>
-            <div class="drop-content" in:fly={{ y: 20, duration: 400, delay: 100 }}>
+        <div class="drop-overlay" transition:fade={{ duration: albumViewTransitionDuration() === 0 ? 0 : 200 }}>
+            <div class="drop-content" in:fly={{ y: 20, duration: albumViewTransitionDuration() === 0 ? 0 : 400, delay: albumViewTransitionDuration() === 0 ? 0 : 100 }}>
                 {#if $isDraggingLyrics}
                     <div class="drop-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -527,7 +539,7 @@
     {/if}
 
     {#if dropError}
-        <div class="drop-error" transition:fly={{ y: -20, duration: 300 }}>
+        <div class="drop-error" transition:fly={{ y: -20, duration: albumViewTransitionDuration() === 0 ? 0 : 300 }}>
             <div class="error-icon">
                 <svg
                     viewBox="0 0 24 24"
@@ -558,7 +570,7 @@
         </div>
     {/if}
 
-    <GlobalShortcuts />
+    {#if $desktopEffectsEnabled}<GlobalShortcuts />{/if}
 
     <!-- Mobile: Search bar + library sub-tabs (Spotify pill style) -->
     {#if $isMobile && isLibraryView}

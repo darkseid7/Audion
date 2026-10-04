@@ -2,11 +2,14 @@
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
-  import { bootstrapApplication, defaultBootstrapLoaders, desktopEffectsEnabled, migrationStatus, type ApplicationHandle } from "$lib/application/bootstrap";
+  import { applicationMode, bootstrapApplication, defaultBootstrapLoaders, desktopEffectsEnabled, migrationStatus, type ApplicationHandle } from "$lib/application/bootstrap";
   import type { ApplicationMode } from "$lib/application/types";
   import { theme } from "$lib/stores/theme";
   import { isAndroid, isTauri, initPlatformDetection } from "$lib/api/tauri";
   import { initMobileDetection, isMobile, mobileSearchOpen } from "$lib/stores/mobile";
+  import { handleControllerBack } from "$lib/application/controller-ui";
+  import { lyricsVisible } from "$lib/stores/lyrics";
+  import { isMobileSidebarOpen } from "$lib/stores/mobile";
   import { goBack, navigationHistory } from "$lib/stores/view";
   import { isFullScreen, isQueueVisible, contextMenu, isMiniPlayer } from "$lib/stores/ui";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -18,12 +21,14 @@
   import { setupI18n } from "$lib/i18n";
   import { isLoading } from "svelte-i18n";
   import "../app.css";
+  let stopMobileDetection: (() => void) | undefined;
   let application: ApplicationHandle | undefined;
   let destroyed = false;
   let ready = false;
   let startupError = "";
   function setupAndroidBackHandler() {
     (window as any).__audionHandleBack = (): boolean => {
+      if (get(applicationMode) === "controller") return handleControllerBack();
       // 1. Close context menu if open
       const ctx = get(contextMenu);
       if (ctx.visible) {
@@ -42,6 +47,9 @@
         isQueueVisible.set(false);
         return true;
       }
+
+      if (get(lyricsVisible)) { lyricsVisible.set(false); return true; }
+      if (get(isMobileSidebarOpen)) { isMobileSidebarOpen.set(false); return true; }
 
       // 4. Close mobile search
       if (get(mobileSearchOpen)) {
@@ -69,7 +77,7 @@
   onMount(async () => {
     theme.initialize();
     setupI18n(localStorage.getItem("audion_language") || undefined);
-    initMobileDetection();
+    stopMobileDetection = initMobileDetection();
     if (!isTauri()) { ready = true; return; }
     try {
       await initPlatformDetection();
@@ -83,7 +91,8 @@
   });
   function dispose() {
     destroyed = true;
-    cleanupAndroidBackHandler();
+    if (typeof window !== "undefined") cleanupAndroidBackHandler();
+    stopMobileDetection?.();
     void application?.dispose();
   }
   onDestroy(dispose);
@@ -93,7 +102,7 @@
 {#if $migrationStatus}<div class="migration-banner" role="status">{$migrationStatus}</div>{/if}
 {#if startupError}<p role="alert">{startupError}</p>{/if}
 {#if !$isLoading && ready}
-  {#if !$isMobile && !$isMiniPlayer}<TitleBar />{/if}
+  {#if $desktopEffectsEnabled && !$isMobile && !$isMiniPlayer}<TitleBar />{/if}
   <ConfirmDialog />
   <PromptDialog />
   {#if $desktopEffectsEnabled}
@@ -101,10 +110,10 @@
     <SyncProgressOverlay />
     <LoginModal />
   {/if}
-  <div class="app-content" class:mobile={$isMobile} class:pip={$isMiniPlayer}><slot /></div>
+  <div class="app-content" class:desktop-titlebar={$desktopEffectsEnabled && !$isMobile && !$isMiniPlayer}><slot /></div>
 {/if}
 <style>
   .migration-banner { position: fixed; top: 48px; left: 0; right: 0; background: var(--bg-secondary); color: var(--text-primary); padding: 0.75rem 1rem; text-align: center; z-index: 999; }
-  .app-content { padding-top: 48px; height: 100vh; width: 100%; overflow: hidden; }
-  .app-content.mobile, .app-content.pip { padding-top: 0; }
+  .app-content { height: 100vh; height: 100dvh; width: 100%; overflow: hidden; }
+  .app-content.desktop-titlebar { padding-top: 48px; }
 </style>
