@@ -117,6 +117,7 @@ export async function pairController(): Promise<void> {
 /** Only local UI preferences and a native scope: no music DB, engine or queue restoration. */
 export async function bootstrapController(): Promise<ApplicationHandle> {
     const native = nativeBridge(), session = controllerSession(native);
+    active?.suspendController();
     active = session;
     const unsubscribe = session.state.subscribe(value => {
         if (active === session)
@@ -124,9 +125,11 @@ export async function bootstrapController(): Promise<ApplicationHandle> {
     });
     try {
         await session.initialize();
+        if (active !== session) throw new Error("Controller bootstrap superseded");
     }
     catch (error) {
         unsubscribe();
+        session.suspendController();
         if (active === session)
             active = undefined;
         throw error;
@@ -141,18 +144,14 @@ export async function bootstrapController(): Promise<ApplicationHandle> {
     catch {
     }
     hosts.set([...known]);
-    if (selected)
-        void session.connectController(selected);
     const visibility = () => {
         if (active !== session)
             return;
-        if (document.visibilityState === "hidden")
-            session.suspendController();
-        else if (selected)
-            void session.connectController(selected);
+        session.visibilityChanged(typeof document === "undefined" || document.visibilityState !== "hidden", selected);
     };
     if (typeof document !== "undefined")
         document.addEventListener("visibilitychange", visibility);
+    visibility();
     return { port: createControllerAdapter(native), async dispose() {
             unsubscribe();
             if (typeof document !== "undefined")

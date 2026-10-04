@@ -49,12 +49,17 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     let value: ControllerState = { currentHostId: null, snapshot: null, grants: null, ready: false, status: "disconnected" };
     const state = writable(value), listeners = new Set<(update: ApplicationUpdate) => void>(), media = new Set<ArtworkHandle>();
     let generation = 0, scope: Promise<string> | undefined, timer: ReturnType<typeof setTimeout> | undefined, attempts = 0;
+    let foreground = true;
+    let pairing: { generation: number; phase: "capture" | "awaiting-foreground" | "approval"; wake?: () => void } | undefined;
     const publish = (patch: Partial<ControllerState>) => {
         value = { ...value, ...patch };
         state.set(value);
     };
     const invalidate = () => {
         generation++;
+        const cancelled = pairing;
+        pairing = undefined;
+        cancelled?.wake?.();
         if (timer)
             clearTimeout(timer);
         timer = undefined;
@@ -213,6 +218,17 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             void fence(g).then(f => native.suspend(f)).catch(() => {
             });
     }
+    // Visibility preserves only generation-owned local capture/validation.
+    // Explicit suspend remains cancellation, including during capture.
+    function visibilityChanged(visible: boolean, resumeHostId: string | null): void {
+        foreground = visible;
+        if (pairing?.generation === generation && pairing.phase !== "approval") {
+            if (visible) pairing.wake?.();
+            return;
+        }
+        if (!visible) suspendController();
+        else if (!pairing && resumeHostId) void connectController(resumeHostId);
+    }
     async function forgetController(hostId: string): Promise<void> {
         const g = invalidate();
         publish({ currentHostId: null, status: "disconnected" });
@@ -220,7 +236,9 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     }
     async function pairController(onPaired: (hostId: string) => void = () => {}): Promise<ControllerConnectionReceipt | undefined> {
         const g = invalidate();
-        publish({ status: "pairing" });
+        const operation: NonNullable<typeof pairing> = { generation: g, phase: "capture" };
+        pairing = operation;
+        publish({ status: "pairing", error: undefined });
         try {
             const f = await fence(g);
             const input = await native.scan(f);
@@ -233,6 +251,17 @@ export function createControllerSession(native: ControllerNativeBridge, options:
                 throw failure("invalid_request", "Invalid invitation fingerprint. Create a new invitation on the PC.");
             }
             publish({ pairingFingerprint: input.fingerprint });
+            // Publishing is synchronous: subscribers can hide, cancel or replace us.
+            current(g);
+            while (!foreground) {
+                operation.phase = "awaiting-foreground";
+                await new Promise<void>(resolve => { operation.wake = resolve; });
+                operation.wake = undefined;
+                current(g);
+            }
+            current(g);
+            // No await/publication between the foreground check and native entry.
+            operation.phase = "approval";
             const paired = await native.pair(f, "Android controller");
             current(g);
             // Catalog membership is committed before connection, independently of selection.
@@ -241,8 +270,12 @@ export function createControllerSession(native: ControllerNativeBridge, options:
             return await connectController(paired.hostId);
         }
         catch (error) {
-            disconnected(error, g);
+            // A local capture failure must not start old-host network retry hidden.
+            disconnected(error, g, foreground);
             return;
+        }
+        finally {
+            if (pairing === operation) pairing = undefined;
         }
     }
     const port: ApplicationPort = {
@@ -333,7 +366,7 @@ export function createControllerSession(native: ControllerNativeBridge, options:
     return {
         port, state: readonly(state), initialize: async () => {
             await fence(generation);
-        }, connectController, updateEndpoint, suspendController, forgetController, pairController
+        }, connectController, updateEndpoint, suspendController, visibilityChanged, forgetController, pairController
     };
 }
 const sessions = new WeakMap<ControllerNativeBridge, ReturnType<typeof createControllerSession>>();
