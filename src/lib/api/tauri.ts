@@ -1,4 +1,5 @@
 // Tauri API bindings for Rlist
+import { convertFileSrc as convertTauriFileSrc } from "@tauri-apps/api/core";
 
 // Check if we're running in Tauri environment
 export function isTauri(): boolean {
@@ -89,9 +90,6 @@ export async function updateWindowsThumbarState(
 // Dynamic imports to avoid SSR issues
 let invokeFunc: typeof import("@tauri-apps/api/core").invoke | null = null;
 let openFunc: typeof import("@tauri-apps/plugin-dialog").open | null = null;
-let convertFileSrcFunc:
-  | typeof import("@tauri-apps/api/core").convertFileSrc
-  | null = null;
 let listenFunc: typeof import("@tauri-apps/api/event").listen | null = null;
 
 async function ensureTauriLoaded() {
@@ -101,7 +99,6 @@ async function ensureTauriLoaded() {
   if (!invokeFunc) {
     const core = await import("@tauri-apps/api/core");
     invokeFunc = core.invoke;
-    convertFileSrcFunc = core.convertFileSrc;
   }
   if (!openFunc) {
     const dialog = await import("@tauri-apps/plugin-dialog");
@@ -124,10 +121,10 @@ async function invoke<T>(
 // Convert file path to asset:// URL for WebView
 // Note: For audio on Linux, use getAudioSrc() which returns file:// URLs
 export function convertFileSrc(filePath: string): string {
-  if (!convertFileSrcFunc) {
-    throw new Error("Tauri not loaded");
+  if (!isTauri()) {
+    throw new Error("Not running in Tauri environment");
   }
-  return convertFileSrcFunc(filePath);
+  return convertTauriFileSrc(filePath);
 }
 
 // Event listener helper — used by the progressive scan pipeline
@@ -794,7 +791,7 @@ export async function getAudioSrc(filePath: string): Promise<string> {
     return `file://${filePath}`;
   }
 
-  return convertFileSrcFunc!(filePath);
+  return convertTauriFileSrc(filePath);
 }
 
 // Format duration from seconds to MM:SS
