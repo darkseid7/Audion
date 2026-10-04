@@ -2737,7 +2737,7 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
 
 
 // Clear upcoming queue (keep history)
-export async function clearUpcoming(): Promise<void> {
+export async function clearUpcoming(): Promise<readonly number[]> {
   const plan = readQueuePlan();
   const currentIdx = plan.queueIndex;
   const history = get(shuffle)
@@ -2760,6 +2760,7 @@ export async function clearUpcoming(): Promise<void> {
     if (mac && current) await runOwnedSqueeze(mac, () => squeezeUpdateQueue(mac, plan.queue.map(t => t.id), current.id, plan.queue[plan.queueIndex]?.id === current.id ? plan.queueIndex : undefined, sourceIndices));
   }
   commitQueuePlan(plan);
+  return sourceIndices;
 }
 
 

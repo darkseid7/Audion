@@ -164,7 +164,13 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess, pcName
           const entries = [...value.queue]; const [moved] = entries.splice(from, 1); entries.splice(to, 0, moved);
           await player.reorderQueue(from, to); pendingEntries = entries; break;
         }
-        case "queue_clear_upcoming": await player.clearUpcoming(); break;
+        case "queue_clear_upcoming": {
+          const entries = [...value.queue];
+          const sourceIndices = await player.clearUpcoming();
+          // Clear preserves physical order; no removal must not revise the queue.
+          if (sourceIndices.length !== entries.length) pendingEntries = sourceIndices.map(index => entries[index]);
+          break;
+        }
         case "queue_play": await player.playFromQueue(index(intent.entryId)); break;
         case "select_output": return fail("unsupported", "Output selection must use coordinator");
       }
@@ -192,7 +198,7 @@ export function createDesktopAdapter(localLibrary?: DesktopLibraryAccess, pcName
         case "seek": return player.seek(intent.seconds / get(player.duration)); case "set_volume": return player.setVolume(intent.volume);
         case "set_shuffle": if (get(player.shuffle) !== intent.enabled) await player.toggleShuffle(); return;
         case "set_repeat": return player.setRepeatMode(intent.mode);
-        case "queue_clear_upcoming": return player.clearUpcoming();
+        case "queue_clear_upcoming": await player.clearUpcoming(); return;
         default: fail("unsupported", "This command is unavailable on legacy cloud output");
       }
     }) : execute(intent),
